@@ -1,0 +1,31 @@
+[package]
+name = "orbit-rustls"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-shared rustls state over Orbit shared memory."
+license.workspace = true
+repository.workspace = true
+keywords = ["rustls", "tls", "shm", "fleet", "orbit"]
+categories = ["concurrency", "network-programming"]
+exclude.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["rustls_0_23"]
+rustls_0_23 = ["dep:rustls_0_23"]
+rustls_0_24 = ["dep:rustls_0_24"]
+
+[dependencies]
+orbit-core.workspace = true
+rustls_0_23 = { workspace = true, optional = true }
+rustls_0_24 = { workspace = true, optional = true }
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+nix.workspace = true

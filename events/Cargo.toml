@@ -1,0 +1,20 @@
+[package]
+name = "orbit-events"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-shared topic event streams over Orbit rings."
+license.workspace = true
+repository.workspace = true
+keywords = ["event", "shm", "fleet", "orbit", "ring"]
+categories = ["concurrency", "data-structures"]
+documentation = "https://docs.rs/orbit-events"
+exclude.workspace = true
+
+[dependencies]
+bytes.workspace = true
+orbit-core.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+nix.workspace = true

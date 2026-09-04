@@ -1,0 +1,15 @@
+[package]
+name = "orbit-metrics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Metrics snapshot families over orbit-core rings."
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/orbit-metrics"
+keywords = ["metrics", "shm", "fleet", "orbit", "ring"]
+exclude.workspace = true
+
+[dependencies]
+bytes.workspace = true
+orbit-core.workspace = true

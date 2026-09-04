@@ -1,0 +1,81 @@
+[package]
+name = "orbitive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["shared-memory", "ipc", "concurrency", "runtime", "fleet"]
+categories = ["concurrency", "data-structures"]
+documentation = "https://docs.rs/orbitive"
+exclude.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+cache = ["dep:orbit-cache"]
+lock = ["dep:orbit-lock"]
+events = ["dep:orbit-events"]
+metrics = ["dep:orbit-metrics"]
+rustls = ["rustls_0_23"]
+rustls_0_23 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_23"]
+rustls_0_24 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_24"]
+full = ["cache", "events", "metrics", "lock", "rustls"]
+
+[dependencies]
+orbit-core.workspace = true
+orbit-cache = { workspace = true, optional = true }
+orbit-lock = { workspace = true, optional = true }
+orbit-events = { workspace = true, optional = true }
+orbit-metrics = { workspace = true, optional = true }
+orbit-rustls = { workspace = true, optional = true }
+
+[workspace]
+members = [
+    "cache",
+    "cli",
+    "events",
+    "lock",
+    "rustls",
+    "core",
+    "metrics",
+]
+resolver = "3"
+
+
+[workspace.package]
+version = "0.2.2"
+edition = "2024"
+authors = ["ilker Arabaci <iarabaci@claviron.dev>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/iadev09/orbitive"
+description = "Bounded same-host runtime state for process fleets."
+exclude = [
+    "ARCHITECTURE.md",
+    "*.local.md",
+    "FINDINGS.md",
+    "VISION.md",
+    "Dockerfile",
+    "Justfile",
+]
+
+[workspace.dependencies]
+orbit-core = { version = "0.2.2", path = "core", default-features = false }
+orbit-cache = { version = "0.2.2", path = "cache", default-features = false }
+orbit-lock = { version = "0.2.2", path = "lock", default-features = false }
+orbit-events = { version = "0.2.2", path = "events", default-features = false }
+orbit-metrics = { version = "0.2.2", path = "metrics", default-features = false }
+orbit-rustls = { version = "0.2.2", path = "rustls", default-features = false }
+
+bytes = "1.11"
+criterion = "0.8.2"
+dashmap = "6.1"
+libc = "0.2"
+lru = "0.18"
+netid64 = "0.1.1"
+nix = { version = "0.31", features = ["process", "signal", "user", "fs"] }
+rustls_0_23 = { package = "rustls", version = "0.23.43", default-features = false, features = ["std"] }
+rustls_0_24 = { package = "rustls", version = "0.24.0-dev.1", default-features = false }
+tracing = "0.1.44"

@@ -1,0 +1,23 @@
+[package]
+name = "orbit-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-aware shared-memory rings over POSIX shared memory."
+license.workspace = true
+repository.workspace = true
+keywords = ["fleet", "atomic", "orbital", "shm", "distributed"]
+categories = ["concurrency", "data-structures"]
+documentation = "https://docs.rs/orbit-core"
+exclude.workspace = true
+
+[dependencies]
+dashmap.workspace = true
+bytes.workspace = true
+netid64.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+nix.workspace = true
