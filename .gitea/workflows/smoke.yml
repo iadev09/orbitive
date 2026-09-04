@@ -1,0 +1,14 @@
+name: orbit-smoke
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  native-arm64:
+    runs-on: rust-ci-native
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Orbit smoke test
+        run: just smoke
