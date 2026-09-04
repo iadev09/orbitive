@@ -24,6 +24,6 @@ jobs:
           if [ "$(uname -s)" = "FreeBSD" ]; then
             just smoke-freebsd
           else
-            test "${CARGO_BUILD_TARGET:-}" = "x86_64-unknown-freebsd"
+            test "${CARGO_BUILD_TARGET:-}" = "aarch64-unknown-freebsd"
             cargo build --workspace --all-targets --locked
           fi
