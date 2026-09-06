@@ -130,17 +130,17 @@ fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
 
-fn lane_count_for(spec: RingSpec, fleet_size: u8) -> std::io::Result<usize> {
-    if fleet_size == 0 {
-        return Err(invalid_input("ShmRing fleet size must be > 0"));
+fn lane_count_for(spec: RingSpec, fleet_capacity: u16) -> std::io::Result<usize> {
+    if fleet_capacity == 0 {
+        return Err(invalid_input("ShmRing fleet capacity must be > 0"));
     }
     Ok(match spec.topology {
         RingTopology::Shared | RingTopology::SharedOrdered => 1,
-        RingTopology::PerNode => usize::from(fleet_size),
+        RingTopology::PerNode => usize::from(fleet_capacity),
     })
 }
 
-fn checked_layout(spec: RingSpec, fleet_size: u8) -> std::io::Result<(usize, usize, usize)> {
+fn checked_layout(spec: RingSpec, fleet_capacity: u16) -> std::io::Result<(usize, usize, usize)> {
     if spec.capacity == 0 {
         return Err(invalid_input("ShmRing capacity must be > 0"));
     }
@@ -161,7 +161,7 @@ fn checked_layout(spec: RingSpec, fleet_size: u8) -> std::io::Result<(usize, usi
     if slot_stride > u32::MAX as usize {
         return Err(invalid_input("ShmRing slot stride must fit in u32"));
     }
-    let lane_count = lane_count_for(spec, fleet_size)?;
+    let lane_count = lane_count_for(spec, fleet_capacity)?;
     let lane_headers_size = lane_count
         .checked_mul(LANE_HEADER_SIZE)
         .ok_or_else(|| invalid_input("ShmRing lane header size overflow"))?;
@@ -187,8 +187,11 @@ pub fn segment_size_for_spec(spec: RingSpec) -> std::io::Result<usize> {
 }
 
 /// Compute the SHM segment size required for a fleet-aware ring spec.
-pub fn segment_size_for_spec_and_fleet(spec: RingSpec, fleet_size: u8) -> std::io::Result<usize> {
-    checked_layout(spec, fleet_size).map(|(_, _, segment_size)| segment_size)
+pub fn segment_size_for_spec_and_fleet(
+    spec: RingSpec,
+    fleet_capacity: u16,
+) -> std::io::Result<usize> {
+    checked_layout(spec, fleet_capacity).map(|(_, _, segment_size)| segment_size)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -222,16 +225,16 @@ impl ShmRing {
         Self::open_or_create_for_fleet(fleet_name, kind, spec, 1)
     }
 
-    /// Open or create a SHM-backed ring using `fleet_size` physical
+    /// Open or create a SHM-backed ring using `fleet_capacity` physical
     /// writer lanes when `spec` is [`RingTopology::PerNode`].
     pub fn open_or_create_for_fleet(
         fleet_name: &str,
         kind: u8,
         spec: RingSpec,
-        fleet_size: u8,
+        fleet_capacity: u16,
     ) -> std::io::Result<Self> {
-        let lane_count = lane_count_for(spec, fleet_size)?;
-        let (slot_stride, slots_offset, size) = checked_layout(spec, fleet_size)?;
+        let lane_count = lane_count_for(spec, fleet_capacity)?;
+        let (slot_stride, slots_offset, size) = checked_layout(spec, fleet_capacity)?;
         let lane_stride = spec
             .capacity
             .checked_mul(slot_stride)
@@ -842,15 +845,15 @@ impl ShmRing {
 /// is published or queried.
 pub struct ShmRingRegistry {
     fleet_name: String,
-    fleet_size: u8,
+    fleet_capacity: u16,
     rings: dashmap::DashMap<u8, std::sync::Arc<ShmRing>>,
 }
 
 impl ShmRingRegistry {
-    pub fn new(fleet_name: impl Into<String>, fleet_size: u8) -> Self {
+    pub fn new(fleet_name: impl Into<String>, fleet_capacity: u16) -> Self {
         Self {
             fleet_name: fleet_name.into(),
-            fleet_size,
+            fleet_capacity,
             rings: dashmap::DashMap::new(),
         }
     }
@@ -879,7 +882,7 @@ impl ShmRingRegistry {
             &self.fleet_name,
             T::KIND,
             T::RING_SPEC,
-            self.fleet_size,
+            self.fleet_capacity,
         )?);
         let entry = self.rings.entry(T::KIND).or_insert_with(|| ring.clone());
         if entry.spec() != T::RING_SPEC {

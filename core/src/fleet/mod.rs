@@ -1,5 +1,5 @@
-//! `Fleet` — the per-process handle that represents membership in
-//! a fleet of peers.
+//! `Fleet` — the per-process handle for one node address in a fleet's
+//! shared physical geometry.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,11 +19,12 @@ use crate::ring::{Frame, Ring, RingRegistry, RingTopology};
 mod cursor;
 pub use cursor::{FleetLaneCursor, FleetLanePoll};
 
-/// A node's slot inside the fleet — assigned at `join` time.
+/// A node's physical writer slot inside the fleet.
 ///
-/// V0: assigned monotonically by a process-local counter (always
-/// `0` for a single-process test). V1+: assigned by the SHM-backed
-/// fleet header so peers see consistent values.
+/// Orbit validates the address against fleet capacity but does not allocate
+/// it. The embedding runtime must ensure that simultaneously active writers
+/// receive distinct ids. Read-only inspectors can examine SHM without joining
+/// as a writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct NodeId(pub u16);
@@ -55,7 +56,7 @@ pub struct Fleet {
 
 struct FleetInner {
     name: &'static str,
-    fleet_size: u8,
+    fleet_capacity: u16,
     node_id: NodeId,
     /// Per-KIND counter for `next_id` calls that don't go through a
     /// ring (i.e. when the caller wants a fleet-unique id without
@@ -84,31 +85,30 @@ enum RingBacking {
 }
 
 impl Fleet {
-    /// Join (or create) a fleet under `name` with `fleet_size` total
-    /// expected members. In V0 every call returns a fresh local
-    /// fleet; the backing slot table is process-local.
-    pub fn join(name: &'static str, fleet_size: u8) -> Result<Self> {
-        Self::join_as(name, fleet_size, NodeId::ZERO)
+    /// Join (or create) a fleet under `name` with `fleet_capacity` physical
+    /// node lanes. In-memory backings remain process-local.
+    pub fn join(name: &'static str, fleet_capacity: u16) -> Result<Self> {
+        Self::join_as(name, fleet_capacity, NodeId::ZERO)
     }
 
     /// Join (or create) a process-local fleet with an explicit node id.
-    pub fn join_as(name: &'static str, fleet_size: u8, node_id: NodeId) -> Result<Self> {
-        if fleet_size == 0 {
+    pub fn join_as(name: &'static str, fleet_capacity: u16, node_id: NodeId) -> Result<Self> {
+        if fleet_capacity == 0 {
             return Err(Error::EmptyFleet);
         }
-        if node_id.get() >= u16::from(fleet_size) {
+        if node_id.get() >= fleet_capacity {
             return Err(Error::NodeOutsideFleet {
                 node_id: node_id.get(),
-                fleet_size,
+                fleet_capacity,
             });
         }
         Ok(Self {
             inner: Arc::new(FleetInner {
                 name,
-                fleet_size,
+                fleet_capacity,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::InMemory(RingRegistry::new(fleet_size)),
+                backing: RingBacking::InMemory(RingRegistry::new(fleet_capacity)),
             }),
         })
     }
@@ -125,8 +125,8 @@ impl Fleet {
     /// macOS limits POSIX SHM names to 31 chars (PSHMNAMLEN); a
     /// short fleet name is required there.
     #[cfg(unix)]
-    pub fn join_shm(name: &'static str, fleet_size: u8) -> Result<Self> {
-        Self::join_shm_as(name, fleet_size, NodeId::ZERO)
+    pub fn join_shm(name: &'static str, fleet_capacity: u16) -> Result<Self> {
+        Self::join_shm_as(name, fleet_capacity, NodeId::ZERO)
     }
 
     /// Join (or create) a SHM-backed fleet with an explicit node id.
@@ -135,23 +135,23 @@ impl Fleet {
     /// Orbit validates the id range but does not own process lifecycle and
     /// therefore cannot prevent duplicate live memberships.
     #[cfg(unix)]
-    pub fn join_shm_as(name: &'static str, fleet_size: u8, node_id: NodeId) -> Result<Self> {
-        if fleet_size == 0 {
+    pub fn join_shm_as(name: &'static str, fleet_capacity: u16, node_id: NodeId) -> Result<Self> {
+        if fleet_capacity == 0 {
             return Err(Error::EmptyFleet);
         }
-        if node_id.get() >= u16::from(fleet_size) {
+        if node_id.get() >= fleet_capacity {
             return Err(Error::NodeOutsideFleet {
                 node_id: node_id.get(),
-                fleet_size,
+                fleet_capacity,
             });
         }
         Ok(Self {
             inner: Arc::new(FleetInner {
                 name,
-                fleet_size,
+                fleet_capacity,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::Shm(ShmRingRegistry::new(name, fleet_size)),
+                backing: RingBacking::Shm(ShmRingRegistry::new(name, fleet_capacity)),
             }),
         })
     }
@@ -160,8 +160,9 @@ impl Fleet {
         self.inner.name
     }
 
-    pub fn fleet_size(&self) -> u8 {
-        self.inner.fleet_size
+    /// Number of physical node lanes reserved for this fleet.
+    pub fn fleet_capacity(&self) -> u16 {
+        self.inner.fleet_capacity
     }
 
     pub fn node_id(&self) -> NodeId {
@@ -563,7 +564,7 @@ impl std::fmt::Debug for Fleet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Fleet")
             .field("name", &self.inner.name)
-            .field("fleet_size", &self.inner.fleet_size)
+            .field("fleet_capacity", &self.inner.fleet_capacity)
             .field("node_id", &self.inner.node_id)
             .field("id_counters", &self.inner.id_counters.len())
             .finish()

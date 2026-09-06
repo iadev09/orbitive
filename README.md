@@ -30,7 +30,7 @@ use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
 
 ```toml
 [dependencies]
-orbitive = { version = "0.2.2", features = ["events", "lock"] }
+orbitive = { version = "0.3.0", features = ["events", "lock"] }
 ```
 
 Core types used by most integrations are available at the crate root. The full
@@ -94,8 +94,10 @@ later process can create a different object under the same name.
 
 ## Runtime contract
 
-Every process joining the same shared fleet must agree on the fleet size,
-node ownership, stable kind numbers, and ring or table layouts. Storage is
+Every process joining the same shared fleet must agree on the immutable fleet
+capacity, node ownership, stable kind numbers, and ring or table layouts.
+Capacity reserves physical node lanes; it does not assert current membership
+or liveness. Storage is
 bounded: old ring frames may be overwritten, caches may miss, and session
 entries may be evicted. Callers must treat those outcomes according to the
 semantic module they use.

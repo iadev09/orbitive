@@ -188,15 +188,15 @@ impl Ring {
     }
 
     /// Create the process-local ring declared by `T::RING_SPEC` with the
-    /// physical lane count required by `fleet_size`.
-    pub fn new_for_fleet<T: OrbitTyped>(fleet_size: u8) -> Self {
-        assert!(fleet_size > 0, "ring fleet size must be > 0");
+    /// physical lane count required by `fleet_capacity`.
+    pub fn new_for_fleet<T: OrbitTyped>(fleet_capacity: u16) -> Self {
+        assert!(fleet_capacity > 0, "ring fleet capacity must be > 0");
         let spec = T::RING_SPEC;
         spec.assert_valid();
         let capacity = spec.capacity;
         let lane_count = match spec.topology {
             RingTopology::Shared | RingTopology::SharedOrdered => 1,
-            RingTopology::PerNode => usize::from(fleet_size),
+            RingTopology::PerNode => usize::from(fleet_capacity),
         };
         let mut lanes = Vec::with_capacity(lane_count);
         for _ in 0..lane_count {
@@ -577,14 +577,14 @@ impl std::fmt::Debug for Ring {
 /// Type-keyed registry of rings. A `Fleet` holds one of these and
 /// hands out `Arc<Ring>` per `OrbitTyped` kind on demand.
 pub(crate) struct RingRegistry {
-    fleet_size: u8,
+    fleet_capacity: u16,
     rings: dashmap::DashMap<u8, Arc<Ring>>,
 }
 
 impl RingRegistry {
-    pub fn new(fleet_size: u8) -> Self {
+    pub fn new(fleet_capacity: u16) -> Self {
         Self {
-            fleet_size,
+            fleet_capacity,
             rings: dashmap::DashMap::new(),
         }
     }
@@ -594,7 +594,7 @@ impl RingRegistry {
         let ring = self
             .rings
             .entry(T::KIND)
-            .or_insert_with(|| Arc::new(Ring::new_for_fleet::<T>(self.fleet_size)))
+            .or_insert_with(|| Arc::new(Ring::new_for_fleet::<T>(self.fleet_capacity)))
             .clone();
         assert_eq!(
             ring.spec(),

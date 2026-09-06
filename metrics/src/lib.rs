@@ -177,7 +177,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
         let capacity = self.family.fleet.ring_capacity::<T>() as u64;
         let walk_count = head.min(capacity);
         let mut samples = HashMap::new();
-        let expected_nodes = self.family.fleet.fleet_size() as usize;
+        let expected_nodes = usize::from(self.family.fleet.fleet_capacity());
 
         for i in 0..walk_count {
             let counter = head - 1 - i;
@@ -261,8 +261,8 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
         let capacity = self.family.fleet.ring_capacity::<T>() as u64;
         let mut samples = HashMap::new();
 
-        for node in 0..self.family.fleet.fleet_size() {
-            let node_id = NodeId::new(u16::from(node));
+        for node in 0..self.family.fleet.fleet_capacity() {
+            let node_id = NodeId::new(node);
             let head = self.family.fleet.lane_head::<T>(node_id);
             let walk_count = head.min(capacity);
             for offset in 0..walk_count {
@@ -298,8 +298,8 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
         let capacity = self.family.fleet.ring_capacity::<T>() as u64;
         let mut samples = HashMap::new();
 
-        for node in 0..self.family.fleet.fleet_size() {
-            let node_id = NodeId::new(u16::from(node));
+        for node in 0..self.family.fleet.fleet_capacity() {
+            let node_id = NodeId::new(node);
             let head = self.family.fleet.lane_head::<T>(node_id);
             let walk_count = head.min(capacity);
             for offset in 0..walk_count {

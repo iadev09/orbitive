@@ -16,7 +16,7 @@ fn empty_fleet_rejected() {
 fn join_single_member_succeeds() {
     let fleet = Fleet::join("test", 1).unwrap();
     assert_eq!(fleet.name(), "test");
-    assert_eq!(fleet.fleet_size(), 1);
+    assert_eq!(fleet.fleet_capacity(), 1);
     assert_eq!(fleet.node_id().get(), 0);
 }
 
@@ -27,9 +27,16 @@ fn node_must_fit_inside_the_declared_fleet() {
         err,
         orbit_core::Error::NodeOutsideFleet {
             node_id: 2,
-            fleet_size: 2
+            fleet_capacity: 2
         }
     ));
+}
+
+#[test]
+fn capacity_accepts_the_full_claviron_node_space() {
+    let fleet = Fleet::join_as("test", 256, NodeId::new(255)).unwrap();
+    assert_eq!(fleet.fleet_capacity(), 256);
+    assert_eq!(fleet.node_id().get(), 255);
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -8,13 +8,13 @@ surface requires a Unix target and supports rustls 0.23 and 0.24.
 rustls 0.23 is the default:
 
 ```toml
-orbitive = { version = "0.2.2", features = ["rustls"] }
+orbitive = { version = "0.3.0", features = ["rustls"] }
 ```
 
 Select rustls 0.24 explicitly when the consuming TLS stack uses that line:
 
 ```toml
-orbitive = { version = "0.2.2", default-features = false, features = ["rustls_0_24"] }
+orbitive = { version = "0.3.0", default-features = false, features = ["rustls_0_24"] }
 ```
 
 The version features are additive. Enabling both is supported for workspaces

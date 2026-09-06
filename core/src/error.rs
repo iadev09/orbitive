@@ -10,11 +10,11 @@ pub enum Error {
     /// `Fleet::join` was called twice in the same process.
     AlreadyJoined { name: &'static str },
 
-    /// Fleet size cannot be zero — Orbit's plurality requirement (see VISION §2).
+    /// Fleet capacity cannot be zero — Orbit needs at least one addressable node.
     EmptyFleet,
 
-    /// A node id must address one of the fleet's declared member slots.
-    NodeOutsideFleet { node_id: u16, fleet_size: u8 },
+    /// A node id must address one of the fleet's reserved physical slots.
+    NodeOutsideFleet { node_id: u16, fleet_capacity: u16 },
 
     /// Shared-memory operation failed.
     Io(std::io::Error),
@@ -27,12 +27,18 @@ impl fmt::Display for Error {
                 write!(f, "fleet '{name}' has already been joined in this process")
             }
             Self::EmptyFleet => {
-                write!(f, "fleet_size must be ≥ 1; Orbit needs at least one member")
+                write!(
+                    f,
+                    "fleet_capacity must be ≥ 1; Orbit needs at least one node lane"
+                )
             }
             Self::NodeOutsideFleet {
                 node_id,
-                fleet_size,
-            } => write!(f, "node_id {node_id} is outside fleet_size {fleet_size}"),
+                fleet_capacity,
+            } => write!(
+                f,
+                "node_id {node_id} is outside fleet_capacity {fleet_capacity}"
+            ),
             Self::Io(err) => write!(f, "orbit io error: {err}"),
         }
     }

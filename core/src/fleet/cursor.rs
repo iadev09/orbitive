@@ -135,8 +135,8 @@ impl Fleet {
     /// lane's current head.
     pub fn lane_cursor_at_head<T: OrbitTyped>(&self) -> FleetLaneCursor {
         self.assert_per_node::<T>();
-        let lanes = (0..self.fleet_size())
-            .map(|node| RingCursor::from_counter(self.lane_head::<T>(NodeId::new(u16::from(node)))))
+        let lanes = (0..self.fleet_capacity())
+            .map(|node| RingCursor::from_counter(self.lane_head::<T>(NodeId::new(node))))
             .collect();
         FleetLaneCursor {
             lanes,
@@ -149,7 +149,7 @@ impl Fleet {
     pub fn lane_cursor_from_start<T: OrbitTyped>(&self) -> FleetLaneCursor {
         self.assert_per_node::<T>();
         FleetLaneCursor {
-            lanes: vec![RingCursor::from_start(); usize::from(self.fleet_size())],
+            lanes: vec![RingCursor::from_start(); usize::from(self.fleet_capacity())],
             initial_counter: 0,
         }
     }
@@ -162,13 +162,13 @@ impl Fleet {
         if cursor.lanes.is_empty() {
             cursor.lanes = vec![
                 RingCursor::from_counter(cursor.initial_counter);
-                usize::from(self.fleet_size())
+                usize::from(self.fleet_capacity())
             ];
         }
         assert_eq!(
             cursor.lanes.len(),
-            usize::from(self.fleet_size()),
-            "lane cursor belongs to a different fleet size"
+            usize::from(self.fleet_capacity()),
+            "lane cursor belongs to a different fleet capacity"
         );
 
         let mut combined = FleetLanePoll::default();

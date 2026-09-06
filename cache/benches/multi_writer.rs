@@ -38,7 +38,7 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
     let fleets = (0..WRITER_COUNT)
         .map(|node| {
             Arc::new(
-                Fleet::join_shm_as(fleet_name, WRITER_COUNT as u8, NodeId::new(node as u16))
+                Fleet::join_shm_as(fleet_name, WRITER_COUNT as u16, NodeId::new(node as u16))
                     .expect("join benchmark fleet"),
             )
         })
