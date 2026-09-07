@@ -7,7 +7,6 @@ authors = ["ilker Arabaci <iarabaci@claviron.dev>"]
 description = "Inspect and remove Orbit POSIX shared-memory objects."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/iadev09/orbitive"
-readme = "README.md"
 keywords = ["shared-memory", "ipc", "cli", "posix", "orbit"]
 categories = ["command-line-utilities", "development-tools::debugging"]
 exclude = ["ARCHITECTURE.md", "*.local.md"]

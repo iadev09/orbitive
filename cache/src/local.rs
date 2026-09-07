@@ -255,13 +255,9 @@ impl LocalCache {
 
 impl LocalState {
     fn accepts(&self, revision: CacheRevision) -> bool {
-        if self
+        !self
             .revision_floor
             .is_some_and(|floor| revision.sequence <= floor)
-        {
-            return false;
-        }
-        true
     }
 
     fn put_slot(&mut self, key: Vec<u8>, slot: LocalSlot) -> bool {

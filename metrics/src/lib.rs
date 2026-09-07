@@ -273,7 +273,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
                 let Ok(snapshot) = T::decode(&frame.payload) else {
                     continue;
                 };
-                if snapshot.node_id() != u16::from(node) {
+                if snapshot.node_id() != node {
                     continue;
                 }
                 samples.insert(
