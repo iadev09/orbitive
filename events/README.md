@@ -7,11 +7,11 @@ in the same Orbit fleet. Applications normally use it through
 ```rust
 use std::sync::Arc;
 
-use orbitive::events::OrbitEventBus;
+use orbitive::events::FleetEventBus;
 use orbitive::Fleet;
 
 let fleet = Arc::new(Fleet::join("example", 1)?);
-let bus = OrbitEventBus::new(fleet);
+let bus = FleetEventBus::new(fleet);
 let mut cursor = bus.cursor_at_head();
 
 bus.publish("worker.ready", b"worker-1")?;
@@ -26,7 +26,7 @@ assert_eq!(poll.events[0].payload, b"worker-1");
 All topics share one per-node ring, and every subscriber owns an independent
 cursor. Polling advances the cursor across every observed frame. A topic filter
 changes which events are returned, not which frames are consumed. If the
-cursor falls behind the retained window, `OrbitEventPoll::lagged` reports the
+cursor falls behind the retained window, `FleetEventPoll::lagged` reports the
 loss.
 
 On Linux and FreeBSD, an SHM-backed bus can create a process-local

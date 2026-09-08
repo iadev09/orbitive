@@ -39,11 +39,11 @@ low-level surface remains under `orbitive::core`.
 ```rust
 use std::sync::Arc;
 
-use orbitive::events::OrbitEventBus;
+use orbitive::events::FleetEventBus;
 use orbitive::Fleet;
 
 let fleet = Arc::new(Fleet::join("example", 1)?);
-let bus = OrbitEventBus::new(fleet);
+let bus = FleetEventBus::new(fleet);
 bus.publish("worker.ready", b"worker-1")?;
 
 # Ok::<(), Box<dyn std::error::Error>>(())

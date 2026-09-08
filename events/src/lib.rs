@@ -1,4 +1,4 @@
-//! `OrbitEventBus` — append-only event stream over one Orbit ring.
+//! `FleetEventBus` — append-only event stream over one Orbit ring.
 //!
 //! Events are not cache entries and not metrics snapshots. Cache reads
 //! ask "what is the newest value for this key?" Metrics reads ask "what
@@ -72,9 +72,9 @@ pub const EVENT_RING_KIND: u8 = 220;
 
 /// Dedicated per-node-lane ring kind for raw Orbit events.
 #[derive(Clone, Debug)]
-struct OrbitEventRecord;
+struct FleetEventRecord;
 
-impl OrbitTyped for OrbitEventRecord {
+impl OrbitTyped for FleetEventRecord {
     // Hand-picked V0 kind. Build-time KIND allocation will replace
     // these manual values later.
     const KIND: u8 = EVENT_RING_KIND;
@@ -86,11 +86,11 @@ impl OrbitTyped for OrbitEventRecord {
 /// The cursor stores one next counter per node lane. It is intentionally
 /// caller-owned so different consumers can advance independently.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OrbitEventCursor {
+pub struct FleetEventCursor {
     inner: FleetLaneCursor,
 }
 
-impl OrbitEventCursor {
+impl FleetEventCursor {
     /// Start from the beginning of the ring history that is still
     /// available.
     pub const fn from_start() -> Self {
@@ -114,7 +114,7 @@ impl OrbitEventCursor {
 
 /// One decoded event from the shared event ring.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OrbitEvent {
+pub struct FleetEvent {
     pub id: NetId64,
     pub topic: String,
     pub payload: Vec<u8>,
@@ -123,15 +123,15 @@ pub struct OrbitEvent {
 
 /// Result of polling an event cursor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OrbitEventPoll {
-    pub events: Vec<OrbitEvent>,
+pub struct FleetEventPoll {
+    pub events: Vec<FleetEvent>,
     /// Number of counters that could not be delivered because the
     /// subscriber lagged past the ring capacity, a slot was empty, or a
     /// slot had already wrapped to another counter.
     pub lagged: u64,
 }
 
-impl OrbitEventPoll {
+impl FleetEventPoll {
     pub fn is_empty(&self) -> bool {
         self.events.is_empty() && self.lagged == 0
     }
@@ -139,11 +139,11 @@ impl OrbitEventPoll {
 
 /// Fleet-shared raw event bus. Cheap to clone.
 #[derive(Clone)]
-pub struct OrbitEventBus {
+pub struct FleetEventBus {
     fleet: Arc<Fleet>,
 }
 
-impl OrbitEventBus {
+impl FleetEventBus {
     pub fn new(fleet: Arc<Fleet>) -> Self {
         Self { fleet }
     }
@@ -154,17 +154,17 @@ impl OrbitEventBus {
 
     /// Cursor that starts after all events currently in the ring.
     /// Useful for subscribers that only want future events.
-    pub fn cursor_at_head(&self) -> OrbitEventCursor {
-        OrbitEventCursor {
-            inner: self.fleet.lane_cursor_at_head::<OrbitEventRecord>(),
+    pub fn cursor_at_head(&self) -> FleetEventCursor {
+        FleetEventCursor {
+            inner: self.fleet.lane_cursor_at_head::<FleetEventRecord>(),
         }
     }
 
     /// Cursor that starts at counter 0 and replays whatever history has
     /// not wrapped out of the ring.
-    pub const fn cursor_from_start(&self) -> OrbitEventCursor {
+    pub const fn cursor_from_start(&self) -> FleetEventCursor {
         let _ = self;
-        OrbitEventCursor::from_start()
+        FleetEventCursor::from_start()
     }
 
     /// Clear the shared event ring.
@@ -175,7 +175,7 @@ impl OrbitEventBus {
     /// counted as current runtime state.
     pub fn reset_ring(&self) -> Result<()> {
         self.fleet
-            .reset_ring::<OrbitEventRecord>()
+            .reset_ring::<FleetEventRecord>()
             .map_err(Error::Io)
     }
 
@@ -188,7 +188,7 @@ impl OrbitEventBus {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
         self.fleet
-            .ring_event_fd::<OrbitEventRecord>()
+            .ring_event_fd::<FleetEventRecord>()
             .map_err(Error::Io)
     }
 
@@ -199,20 +199,20 @@ impl OrbitEventBus {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let id = self
             .fleet
-            .publish_notified::<OrbitEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame)
+            .publish_notified::<FleetEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame)
             .map_err(Error::Io)?;
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let id = self
             .fleet
-            .publish::<OrbitEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame);
+            .publish::<FleetEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame);
         Ok(id)
     }
 
     /// Poll all events since `cursor`, advancing the cursor to the
     /// current ring head. If the cursor has fallen behind the ring
     /// capacity, older overwritten counters are reported as `lagged`.
-    pub fn poll(&self, cursor: &mut OrbitEventCursor) -> OrbitEventPoll {
-        let ring_poll = self.fleet.poll_lanes::<OrbitEventRecord>(&mut cursor.inner);
+    pub fn poll(&self, cursor: &mut FleetEventCursor) -> FleetEventPoll {
+        let ring_poll = self.fleet.poll_lanes::<FleetEventRecord>(&mut cursor.inner);
         let mut lagged = ring_poll.loss.total();
         let mut events = Vec::new();
         for frame in ring_poll.frames {
@@ -220,7 +220,7 @@ impl OrbitEventBus {
                 lagged = lagged.saturating_add(1);
                 continue;
             };
-            events.push(OrbitEvent {
+            events.push(FleetEvent {
                 id: frame.id,
                 topic: String::from_utf8_lossy(decoded.topic).into_owned(),
                 payload: decoded.payload.to_vec(),
@@ -228,14 +228,14 @@ impl OrbitEventBus {
             });
         }
 
-        OrbitEventPoll { events, lagged }
+        FleetEventPoll { events, lagged }
     }
 
     /// Poll and keep only events whose topic matches `topic`.
     ///
     /// The cursor still advances past all events, including filtered
     /// topics. Use separate cursors for independent consumers.
-    pub fn poll_topic(&self, cursor: &mut OrbitEventCursor, topic: &str) -> OrbitEventPoll {
+    pub fn poll_topic(&self, cursor: &mut FleetEventCursor, topic: &str) -> FleetEventPoll {
         let mut poll = self.poll(cursor);
         poll.events.retain(|event| event.topic == topic);
         poll
@@ -303,13 +303,13 @@ fn now_ms() -> u64 {
 mod tests {
     use std::sync::Arc;
 
-    use super::OrbitEventBus;
+    use super::FleetEventBus;
     use orbit_core::Fleet;
 
     #[test]
     fn polls_events_since_cursor() {
         let fleet = Arc::new(Fleet::join("event_poll", 1).expect("fleet"));
-        let bus = OrbitEventBus::new(fleet);
+        let bus = FleetEventBus::new(fleet);
         let mut cursor = bus.cursor_from_start();
 
         bus.publish("worker.booted", b"w1").expect("publish first");
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn cursor_at_head_only_reads_future_events() {
         let fleet = Arc::new(Fleet::join("event_head", 1).expect("fleet"));
-        let bus = OrbitEventBus::new(fleet);
+        let bus = FleetEventBus::new(fleet);
 
         bus.publish("old", b"ignored").expect("publish old");
         let mut cursor = bus.cursor_at_head();
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn topic_filter_advances_cursor() {
         let fleet = Arc::new(Fleet::join("event_topic", 1).expect("fleet"));
-        let bus = OrbitEventBus::new(fleet);
+        let bus = FleetEventBus::new(fleet);
         let mut cursor = bus.cursor_from_start();
 
         bus.publish("a", b"1").expect("publish a");
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn reports_lag_when_cursor_falls_behind_capacity() {
         let fleet = Arc::new(Fleet::join("event_lag", 1).expect("fleet"));
-        let bus = OrbitEventBus::new(fleet);
+        let bus = FleetEventBus::new(fleet);
         let mut cursor = bus.cursor_from_start();
 
         for value in 0..=super::EVENT_RING_SPEC.capacity {

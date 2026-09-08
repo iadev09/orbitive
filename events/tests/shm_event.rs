@@ -1,4 +1,4 @@
-//! Cross-process OrbitEventBus via Fleet::join_shm.
+//! Cross-process FleetEventBus via Fleet::join_shm.
 //!
 //! This is the smallest proof that Orbit events are real cross-process
 //! pulses: one process publishes a topic/payload event into the SHM
@@ -20,7 +20,7 @@ use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
 use orbit_core::ring_shm::ShmRing;
 use orbit_core::{Fleet, NodeId};
-use orbit_events::{EVENT_RING_KIND, EVENT_RING_SPEC, OrbitEventBus};
+use orbit_events::{EVENT_RING_KIND, EVENT_RING_SPEC, FleetEventBus};
 
 fn fresh_name() -> &'static str {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,7 +80,7 @@ fn two_nodes_publish_into_independent_lanes() {
     let name = fresh_name();
     let parent_fleet =
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
-    let parent_bus = OrbitEventBus::new(parent_fleet);
+    let parent_bus = FleetEventBus::new(parent_fleet);
     let mut cursor = parent_bus.cursor_at_head();
     parent_bus
         .publish("test.parent_also", b"hello-from-parent")
@@ -109,7 +109,7 @@ fn two_nodes_publish_into_independent_lanes() {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(11),
             };
-            let child_bus = OrbitEventBus::new(child_fleet);
+            let child_bus = FleetEventBus::new(child_fleet);
             if child_bus
                 .publish("test.child_published", b"hello-from-child")
                 .is_err()
@@ -126,7 +126,7 @@ fn parent_publishes_child_polls_event() {
     let name = fresh_name();
     let parent_fleet =
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
-    let parent_bus = OrbitEventBus::new(parent_fleet);
+    let parent_bus = FleetEventBus::new(parent_fleet);
     let id = parent_bus
         .publish("test.parent_published", b"hello-from-parent")
         .expect("publish");
@@ -136,14 +136,14 @@ fn parent_publishes_child_polls_event() {
             let code = wait_child(child);
             cleanup_event_ring(name);
             assert_eq!(code, 0, "child reported failure (exit {code})");
-            println!("child accepted OrbitEvent id={id} topic=test.parent_published");
+            println!("child accepted FleetEvent id={id} topic=test.parent_published");
         }
         ForkResult::Child => {
             let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(21),
             };
-            let child_bus = OrbitEventBus::new(child_fleet);
+            let child_bus = FleetEventBus::new(child_fleet);
             let mut cursor = child_bus.cursor_from_start();
             let poll = child_bus.poll(&mut cursor);
             if poll.lagged != 0 || poll.events.len() != 1 {
@@ -170,7 +170,7 @@ fn cross_process_publish_wakes_process_local_event_fd() {
     let name = fresh_name();
     let parent_fleet =
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
-    let parent_bus = OrbitEventBus::new(parent_fleet);
+    let parent_bus = FleetEventBus::new(parent_fleet);
     parent_bus.reset_ring().expect("reset event ring");
     let (mut parent_ready, mut child_ready) = UnixStream::pair().expect("ready socket pair");
 
@@ -195,7 +195,7 @@ fn cross_process_publish_wakes_process_local_event_fd() {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(31),
             };
-            let child_bus = OrbitEventBus::new(child_fleet);
+            let child_bus = FleetEventBus::new(child_fleet);
             let event_fd = match child_bus.event_fd() {
                 Ok(event_fd) => event_fd,
                 Err(_) => std::process::exit(32),
@@ -228,10 +228,10 @@ fn cross_process_publish_wakes_process_local_event_fd() {
 #[test]
 fn one_publish_wakes_each_process_local_event_fd() {
     let name = fresh_name();
-    let bus_a = OrbitEventBus::new(Arc::new(
+    let bus_a = FleetEventBus::new(Arc::new(
         Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("node zero join_shm"),
     ));
-    let bus_b = OrbitEventBus::new(Arc::new(
+    let bus_b = FleetEventBus::new(Arc::new(
         Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("node one join_shm"),
     ));
     bus_a.reset_ring().expect("reset event ring");
