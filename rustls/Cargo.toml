@@ -1,6 +1,6 @@
 [package]
 name = "orbit-rustls"
-version.workspace = true
+version = "0.3.2"
 edition.workspace = true
 authors.workspace = true
 description = "Fleet-shared rustls state over Orbit shared memory."
