@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-events"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "libc",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "orbitive"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "orbit-cache",
  "orbit-core",

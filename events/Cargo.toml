@@ -1,6 +1,6 @@
 [package]
 name = "orbit-events"
-version.workspace = true
+version = "0.3.3"
 edition.workspace = true
 authors.workspace = true
 description = "Fleet-shared topic event streams over Orbit rings."

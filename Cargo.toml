@@ -1,6 +1,6 @@
 [package]
 name = "orbitive"
-version.workspace = true
+version = "0.3.3"
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -65,7 +65,7 @@ exclude = [
 orbit-core = { version = "0.3.2", path = "core", default-features = false }
 orbit-cache = { version = "0.3.2", path = "cache", default-features = false }
 orbit-lock = { version = "0.3.2", path = "lock", default-features = false }
-orbit-events = { version = "0.3.2", path = "events", default-features = false }
+orbit-events = { version = "0.3.3", path = "events", default-features = false }
 orbit-metrics = { version = "0.3.2", path = "metrics", default-features = false }
 orbit-rustls = { version = "0.3.2", path = "rustls", default-features = false }
 
