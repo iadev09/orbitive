@@ -6,7 +6,18 @@ use crate::{Error, Result};
 
 pub const LOCK_STATE_KIND: u8 = 228;
 pub const LOCK_EVENT_RING_KIND: u8 = 229;
-pub const LOCK_EVENT_RING_SPEC: RingSpec = RingSpec::per_node(1_024, 1_024);
+pub const LOCK_EVENT_RING_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_LOCK_EVENT_RING_CAPACITY"), 1_024);
+pub const LOCK_EVENT_RING_PAYLOAD_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_LOCK_EVENT_RING_PAYLOAD_CAPACITY"),
+    1_024,
+);
+pub const LOCK_EVENT_RING_SPEC: RingSpec =
+    RingSpec::per_node(LOCK_EVENT_RING_CAPACITY, LOCK_EVENT_RING_PAYLOAD_CAPACITY);
+
+const _: () = assert!(LOCK_EVENT_RING_CAPACITY.is_power_of_two());
+const _: () = assert!(LOCK_EVENT_RING_PAYLOAD_CAPACITY >= crate::protocol::EVENT_HEADER_LEN + 2);
+const _: () = assert!(LOCK_EVENT_RING_PAYLOAD_CAPACITY <= u32::MAX as usize);
 
 /// Physical Orbit surfaces used by one lock domain.
 pub trait LockLayout: Send + Sync + 'static {

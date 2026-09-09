@@ -18,14 +18,19 @@ pub use orbit_core::{OrbitTyped, RingSpec, RingTopology};
 /// This is a scan window, not a history-retention promise. At the default
 /// one-second publish cadence it leaves ample room for fleet-sized bursts
 /// while keeping scalar metric rings small.
-pub const METRIC_SNAPSHOT_RING_CAPACITY: usize = 1_024;
+pub const METRIC_SNAPSHOT_RING_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_METRIC_SNAPSHOT_RING_CAPACITY"), 1_024);
 
 /// Default ring capacity for ordinary keyed metric rows.
 ///
 /// Keyed collectors may need to scan far enough back to find the latest row
 /// for every active key, so their default is larger than node snapshots.
 /// High-cardinality domains should still choose and document their own bound.
-pub const KEYED_METRIC_RING_CAPACITY: usize = 4_096;
+pub const KEYED_METRIC_RING_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_KEYED_METRIC_RING_CAPACITY"), 4_096);
+
+const _: () = assert!(METRIC_SNAPSHOT_RING_CAPACITY.is_power_of_two());
+const _: () = assert!(KEYED_METRIC_RING_CAPACITY.is_power_of_two());
 
 /// A periodic metrics snapshot carried by an Orbit ring.
 ///

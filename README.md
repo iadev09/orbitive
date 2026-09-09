@@ -30,7 +30,7 @@ use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
 
 ```toml
 [dependencies]
-orbitive = { version = "0.3.3", features = ["events", "lock"] }
+orbitive = { version = "0.3.4", features = ["events", "lock"] }
 ```
 
 Core types used by most integrations are available at the crate root. The full
@@ -70,6 +70,44 @@ The implementation crates are also published separately as
 [`orbit-rustls`](rustls/README.md). Direct dependencies are supported when an
 integration needs a single narrow layer; applications can otherwise use the
 facade and enable only the modules they need.
+
+## Compile-time geometry
+
+The default shared-memory geometry can be selected once for an entire
+downstream Cargo build graph. Put the desired values in the application's
+`.cargo/config.toml`; ordinary `cargo build`, `cargo test`, and `cargo run`
+commands then compile every Orbit dependency with the same values:
+
+```toml
+[env]
+ORBIT_EVENT_RING_CAPACITY = { value = "1024", force = true }
+ORBIT_EVENT_RING_PAYLOAD_CAPACITY = { value = "512", force = true }
+
+ORBIT_CACHE_MUTATION_RING_CAPACITY = { value = "1024", force = true }
+ORBIT_CACHE_MUTATION_RING_PAYLOAD_CAPACITY = { value = "1024", force = true }
+ORBIT_CACHE_PAYLOAD_RING_CAPACITY = { value = "1024", force = true }
+ORBIT_CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY = { value = "4096", force = true }
+
+ORBIT_LOCK_EVENT_RING_CAPACITY = { value = "1024", force = true }
+ORBIT_LOCK_EVENT_RING_PAYLOAD_CAPACITY = { value = "1024", force = true }
+ORBIT_LOCK_STATE_CAPACITY = { value = "256", force = true }
+ORBIT_LOCK_STATE_PAYLOAD_CAPACITY = { value = "960", force = true }
+
+ORBIT_METRIC_SNAPSHOT_RING_CAPACITY = { value = "1024", force = true }
+ORBIT_KEYED_METRIC_RING_CAPACITY = { value = "4096", force = true }
+
+ORBIT_RUSTLS_SESSION_SET_COUNT = { value = "256", force = true }
+ORBIT_RUSTLS_SESSION_WAYS = { value = "8", force = true }
+ORBIT_RUSTLS_SESSION_DOMAIN_CAPACITY = { value = "64", force = true }
+ORBIT_RUSTLS_SESSION_KEY_CAPACITY = { value = "64", force = true }
+ORBIT_RUSTLS_SESSION_VALUE_CAPACITY = { value = "16384", force = true }
+```
+
+Every key is optional and retains the documented default when absent. Values
+are decimal byte or entry counts and may contain `_` separators. Invalid
+values fail compilation. These settings are part of the fleet wire contract:
+all peers that open the same fleet must be built with the same geometry, and
+existing SHM objects must be cleared before a geometry change takes effect.
 
 ## Command-line inspection
 

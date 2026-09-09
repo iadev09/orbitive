@@ -4,8 +4,37 @@ use orbit_core::{OrbitTyped, RingSpec, RingTopology};
 
 pub const CACHE_MUTATION_RING_KIND: u8 = 200;
 pub const CACHE_PAYLOAD_RING_KIND: u8 = 201;
-pub const CACHE_MUTATION_RING_SPEC: RingSpec = RingSpec::per_node(1_024, 1_024);
-pub const CACHE_PAYLOAD_RING_SPEC: RingSpec = RingSpec::per_node(1_024, 4_096);
+pub const CACHE_MUTATION_RING_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_CACHE_MUTATION_RING_CAPACITY"), 1_024);
+pub const CACHE_MUTATION_RING_PAYLOAD_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_CACHE_MUTATION_RING_PAYLOAD_CAPACITY"),
+    1_024,
+);
+pub const CACHE_PAYLOAD_RING_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_CACHE_PAYLOAD_RING_CAPACITY"), 1_024);
+pub const CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY"),
+    4_096,
+);
+pub const CACHE_MUTATION_RING_SPEC: RingSpec = RingSpec::per_node(
+    CACHE_MUTATION_RING_CAPACITY,
+    CACHE_MUTATION_RING_PAYLOAD_CAPACITY,
+);
+pub const CACHE_PAYLOAD_RING_SPEC: RingSpec = RingSpec::per_node(
+    CACHE_PAYLOAD_RING_CAPACITY,
+    CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY,
+);
+
+const _: () = assert!(CACHE_MUTATION_RING_CAPACITY.is_power_of_two());
+const _: () = assert!(CACHE_PAYLOAD_RING_CAPACITY.is_power_of_two());
+const _: () = assert!(CACHE_PAYLOAD_RING_CAPACITY <= u32::MAX as usize);
+const _: () =
+    assert!(CACHE_MUTATION_RING_PAYLOAD_CAPACITY >= crate::protocol::MIN_MUTATION_HEADER_LEN);
+const _: () = assert!(CACHE_MUTATION_RING_PAYLOAD_CAPACITY <= u32::MAX as usize);
+const _: () = assert!(
+    CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY > 0
+        && CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY <= u32::MAX as usize
+);
 
 /// Physical Orbit rings used by one fleet cache domain.
 ///

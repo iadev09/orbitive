@@ -12,8 +12,10 @@ use orbit_core::{Fleet, NetId64, NodeId};
 use crate::layout::LockLayout;
 use crate::{Error, LockAcquire, LockKey, LockLease, LockOwner, LockTransition, Result};
 
-pub const LOCK_STATE_CAPACITY: usize = 256;
-pub const LOCK_STATE_PAYLOAD_MAX: usize = 960;
+pub const LOCK_STATE_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_LOCK_STATE_CAPACITY"), 256);
+pub const LOCK_STATE_PAYLOAD_MAX: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_LOCK_STATE_PAYLOAD_CAPACITY"), 960);
 
 const LOCK_COUNTER_MAX: u64 = 0xFF_FFFF_FFFF;
 const SLOT_EMPTY: u8 = 0;
@@ -684,5 +686,7 @@ fn shm_segment_size() -> usize {
 }
 
 const _: () = assert!(LOCK_STATE_CAPACITY.is_power_of_two());
+const _: () = assert!(LOCK_STATE_CAPACITY <= u32::MAX as usize);
+const _: () = assert!(LOCK_STATE_PAYLOAD_MAX > 0);
 const _: () = assert!(std::mem::size_of::<LockStateHeader>() == 64);
-const _: () = assert!(std::mem::size_of::<LockStateSlot>() == 1_024);
+const _: () = assert!(std::mem::size_of::<LockStateSlot>() <= u32::MAX as usize);

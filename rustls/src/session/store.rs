@@ -12,13 +12,20 @@ use std::{io, ptr};
 use orbit_core::Fleet;
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
-pub(super) const DOMAIN_MAX: usize = 64;
-pub(super) const KEY_MAX: usize = 64;
-pub(super) const VALUE_MAX: usize = 16 * 1024;
+pub(super) const DOMAIN_MAX: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_DOMAIN_CAPACITY"), 64);
+pub(super) const KEY_MAX: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_KEY_CAPACITY"), 64);
+pub(super) const VALUE_MAX: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_RUSTLS_SESSION_VALUE_CAPACITY"),
+    16 * 1024,
+);
 
 const SESSION_STATE_KIND: u8 = 231;
-const SET_COUNT: usize = 256;
-const WAYS: usize = 8;
+const SET_COUNT: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_SET_COUNT"), 256);
+const WAYS: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_WAYS"), 8);
 const CAPACITY: usize = SET_COUNT * WAYS;
 const MAGIC: u32 = 0x4F_54_53_53; // "OTSS"
 const VERSION: u16 = 1;
@@ -403,8 +410,14 @@ fn monotonic_ms() -> io::Result<u64> {
 }
 
 const _: () = assert!(SET_COUNT.is_power_of_two());
-const _: () = assert!(CAPACITY == 2_048);
+const _: () = assert!(SET_COUNT <= u16::MAX as usize);
+const _: () = assert!(WAYS > 0 && WAYS <= u16::MAX as usize);
+const _: () = assert!(CAPACITY <= u32::MAX as usize);
+const _: () = assert!(DOMAIN_MAX > 0 && DOMAIN_MAX <= u8::MAX as usize);
+const _: () = assert!(KEY_MAX > 0 && KEY_MAX <= u8::MAX as usize);
+const _: () = assert!(VALUE_MAX > 0 && VALUE_MAX <= u32::MAX as usize);
 const _: () = assert!(std::mem::size_of::<SessionHeader>() == 64);
+const _: () = assert!(std::mem::size_of::<SessionSlot>() <= u32::MAX as usize);
 
 #[cfg(test)]
 mod tests {

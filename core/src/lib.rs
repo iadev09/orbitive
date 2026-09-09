@@ -14,6 +14,8 @@
 //! shared-memory backing on Unix. Semantic layers choose the shape that
 //! matches their data: history belongs in rings; current leases do not.
 
+#[doc(hidden)]
+pub mod compile;
 pub mod epoch;
 pub mod error;
 pub mod fleet;

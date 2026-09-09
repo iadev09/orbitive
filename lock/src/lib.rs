@@ -19,7 +19,8 @@ use orbit_core::{Fleet, NetId64, RingLoss};
 pub use error::{Error, Result};
 pub use fence::{Fence, FenceToken};
 pub use layout::{
-    DefaultLockLayout, LOCK_EVENT_RING_KIND, LOCK_EVENT_RING_SPEC, LOCK_STATE_KIND, LockLayout,
+    DefaultLockLayout, LOCK_EVENT_RING_CAPACITY, LOCK_EVENT_RING_KIND,
+    LOCK_EVENT_RING_PAYLOAD_CAPACITY, LOCK_EVENT_RING_SPEC, LOCK_STATE_KIND, LockLayout,
 };
 pub use state::{LOCK_STATE_CAPACITY, LOCK_STATE_PAYLOAD_MAX};
 

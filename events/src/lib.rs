@@ -63,12 +63,21 @@ impl std::error::Error for Error {
 /// Event frame payload limit for V0. This is the event lane's own SHM
 /// payload capacity; non-Unix keeps the same contract so callers do not
 /// accidentally rely on unbounded in-memory frames.
-pub const EVENT_RING_SPEC: RingSpec = RingSpec::per_node(1024, 512);
+pub const EVENT_RING_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_EVENT_RING_CAPACITY"), 1_024);
+pub const EVENT_RING_PAYLOAD_CAPACITY: usize =
+    orbit_core::compile::usize_from_env(option_env!("ORBIT_EVENT_RING_PAYLOAD_CAPACITY"), 512);
+pub const EVENT_RING_SPEC: RingSpec =
+    RingSpec::per_node(EVENT_RING_CAPACITY, EVENT_RING_PAYLOAD_CAPACITY);
 pub const EVENT_PAYLOAD_MAX: usize = EVENT_RING_SPEC.payload_capacity;
 
 const HEADER_LEN: usize = 2 + 2 + 8;
 const FRAME_KIND_EVENT: u8 = 1;
 pub const EVENT_RING_KIND: u8 = 220;
+
+const _: () = assert!(EVENT_RING_CAPACITY.is_power_of_two());
+const _: () = assert!(EVENT_RING_PAYLOAD_CAPACITY >= HEADER_LEN);
+const _: () = assert!(EVENT_RING_PAYLOAD_CAPACITY <= u32::MAX as usize);
 
 /// Dedicated per-node-lane ring kind for raw Orbit events.
 #[derive(Clone, Debug)]
@@ -356,8 +365,12 @@ mod tests {
     }
 
     #[test]
-    fn event_frame_contract_retains_512_bytes_per_slot() {
-        assert_eq!(super::EVENT_PAYLOAD_MAX, 512);
+    fn event_frame_contract_uses_the_compile_time_geometry() {
+        let expected = orbit_core::compile::usize_from_env(
+            option_env!("ORBIT_EVENT_RING_PAYLOAD_CAPACITY"),
+            512,
+        );
+        assert_eq!(super::EVENT_PAYLOAD_MAX, expected);
 
         let largest_payload = vec![0_u8; super::EVENT_PAYLOAD_MAX - super::HEADER_LEN - 1];
         let frame = super::encode_frame(b"x", &largest_payload, 0).expect("frame must fit");
@@ -367,9 +380,9 @@ mod tests {
         assert!(matches!(
             super::encode_frame(b"x", &oversized_payload, 0),
             Err(super::Error::FrameTooLarge {
-                max_payload: 512,
+                max_payload,
                 ..
-            })
+            }) if max_payload == expected
         ));
     }
 

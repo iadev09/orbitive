@@ -22,8 +22,9 @@ use orbit_core::{Fleet, RingLoss};
 
 pub use error::{Error, Result};
 pub use layout::{
-    CACHE_MUTATION_RING_KIND, CACHE_MUTATION_RING_SPEC, CACHE_PAYLOAD_RING_KIND,
-    CACHE_PAYLOAD_RING_SPEC, CacheLayout, DefaultCacheLayout,
+    CACHE_MUTATION_RING_CAPACITY, CACHE_MUTATION_RING_KIND, CACHE_MUTATION_RING_PAYLOAD_CAPACITY,
+    CACHE_MUTATION_RING_SPEC, CACHE_PAYLOAD_RING_CAPACITY, CACHE_PAYLOAD_RING_KIND,
+    CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY, CACHE_PAYLOAD_RING_SPEC, CacheLayout, DefaultCacheLayout,
 };
 pub use local::{CacheEntry, CacheRead, LocalCache};
 pub use protocol::{CacheMutation, CacheRevision, PayloadRef};

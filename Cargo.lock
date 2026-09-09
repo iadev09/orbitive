@@ -489,7 +489,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "orbit-cache"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "bytes",
  "criterion",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-core"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "bytes",
  "dashmap",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-events"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bytes",
  "libc",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-lock"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "bytes",
  "libc",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-metrics"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "bytes",
  "orbit-core",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-rustls"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "nix",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "orbitive"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "orbit-cache",
  "orbit-core",
