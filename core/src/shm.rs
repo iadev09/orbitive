@@ -13,11 +13,16 @@
 //! `shm_unlink`-ing it on next boot).
 //!
 //! Rings that require a process-recoverable writer lock also open a
-//! companion `/tmp/orbit-{fleet}-{kind}-{uid}.lock` file. It carries no
+//! companion `orbit-{fleet}-{kind}-{uid}.lock` file. It carries no
 //! ring data or state; it only supplies a regular-file inode for `flock`,
 //! because advisory locking on a POSIX SHM descriptor is not uniformly
 //! supported across the Unix targets Orbit serves. An unlocked stale
 //! companion file is safe to reuse.
+//!
+//! Those files live in a per-uid directory — `$XDG_RUNTIME_DIR/orbit-{uid}`
+//! where the session provides one, `/tmp/orbit-{uid}` otherwise — created
+//! `0700` and checked on every lock. They were once in `/tmp` directly, which
+//! made them squattable: see [`lock_dir`].
 //!
 //! ## Lifetime
 //!
@@ -301,14 +306,36 @@ fn lock_path_exclusive(lock_path: &Path) -> io::Result<ShmRegionLock> {
 }
 
 fn open_lock_file(lock_path: &Path) -> io::Result<OwnedFd> {
-    OpenOptions::new()
+    use std::os::unix::fs::MetadataExt;
+
+    if let Some(dir) = lock_path.parent() {
+        ensure_lock_dir(dir)?;
+    }
+
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .mode(0o600)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(lock_path)
-        .map(Into::into)
+        .open(lock_path)?;
+
+    // The directory check makes this unreachable, which is the reason to make
+    // it anyway: it turns a property inferred from the directory's mode into
+    // one this function establishes about the descriptor it is about to lock.
+    let uid = unsafe { libc::geteuid() };
+    let owner = file.metadata()?.uid();
+    if owner != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {owner} rather than {uid}",
+                lock_path.display()
+            ),
+        ));
+    }
+
+    Ok(file.into())
 }
 
 fn lock_fd_exclusive(lock_fd: OwnedFd) -> io::Result<ShmRegionLock> {
@@ -355,5 +382,97 @@ pub fn ring_segment_name_for_uid(fleet_name: &str, kind: u8, uid: u32) -> String
 }
 
 fn lock_file_path(shm_name: &str) -> PathBuf {
-    PathBuf::from("/tmp").join(format!("{}.lock", shm_name.trim_start_matches('/')))
+    lock_dir().join(format!("{}.lock", shm_name.trim_start_matches('/')))
+}
+
+/// Where the companion lock files live.
+///
+/// They used to live in `/tmp` directly, as
+/// `/tmp/orbit-{fleet}-{kind}-{uid}.lock`, opened `O_CREAT` without `O_EXCL`
+/// and without asking who owned what the open found. `/tmp` is world-writable,
+/// so any local user could create that file first and then hold `LOCK_EX` on it
+/// for as long as they liked: every process in the fleet would sit in `flock` —
+/// not fail, block — waiting for a lock it was never going to get. The SHM
+/// segment name is uid-scoped and so cannot be squatted this way; the lock path
+/// was not. `O_NOFOLLOW` prevented the symlink version of the trick and nothing
+/// else.
+///
+/// They now live in a per-uid directory created `0700`, which a user who is not
+/// us cannot put a file into. What such a user can still do is create the
+/// directory first, so its owner and mode are checked on every open rather than
+/// assumed from having created it: a directory that is not ours, or not
+/// private, fails the open with the path in the message instead of parking the
+/// process on a lock.
+///
+/// `XDG_RUNTIME_DIR` is preferred where the session provides one, because it is
+/// already per-user and `0700` and so is not inside a world-writable directory
+/// at all. macOS has no such variable but gives each user a private `TMPDIR`;
+/// `/tmp` is the fallback, with the checks above carrying the weight.
+fn lock_dir() -> PathBuf {
+    let uid = unsafe { libc::geteuid() };
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+
+    base.join(format!("{SHM_NAMESPACE}-{uid}"))
+}
+
+/// Creates the lock directory if it is missing and refuses it if it is not
+/// ours. Called when a lock is actually taken rather than when a region is
+/// opened: a region that never locks has nothing to squat, and failing its open
+/// on a directory it does not use would hand an attacker a wider outage than
+/// the one being closed.
+fn ensure_lock_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let uid = unsafe { libc::geteuid() };
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+
+    ensure_private_dir(dir, uid)
+}
+
+/// Refuses a lock directory that someone else could write to.
+///
+/// `symlink_metadata` rather than `metadata`: a symlink pointing at a directory
+/// we do own would otherwise pass while the lock files landed somewhere the
+/// attacker chose.
+fn ensure_private_dir(dir: &Path, uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not a directory", dir.display()),
+        ));
+    }
+    if metadata.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {} rather than {uid}; refusing to lock in a directory \
+                 another user controls",
+                dir.display(),
+                metadata.uid()
+            ),
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is mode {:o}; refusing to lock in a directory others can write to",
+                dir.display(),
+                metadata.permissions().mode() & 0o777
+            ),
+        ));
+    }
+
+    Ok(())
 }
