@@ -56,7 +56,7 @@
 
 use std::ptr;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 use bytes::Bytes;
 
@@ -814,7 +814,21 @@ impl ShmRing {
         let slot_ptr = self.slot_ptr(lane, slot_idx);
 
         // Disruptor-style write: seq goes odd → write content → seq goes even.
-        // The atomic store ordering pairs with the reader's Acquire.
+        //
+        // The odd marker is stored `Relaxed` and followed by a `Release`
+        // *fence*, not stored `Release`. A release store orders the accesses
+        // that come *before* it and says nothing about the ones after, so the
+        // content writes below were free to become visible ahead of the marker:
+        // a reader would then see an even seq on both sides of a slot that was
+        // being torn underneath it. The fence is what forbids that, because it
+        // orders everything before it — the marker — ahead of every store after
+        // it.
+        //
+        // The closing store stays `Release`: there it is the content writes
+        // that must be visible first, which is exactly what a release store
+        // gives. It pairs with the reader's `Acquire` fence.
+        //
+        // x86's store-store ordering hides the difference; aarch64 does not.
         unsafe {
             let slot = &*slot_ptr;
             let mid_seq = counter
@@ -823,7 +837,8 @@ impl ShmRing {
                 .expect("seq overflow");
             let final_seq = mid_seq.wrapping_add(1);
 
-            slot.seq.store(mid_seq, Ordering::Release);
+            slot.seq.store(mid_seq, Ordering::Relaxed);
+            fence(Ordering::Release);
             ptr::addr_of_mut!((*slot_ptr).id).write(id.raw());
             ptr::addr_of_mut!((*slot_ptr).ver).write(ver);
             ptr::addr_of_mut!((*slot_ptr).payload_len).write(payload.len() as u32);
@@ -941,7 +956,15 @@ unsafe fn read_committed_frame(
     let mut payload_buf = vec![0u8; payload_len];
     unsafe { ptr::copy_nonoverlapping(payload_src, payload_buf.as_mut_ptr(), payload_len) };
 
-    let seq_post = slot.seq.load(Ordering::Acquire);
+    // The mirror of the writer's fence. `Acquire` on a load orders the accesses
+    // that come *after* it, so reading the closing seq with `Acquire` would
+    // leave the content reads above free to be reordered past it — and the
+    // comparison below would then be comparing against a slot it never actually
+    // read. An acquire fence orders those reads ahead of the load that follows,
+    // which is the guarantee this check is asking for; the load itself needs no
+    // ordering of its own once the fence is there.
+    fence(Ordering::Acquire);
+    let seq_post = slot.seq.load(Ordering::Relaxed);
     if seq_pre != seq_post {
         // torn write — caller can retry
         return None;
