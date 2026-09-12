@@ -987,10 +987,14 @@ unsafe fn read_committed_frame(
         // corrupt — bail
         return None;
     }
+    // `with_capacity` + `push` rather than `vec![0; len]` + overwrite: the
+    // zeroing would be written over by the very next loop, and a walking reader
+    // over a 16k-slot ring pays that twice for every byte it reads. The push
+    // cannot reallocate — the capacity is reserved above.
     let payload_src = unsafe { ShmRing::payload_ptr(slot_ptr) };
-    let mut payload_buf = vec![0u8; payload_len];
-    for (index, byte) in payload_buf.iter_mut().enumerate() {
-        *byte = unsafe { (*payload_src.add(index)).load(Ordering::Relaxed) };
+    let mut payload_buf = Vec::with_capacity(payload_len);
+    for index in 0..payload_len {
+        payload_buf.push(unsafe { (*payload_src.add(index)).load(Ordering::Relaxed) });
     }
 
     // The mirror of the writer's fence. `Acquire` on a load orders the accesses
