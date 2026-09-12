@@ -267,3 +267,65 @@ fn attached_handles_share_one_semantic_version_counter() {
 
     first.unlink().unwrap();
 }
+
+/// A reader and a writer on one slot, which is the shape the seqlock exists
+/// for and the only shape that puts a sanitizer to work.
+///
+/// It asserts almost nothing on its own — the seqlock does its job on this
+/// hardware whether or not the slot fields are atomic, so a plain `cargo test`
+/// run cannot tell a correct implementation from an undefined one. Under
+/// `just race` it can: the capacity of two means the writer laps the reader
+/// immediately, so every read overlaps a write of the same slot. Run against
+/// the pre-9abb57d slot, that produces *"ThreadSanitizer: data race … in
+/// ShmRing::write_slot"* within a few thousand iterations.
+///
+/// The assertion that is here guards the other direction: a frame the reader
+/// does accept must be one the writer actually wrote, not a mixture of two.
+#[test]
+fn a_reader_and_a_writer_contend_for_one_slot() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let name = fresh_name();
+    let ring = Arc::new(ShmRing::open_or_create(&name, 9, RingSpec::new(2, 64)).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let writer = {
+        let ring = Arc::clone(&ring);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut tick = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                tick = tick.wrapping_add(1);
+                let payload = Bytes::from(vec![(tick & 0xFF) as u8; 64]);
+                ring.write(NodeId::new(1), 1, tick, payload).unwrap();
+            }
+        })
+    };
+
+    let reader = {
+        let ring = Arc::clone(&ring);
+        std::thread::spawn(move || {
+            for _ in 0..50_000 {
+                let Some(frame) = ring.read_head() else {
+                    continue;
+                };
+                // One byte value for the whole payload, chosen by the tick the
+                // writer stamped: a frame assembled from two different writes
+                // would show two.
+                let expected = (frame.ver & 0xFF) as u8;
+                assert!(
+                    frame.payload.iter().all(|byte| *byte == expected),
+                    "frame {} mixes two writes",
+                    frame.ver
+                );
+            }
+        })
+    };
+
+    reader.join().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+
+    ring.unlink().unwrap();
+}
