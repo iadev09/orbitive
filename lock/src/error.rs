@@ -39,9 +39,13 @@ impl fmt::Display for Error {
                 f,
                 "lock entry is too large: namespace_len={namespace_len} key_len={key_len} owner_len={owner_len} max_payload={max_payload}"
             ),
-            Self::StateFull { capacity } => {
-                write!(f, "lock state table is full: capacity={capacity}")
-            }
+            Self::StateFull { capacity } => write!(
+                f,
+                "lock state table is full: {capacity} leases held and none expired. Every \
+                 acquisition fails until one does, so whatever the caller was locking does not \
+                 happen. Capacity is fixed at compile time — rebuild with \
+                 ORBIT_LOCK_STATE_CAPACITY set to a power of two above {capacity}"
+            ),
             Self::IdExhausted => f.write_str("lock id counter is exhausted"),
             Self::TtlZero => f.write_str("lock TTL must be greater than zero"),
             Self::TtlOverflow => f.write_str("lock TTL deadline overflowed"),
