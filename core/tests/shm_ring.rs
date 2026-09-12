@@ -276,7 +276,7 @@ fn attached_handles_share_one_semantic_version_counter() {
 /// run cannot tell a correct implementation from an undefined one. Under
 /// `just race` it can: the capacity of two means the writer laps the reader
 /// immediately, so every read overlaps a write of the same slot. Run against
-/// the pre-9abb57d slot, that produces *"ThreadSanitizer: data race … in
+/// the pre-67f9ce9 slot, that produces *"ThreadSanitizer: data race … in
 /// ShmRing::write_slot"* within a few thousand iterations.
 ///
 /// The assertion that is here guards the other direction: a frame the reader
