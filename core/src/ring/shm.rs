@@ -56,7 +56,7 @@
 
 use std::ptr;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering, fence};
 
 use bytes::Bytes;
 
@@ -108,15 +108,24 @@ struct ShmSlotHeader {
     /// to detect torn writes.
     seq: AtomicU64,
     /// `NetId64::raw()` of the frame that occupies this slot.
-    id: u64,
+    id: AtomicU64,
     /// `Frame::ver` — caller-supplied version / tick.
-    ver: u64,
+    ver: AtomicU64,
     /// Length of the meaningful prefix of `payload`.
-    payload_len: u32,
+    payload_len: AtomicU32,
     /// `Frame::kind` — the message-class byte (state/event/cmd/…).
-    kind: u8,
+    kind: AtomicU8,
     _reserved: [u8; 3],
 }
+
+// The content fields are atomic for the same reason `seq` is: a reader may be
+// copying this slot while a writer overwrites it. The seqlock *detects* that
+// afterwards, which is not the same as not having a race — under the memory
+// model a torn read through a plain `u64` is undefined however the hardware
+// behaves, and Miri or TSan would say so. `Relaxed` is what they need: all the
+// ordering is already carried by `seq` and the two fences around it, so these
+// compile to the same plain loads and stores they were, with the race removed
+// rather than papered over.
 
 const SLOT_HEADER_SIZE: usize = std::mem::size_of::<ShmSlotHeader>();
 const HEADER_SIZE: usize = std::mem::size_of::<ShmRingHeader>();
@@ -454,8 +463,23 @@ impl ShmRing {
         }
     }
 
-    unsafe fn payload_ptr(slot_ptr: *mut ShmSlotHeader) -> *mut u8 {
-        unsafe { slot_ptr.cast::<u8>().add(SLOT_HEADER_SIZE) }
+    /// The payload bytes, as the atomics they have to be for the same reason
+    /// the header fields are.
+    ///
+    /// The cost is a byte at a time instead of a `memcpy`, over payloads this
+    /// workspace sizes in tens to hundreds of bytes — 18 for a metric sample,
+    /// 1024 at the largest — published at snapshot rather than request rate.
+    /// Word-at-a-time would need the payload region padded to a word multiple,
+    /// which changes the segment layout and so the compatibility check every
+    /// attaching process makes; worth doing if a payload ever grows enough to
+    /// notice, and not before.
+    unsafe fn payload_ptr(slot_ptr: *mut ShmSlotHeader) -> *mut AtomicU8 {
+        unsafe {
+            slot_ptr
+                .cast::<u8>()
+                .add(SLOT_HEADER_SIZE)
+                .cast::<AtomicU8>()
+        }
     }
 
     /// Head of the sole shared lane, or lane zero for a per-node ring.
@@ -839,11 +863,15 @@ impl ShmRing {
 
             slot.seq.store(mid_seq, Ordering::Relaxed);
             fence(Ordering::Release);
-            ptr::addr_of_mut!((*slot_ptr).id).write(id.raw());
-            ptr::addr_of_mut!((*slot_ptr).ver).write(ver);
-            ptr::addr_of_mut!((*slot_ptr).payload_len).write(payload.len() as u32);
-            ptr::addr_of_mut!((*slot_ptr).kind).write(frame_kind);
-            ptr::copy_nonoverlapping(payload.as_ptr(), Self::payload_ptr(slot_ptr), payload.len());
+            slot.id.store(id.raw(), Ordering::Relaxed);
+            slot.ver.store(ver, Ordering::Relaxed);
+            slot.payload_len
+                .store(payload.len() as u32, Ordering::Relaxed);
+            slot.kind.store(frame_kind, Ordering::Relaxed);
+            let bytes = Self::payload_ptr(slot_ptr);
+            for (index, byte) in payload.iter().enumerate() {
+                (*bytes.add(index)).store(*byte, Ordering::Relaxed);
+            }
             slot.seq.store(final_seq, Ordering::Release);
         }
 
@@ -943,18 +971,22 @@ unsafe fn read_committed_frame(
         return None;
     }
 
-    // Read content fields.
-    let id = NetId64::from_raw(unsafe { ptr::addr_of!((*slot_ptr).id).read() });
-    let kind = unsafe { ptr::addr_of!((*slot_ptr).kind).read() };
-    let ver = unsafe { ptr::addr_of!((*slot_ptr).ver).read() };
-    let payload_len = unsafe { ptr::addr_of!((*slot_ptr).payload_len).read() } as usize;
+    // Read content fields. `Relaxed` throughout: the seq load above and the
+    // fence below are what order this, and a value read here is only trusted
+    // once the two seqs agree.
+    let id = NetId64::from_raw(slot.id.load(Ordering::Relaxed));
+    let kind = slot.kind.load(Ordering::Relaxed);
+    let ver = slot.ver.load(Ordering::Relaxed);
+    let payload_len = slot.payload_len.load(Ordering::Relaxed) as usize;
     if payload_len > payload_capacity {
         // corrupt — bail
         return None;
     }
-    let payload_src = unsafe { slot_ptr.cast::<u8>().add(SLOT_HEADER_SIZE) as *const u8 };
+    let payload_src = unsafe { ShmRing::payload_ptr(slot_ptr) };
     let mut payload_buf = vec![0u8; payload_len];
-    unsafe { ptr::copy_nonoverlapping(payload_src, payload_buf.as_mut_ptr(), payload_len) };
+    for (index, byte) in payload_buf.iter_mut().enumerate() {
+        *byte = unsafe { (*payload_src.add(index)).load(Ordering::Relaxed) };
+    }
 
     // The mirror of the writer's fence. `Acquire` on a load orders the accesses
     // that come *after* it, so reading the closing seq with `Acquire` would
@@ -1009,16 +1041,19 @@ mod tests {
 
         let payload = b"ready";
         unsafe {
-            ptr::addr_of_mut!((*slot_ptr).id)
-                .write(NetId64::make(199, NodeId::ZERO.get(), 0).raw());
-            ptr::addr_of_mut!((*slot_ptr).ver).write(7);
-            ptr::addr_of_mut!((*slot_ptr).payload_len).write(payload.len() as u32);
-            ptr::addr_of_mut!((*slot_ptr).kind).write(1);
-            ptr::copy_nonoverlapping(
-                payload.as_ptr(),
-                ShmRing::payload_ptr(slot_ptr),
-                payload.len(),
+            let slot = &*slot_ptr;
+            slot.id.store(
+                NetId64::make(199, NodeId::ZERO.get(), 0).raw(),
+                Ordering::Relaxed,
             );
+            slot.ver.store(7, Ordering::Relaxed);
+            slot.payload_len
+                .store(payload.len() as u32, Ordering::Relaxed);
+            slot.kind.store(1, Ordering::Relaxed);
+            let bytes = ShmRing::payload_ptr(slot_ptr);
+            for (index, byte) in payload.iter().enumerate() {
+                (*bytes.add(index)).store(*byte, Ordering::Relaxed);
+            }
         }
         unsafe { &*slot_ptr }.seq.store(2, Ordering::Release);
 
