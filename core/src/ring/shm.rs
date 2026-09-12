@@ -249,12 +249,17 @@ impl ShmRing {
             .checked_mul(slot_stride)
             .ok_or_else(|| invalid_input("ShmRing lane stride overflow"))?;
         let name = shm::ring_segment_name(fleet_name, kind);
-        let (region, _initialization_lock) = if spec.topology == RingTopology::SharedOrdered {
-            let (region, lock) = ShmRegion::open_or_create_locked(&name, size)?;
-            (region, Some(lock))
-        } else {
-            (ShmRegion::open_or_create(&name, size)?, None)
-        };
+
+        // Locked whatever the topology. Creation is two steps that a peer can
+        // arrive between — `shm_open(O_CREAT|O_EXCL)` publishes the name, and
+        // the header below is written after it — and the attach path reads that
+        // header and rejects a segment whose magic is still zero, with no
+        // retry. Only `SharedOrdered` took this lock, so every other ring was
+        // one scheduling accident away from a peer failing to boot with
+        // "wrong magic 0x00000000"; N workers starting together is exactly the
+        // case that produces it. `SharedOrdered` still keeps the lock for its
+        // writes — this is the same lock, held for a different reason.
+        let (region, _initialization_lock) = ShmRegion::open_or_create_locked(&name, size)?;
 
         // Initialize header on first creation; subsequent attachers
         // skip and rely on whatever the creator wrote.
