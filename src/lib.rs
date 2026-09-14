@@ -36,6 +36,16 @@ pub mod events {
     pub use orbit_events::*;
 }
 
+#[cfg(feature = "counter")]
+pub mod counter {
+    pub use orbit_counter::*;
+}
+
+#[cfg(feature = "invoke")]
+pub mod invoke {
+    pub use orbit_invoke::*;
+}
+
 #[cfg(feature = "metrics")]
 pub mod metrics {
     pub use orbit_metrics::*;

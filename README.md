@@ -58,14 +58,17 @@ bus.publish("worker.ready", b"worker-1")?;
 | Unix | `orbitive::shm` | POSIX shared-memory regions and naming |
 | always | `orbitive::core` | the complete low-level core surface |
 | `cache` | `orbitive::cache` | process-local L1 caches with fleet-wide mutation propagation |
+| `counter` | `orbitive::counter` | keyed signed counters shared across the fleet |
 | `events` | `orbitive::events` | raw topic and byte-payload event streams |
+| `invoke` | `orbitive::invoke` | bounded invocation requests with operation routing |
 | `lock` | `orbitive::lock` | keyed leases with ownership checks and fencing tokens |
 | `metrics` | `orbitive::metrics` | current metrics snapshots across workers |
 | `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls 0.23/0.24 server-session storage |
 
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
-[`orbit-events`](events/README.md), [`orbit-lock`](lock/README.md),
+[`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
+[`orbit-invoke`](invoke/README.md), [`orbit-lock`](lock/README.md),
 [`orbit-metrics`](metrics/README.md), and
 [`orbit-rustls`](rustls/README.md). Direct dependencies are supported when an
 integration needs a single narrow layer; applications can otherwise use the
@@ -82,6 +85,12 @@ commands then compile every Orbit dependency with the same values:
 [env]
 ORBIT_EVENT_RING_CAPACITY = { value = "1024", force = true }
 ORBIT_EVENT_RING_PAYLOAD_CAPACITY = { value = "512", force = true }
+
+ORBIT_COUNTER_CAPACITY = { value = "1024", force = true }
+ORBIT_COUNTER_KEY_MAX = { value = "240", force = true }
+
+ORBIT_INVOKE_RING_CAPACITY = { value = "256", force = true }
+ORBIT_INVOKE_RING_PAYLOAD_CAPACITY = { value = "8192", force = true }
 
 ORBIT_CACHE_MUTATION_RING_CAPACITY = { value = "1024", force = true }
 ORBIT_CACHE_MUTATION_RING_PAYLOAD_CAPACITY = { value = "1024", force = true }

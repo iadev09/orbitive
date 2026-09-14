@@ -1,0 +1,14 @@
+[package]
+name = "orbit-counter"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-shared keyed signed counters over Orbit shared memory."
+license.workspace = true
+repository.workspace = true
+keywords = ["counter", "shm", "fleet", "orbit", "atomic"]
+categories = ["concurrency"]
+exclude.workspace = true
+
+[dependencies]
+orbit-core.workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "orbit-invoke"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Bounded invocation transport over a dedicated Orbit ring."
+license.workspace = true
+repository.workspace = true
+keywords = ["invoke", "shm", "fleet", "orbit", "ring"]
+categories = ["concurrency"]
+exclude.workspace = true
+
+[features]
+tokio = ["dep:tokio"]
+
+[dependencies]
+bytes.workspace = true
+orbit-core.workspace = true
+tokio = { version = "1", default-features = false, features = ["net", "time"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "time"] }
