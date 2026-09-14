@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::io::{Read, Write};
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
@@ -46,7 +46,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn wait_until_readable(fd: &impl AsRawFd) -> bool {
     let mut poll_fd = libc::pollfd {
         fd: fd.as_raw_fd(),
@@ -67,7 +67,7 @@ fn child_put_wakes_and_populates_parent_l1() {
         .transport()
         .reset_rings()
         .expect("reset cache rings");
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     let event_fd = parent_cache.event_fd().expect("cache mutation eventfd");
 
     match unsafe { fork() }.expect("fork") {
@@ -91,7 +91,7 @@ fn child_put_wakes_and_populates_parent_l1() {
             std::process::exit(0);
         }
         ForkResult::Parent { child } => {
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
             {
                 assert!(wait_until_readable(&event_fd));
                 assert!(event_fd.drain().expect("drain eventfd") > 0);

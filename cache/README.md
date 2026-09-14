@@ -43,7 +43,8 @@ match store.read(b"user:42") {
 
 The cache provides named stores, bounded LRU state, TTL expiry, multi-slot
 values, fleet-wide last-write-wins ordering, and explicit payload-overwrite and
-lag reporting. On Linux and FreeBSD, `Cache::event_fd` supplies a readiness
+lag reporting. On Linux, FreeBSD, and macOS 14.4 or later, `Cache::event_fd`
+supplies a readiness
 signal; consumers drain it and then call `Cache::poll`.
 
 It does not provide persistence, serialization, an async runtime, concrete

@@ -21,3 +21,4 @@ libc.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 nix.workspace = true
+tokio = { version = "1", features = ["rt", "macros", "net", "time"] }

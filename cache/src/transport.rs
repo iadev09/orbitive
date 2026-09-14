@@ -6,7 +6,7 @@ use bytes::Bytes;
 use orbit_core::fleet::FleetLaneCursor;
 use orbit_core::{Fleet, NetId64, RingLoss};
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use orbit_core::RingEventFd;
 
 use crate::layout::{CacheLayout, MutationRecord, PayloadRecord};
@@ -284,7 +284,7 @@ impl<L: CacheLayout> CacheTransport<L> {
 
     /// Create this process' readiness bridge for the cache mutation ring.
     /// Payload writes deliberately do not have a listener.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
         self.fleet
             .ring_event_fd::<MutationRecord<L>>()
@@ -292,13 +292,13 @@ impl<L: CacheLayout> CacheTransport<L> {
     }
 
     fn publish_mutation(&self, kind: u8, version: u64, payload: Bytes) -> Result<NetId64> {
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         {
             self.fleet
                 .publish_notified::<MutationRecord<L>>(kind, version, payload)
                 .map_err(Error::Io)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
         {
             Ok(self
                 .fleet

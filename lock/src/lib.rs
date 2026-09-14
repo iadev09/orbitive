@@ -24,7 +24,7 @@ pub use layout::{
 };
 pub use state::{LOCK_STATE_CAPACITY, LOCK_STATE_PAYLOAD_MAX};
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use orbit_core::RingEventFd;
 
 use layout::LockEventRecord;
@@ -391,7 +391,7 @@ impl<L: LockLayout> Lock<L> {
     }
 
     /// Create this process' readiness fd for lock transitions.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
         self.fleet
             .ring_event_fd::<LockEventRecord<L>>()
@@ -401,7 +401,7 @@ impl<L: LockLayout> Lock<L> {
     fn publish(&self, transition: &LockTransition) -> Result<LockEvent> {
         let (kind, payload) = protocol::encode::<L>(transition)?;
         let event_id = {
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
             {
                 self.fleet.publish_notified::<LockEventRecord<L>>(
                     kind,
@@ -409,7 +409,7 @@ impl<L: LockLayout> Lock<L> {
                     payload,
                 )?
             }
-            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
             {
                 self.fleet
                     .publish::<LockEventRecord<L>>(kind, transition.state_revision(), payload)

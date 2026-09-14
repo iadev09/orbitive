@@ -11,14 +11,13 @@
 //! node lane and do not assume a total order across nodes.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use orbit_core::RingEventFd;
 use orbit_core::fleet::FleetLaneCursor;
-use orbit_core::{Fleet, NetId64, NodeId, OrbitTyped, RingSpec};
+use orbit_core::{Fleet, NetId64, NodeId, OrbitEpoch, OrbitTyped, RingSpec};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -194,7 +193,7 @@ impl FleetEventBus {
     /// generation after committing an event; the bridge converts that
     /// broadcast into local fd readiness suitable for epoll/kqueue/AsyncFd.
     /// Drain the fd, then poll the ring with this subscriber's cursor.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
         self.fleet
             .ring_event_fd::<FleetEventRecord>()
@@ -203,17 +202,17 @@ impl FleetEventBus {
 
     /// Publish one event under `topic`.
     pub fn publish(&self, topic: &str, payload: &[u8]) -> Result<NetId64> {
-        let timestamp_ms = now_ms();
-        let frame = encode_frame(topic.as_bytes(), payload, timestamp_ms)?;
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let timestamp = OrbitEpoch::now();
+        let frame = encode_frame(topic.as_bytes(), payload, timestamp)?;
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         let id = self
             .fleet
-            .publish_notified::<FleetEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame)
+            .publish_notified::<FleetEventRecord>(FRAME_KIND_EVENT, timestamp.as_unix_ms(), frame)
             .map_err(Error::Io)?;
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        let id = self
-            .fleet
-            .publish::<FleetEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame);
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+        let id =
+            self.fleet
+                .publish::<FleetEventRecord>(FRAME_KIND_EVENT, timestamp.as_unix_ms(), frame);
         Ok(id)
     }
 
@@ -233,7 +232,7 @@ impl FleetEventBus {
                 id: frame.id,
                 topic: String::from_utf8_lossy(decoded.topic).into_owned(),
                 payload: decoded.payload.to_vec(),
-                timestamp_ms: decoded.timestamp_ms,
+                timestamp_ms: decoded.timestamp.as_unix_ms(),
             });
         }
 
@@ -254,10 +253,10 @@ impl FleetEventBus {
 struct DecodedFrame<'a> {
     topic: &'a [u8],
     payload: &'a [u8],
-    timestamp_ms: u64,
+    timestamp: OrbitEpoch,
 }
 
-fn encode_frame(topic: &[u8], payload: &[u8], timestamp_ms: u64) -> Result<Bytes> {
+fn encode_frame(topic: &[u8], payload: &[u8], timestamp: OrbitEpoch) -> Result<Bytes> {
     let total = HEADER_LEN + topic.len() + payload.len();
     if topic.len() > u16::MAX as usize
         || payload.len() > u16::MAX as usize
@@ -273,7 +272,7 @@ fn encode_frame(topic: &[u8], payload: &[u8], timestamp_ms: u64) -> Result<Bytes
     let mut buf = BytesMut::with_capacity(total);
     buf.put_u16_le(topic.len() as u16);
     buf.put_u16_le(payload.len() as u16);
-    buf.put_u64_le(timestamp_ms);
+    buf.put_u64_le(timestamp.as_unix_ms());
     buf.put_slice(topic);
     buf.put_slice(payload);
     Ok(buf.freeze())
@@ -286,7 +285,7 @@ fn decode_frame(payload: &Bytes) -> Option<DecodedFrame<'_>> {
 
     let topic_len = u16::from_le_bytes(payload[0..2].try_into().ok()?) as usize;
     let payload_len = u16::from_le_bytes(payload[2..4].try_into().ok()?) as usize;
-    let timestamp_ms = u64::from_le_bytes(payload[4..12].try_into().ok()?);
+    let timestamp = OrbitEpoch::from_unix_ms(u64::from_le_bytes(payload[4..12].try_into().ok()?));
     let topic_start = HEADER_LEN;
     let topic_end = topic_start.checked_add(topic_len)?;
     let payload_end = topic_end.checked_add(payload_len)?;
@@ -297,15 +296,8 @@ fn decode_frame(payload: &Bytes) -> Option<DecodedFrame<'_>> {
     Some(DecodedFrame {
         topic: &payload[topic_start..topic_end],
         payload: &payload[topic_end..payload_end],
-        timestamp_ms,
+        timestamp,
     })
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -313,7 +305,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::FleetEventBus;
-    use orbit_core::Fleet;
+    use orbit_core::{Fleet, OrbitEpoch};
 
     #[test]
     fn polls_events_since_cursor() {
@@ -373,12 +365,13 @@ mod tests {
         assert_eq!(super::EVENT_PAYLOAD_MAX, expected);
 
         let largest_payload = vec![0_u8; super::EVENT_PAYLOAD_MAX - super::HEADER_LEN - 1];
-        let frame = super::encode_frame(b"x", &largest_payload, 0).expect("frame must fit");
+        let frame =
+            super::encode_frame(b"x", &largest_payload, OrbitEpoch::ZERO).expect("frame must fit");
         assert_eq!(frame.len(), super::EVENT_PAYLOAD_MAX);
 
         let oversized_payload = vec![0_u8; largest_payload.len() + 1];
         assert!(matches!(
-            super::encode_frame(b"x", &oversized_payload, 0),
+            super::encode_frame(b"x", &oversized_payload, OrbitEpoch::ZERO),
             Err(super::Error::FrameTooLarge {
                 max_payload,
                 ..

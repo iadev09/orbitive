@@ -16,7 +16,7 @@ sibling processes. Every method performs one immediate attempt. Waiting,
 retry, backoff, and authorization belong to the caller.
 
 A separate bounded ring records successful transitions and provides readiness
-on Linux and FreeBSD, but that history is advisory: the current-state table
+on Linux, FreeBSD, and macOS 14.4 or later, but that history is advisory: the current-state table
 alone decides ownership.
 
 The table never evicts a live lock to admit another key. Expired entries may be

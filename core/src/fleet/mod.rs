@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use crate::OrbitTyped;
 use crate::error::{Error, Result};
 use crate::id::NetId64;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use crate::ring::RingEventFd;
 #[cfg(unix)]
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
@@ -492,7 +492,7 @@ impl Fleet {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     /// Create a process-local readiness fd for one notified SHM ring.
     ///
     /// The fd only signals that the ring generation changed. After draining
@@ -508,7 +508,7 @@ impl Fleet {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     /// Publish one frame and notify native waiters after it commits.
     pub fn publish_notified<T: OrbitTyped>(
         &self,
@@ -532,7 +532,7 @@ impl Fleet {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     /// Publish one contiguous batch and notify native waiters once after the
     /// complete batch commits.
     pub fn publish_batch_notified<T: OrbitTyped>(

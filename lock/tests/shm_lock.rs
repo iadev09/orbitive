@@ -3,7 +3,7 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn wait_until_readable(fd: &impl AsRawFd) -> bool {
     let mut poll_fd = libc::pollfd {
         fd: fd.as_raw_fd(),
@@ -111,7 +111,7 @@ fn processes_contending_for_one_key_produce_one_owner() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 #[test]
 fn child_transition_wakes_parent_eventfd() {
     let name = fresh_name();

@@ -39,7 +39,7 @@ pub use epoch::OrbitEpoch;
 pub use error::{Error, Result};
 pub use fleet::{Fleet, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use ring::RingEventFd;
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};
 pub use ring::{Frame, Ring, RingSpec, RingTopology};

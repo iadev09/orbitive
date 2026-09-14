@@ -30,7 +30,7 @@ pub use local::{CacheEntry, CacheRead, LocalCache};
 pub use protocol::{CacheMutation, CacheRevision, PayloadRef};
 pub use transport::{CacheMutationCursor, CacheMutationPoll, CacheTransport};
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use orbit_core::RingEventFd;
 
 pub const DEFAULT_L1_CAPACITY: usize = 10_000;
@@ -252,7 +252,7 @@ impl<L: CacheLayout> Cache<L> {
         &self.transport
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
         self.transport.event_fd()
     }

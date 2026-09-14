@@ -447,7 +447,7 @@ impl ShmRing {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     pub(crate) fn notification_generation(&self) -> &AtomicU32 {
         // SAFETY: the mapped header was initialized before this ring handle
         // was returned and remains mapped for the lifetime of `self`.

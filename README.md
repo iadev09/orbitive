@@ -141,7 +141,8 @@ entries may be evicted. Callers must treat those outcomes according to the
 semantic module they use.
 
 Shared-memory operation currently targets Unix. Native readiness is available
-on Linux and FreeBSD; other supported targets use caller-driven polling where
-the semantic module permits it.
+on Linux, FreeBSD, and macOS 14.4 or later. On older macOS, readiness creation
+returns `io::ErrorKind::Unsupported`; callers can use polling where the
+semantic module permits it.
 
 Repository: <https://github.com/iadev09/orbitive>

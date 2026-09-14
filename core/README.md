@@ -41,8 +41,8 @@ wraps.
 - stable frame identifiers through `netid64::NetId64`;
 - cursor polling with explicit overwritten and unavailable counts;
 - shared sequence allocation and batch publication;
-- process-local readiness bridges backed by futex on Linux and umtx on
-  FreeBSD;
+- process-local readiness bridges backed by futex on Linux, umtx on
+  FreeBSD, and shared address waits on macOS 14.4 or later;
 - reusable SHM mapping and locking primitives for current-state tables.
 
 `orbit-core` does not choose a serializer, implement application lifecycle,

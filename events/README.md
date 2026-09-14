@@ -29,7 +29,8 @@ changes which events are returned, not which frames are consumed. If the
 cursor falls behind the retained window, `FleetEventPoll::lagged` reports the
 loss.
 
-On Linux and FreeBSD, an SHM-backed bus can create a process-local
+On Linux, FreeBSD, and macOS 14.4 or later, an SHM-backed bus can create a
+process-local
 `RingEventFd`. Consumers drain that readiness signal and then poll the ring;
 the fd does not carry event data, and wakeups may coalesce.
 
