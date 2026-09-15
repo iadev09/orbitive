@@ -178,11 +178,7 @@ impl InvocationBus {
         let operation = operation.into();
         validate_operation(&operation)?;
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-        let event_fd = if self.fleet.is_shm() {
-            Some(tokio::io::unix::AsyncFd::new(self.event_fd()?).map_err(Error::Io)?)
-        } else {
-            None
-        };
+        let event_fd = self.subscription_event_fd()?;
         Ok(InvocationSubscription {
             cursor: self.cursor_at_head(),
             bus: Arc::clone(self),
@@ -206,6 +202,24 @@ impl InvocationBus {
         self.fleet
             .ring_event_fd::<InvocationRecord>()
             .map_err(Error::Io)
+    }
+
+    #[cfg(all(
+        feature = "tokio",
+        any(target_os = "linux", target_os = "freebsd", target_os = "macos")
+    ))]
+    fn subscription_event_fd(&self) -> Result<Option<tokio::io::unix::AsyncFd<RingEventFd>>> {
+        if !self.fleet.is_shm() {
+            return Ok(None);
+        }
+        match self.event_fd() {
+            Ok(event_fd) => Ok(Some(
+                tokio::io::unix::AsyncFd::new(event_fd).map_err(Error::Io)?,
+            )),
+            #[cfg(target_os = "macos")]
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Commit a raw invocation. Success means publication, not execution.

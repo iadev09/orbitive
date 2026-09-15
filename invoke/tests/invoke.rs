@@ -104,3 +104,46 @@ async fn subscription_keeps_retained_invocations_after_reporting_lag() {
     assert_eq!(invocation.operation, "sequence.v1");
     assert_eq!(invocation.payload, 1usize.to_le_bytes());
 }
+
+#[cfg(all(feature = "tokio", unix))]
+#[tokio::test(flavor = "current_thread")]
+async fn shm_subscription_receives_a_peer_notification() {
+    use orbit_core::{NodeId, OrbitTyped, RingSpec};
+
+    #[derive(Clone)]
+    struct TestInvocationRing;
+    impl OrbitTyped for TestInvocationRing {
+        const KIND: u8 = INVOCATION_RING_KIND;
+        const RING_SPEC: RingSpec = INVOCATION_RING_SPEC;
+    }
+
+    let name = Box::leak(format!("ivt{:x}", std::process::id()).into_boxed_str());
+    let writer_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("writer fleet"));
+    let reader_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("reader fleet"));
+    writer_fleet
+        .shm_ring::<TestInvocationRing>()
+        .expect("invocation ring")
+        .reset();
+
+    let writer = InvocationBus::new(writer_fleet);
+    let reader = Arc::new(InvocationBus::new(Arc::clone(&reader_fleet)));
+    let mut subscription = reader
+        .clone()
+        .subscribe(Ping::OPERATION)
+        .expect("subscribe");
+
+    let id = writer.submit(Ping::OPERATION, b"peer").expect("submit");
+    let invocation =
+        tokio::time::timeout(std::time::Duration::from_secs(2), subscription.receive())
+            .await
+            .expect("peer notification timed out")
+            .expect("receive");
+
+    assert_eq!(invocation.id, id);
+    assert_eq!(invocation.payload, b"peer");
+    reader_fleet
+        .shm_ring::<TestInvocationRing>()
+        .expect("invocation ring")
+        .unlink()
+        .expect("unlink invocation ring");
+}
