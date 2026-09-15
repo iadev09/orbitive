@@ -23,6 +23,7 @@ pub mod fleet;
 pub mod ring;
 #[cfg(unix)]
 pub mod shm;
+pub mod sync;
 
 pub mod id {
     //! Re-export of the standalone `netid64` primitive.

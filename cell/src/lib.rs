@@ -40,10 +40,38 @@ pub const CELL_CAPACITY: usize =
 pub(crate) const SLOT_EMPTY: u8 = 0;
 pub(crate) const SLOT_OCCUPIED: u8 = 1;
 
+/// Park until `word` no longer holds `expected`, through the platform's
+/// shared address wait; where there is none, a short sleep and a re-check.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub(crate) fn wait_on(word: &AtomicU32, expected: u32) -> Result<()> {
+    match orbit_core::sync::wait_word(word, expected) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            Ok(())
+        }
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+pub(crate) fn wait_on(_word: &AtomicU32, _expected: u32) -> Result<()> {
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    Ok(())
+}
+
+/// Wake everyone parked on `word`; nothing to do where nobody can park.
+pub(crate) fn wake_on(word: &AtomicU32) {
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    let _ = orbit_core::sync::wake_word(word);
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+    let _ = word;
+}
+
 #[cfg(unix)]
 const STATE_MAGIC: u32 = 0x43_45_4C_4C; // "CELL"
 #[cfg(unix)]
-const STATE_VERSION: u16 = 1;
+const STATE_VERSION: u16 = 2;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -344,6 +372,8 @@ impl Cells {
                 .filter(|slot| slot.is(id))
                 .ok_or(Error::Stale(id))?;
             slot.state.store(SLOT_EMPTY, Ordering::Release);
+            // Whoever is parked on it finds the slot gone and answers Stale.
+            slot.changed();
             Ok(())
         })
     }
@@ -358,6 +388,7 @@ impl Cells {
         self.with_structure(|slots, hint| {
             for slot in slots {
                 slot.state.store(SLOT_EMPTY, Ordering::Release);
+                slot.changed();
             }
             hint.store(0, Ordering::Relaxed);
             Ok(())
@@ -424,31 +455,62 @@ impl<T: CellType> Orbital<T> {
     }
 
     pub fn store(&self, value: T) -> Result<()> {
-        self.slot()?.value.store(value.to_bits(), Ordering::Release);
+        let slot = self.slot()?;
+        slot.value.store(value.to_bits(), Ordering::Release);
+        slot.changed();
         Ok(())
     }
 
     /// Replace the value and return what it was.
     pub fn swap(&self, value: T) -> Result<T> {
-        Ok(T::from_bits(
-            self.slot()?.value.swap(value.to_bits(), Ordering::AcqRel),
-        ))
+        let slot = self.slot()?;
+        let previous = slot.value.swap(value.to_bits(), Ordering::AcqRel);
+        slot.changed();
+        Ok(T::from_bits(previous))
+    }
+
+    /// The write count, the thing [`Self::wait_changed`] waits on. Take it
+    /// before reading the value, and the wait misses nothing in between.
+    pub fn version(&self) -> Result<u32> {
+        Ok(self.slot()?.changes.load(Ordering::Acquire))
+    }
+
+    /// Park until the cell has been written since `since`, then return the
+    /// count now. Coalescing: ten writes while parked wake the caller once,
+    /// and [`Self::load`] gives the latest. A released cell wakes every waiter
+    /// with [`Error::Stale`]. Blocking; an async runtime wraps it.
+    pub fn wait_changed(&self, since: u32) -> Result<u32> {
+        loop {
+            let slot = self.slot()?;
+            let now = slot.changes.load(Ordering::SeqCst);
+            if now != since {
+                return Ok(now);
+            }
+            slot.waiters.fetch_add(1, Ordering::SeqCst);
+            let outcome = if slot.changes.load(Ordering::SeqCst) == since {
+                wait_on(&slot.changes, since)
+            } else {
+                Ok(())
+            };
+            slot.waiters.fetch_sub(1, Ordering::SeqCst);
+            outcome?;
+        }
     }
 
     /// Store `new` only if the cell still holds `current`. `Ok(Ok(previous))`
     /// on success, `Ok(Err(actual))` when it held something else.
     pub fn compare_exchange(&self, current: T, new: T) -> Result<std::result::Result<T, T>> {
-        Ok(self
-            .slot()?
-            .value
-            .compare_exchange(
-                current.to_bits(),
-                new.to_bits(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map(T::from_bits)
-            .map_err(T::from_bits))
+        let slot = self.slot()?;
+        let exchanged = slot.value.compare_exchange(
+            current.to_bits(),
+            new.to_bits(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if exchanged.is_ok() {
+            slot.changed();
+        }
+        Ok(exchanged.map(T::from_bits).map_err(T::from_bits))
     }
 
     /// Give the cell back; this and every other handle to it go stale.
@@ -469,7 +531,10 @@ impl Orbital<i64> {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
                 (bits as i64).checked_add(by).map(|value| value as u64)
             })
-            .map(|previous| (previous as i64) + by)
+            .map(|previous| {
+                slot.changed();
+                (previous as i64) + by
+            })
             .map_err(|_| Error::Overflow)
     }
 
@@ -485,7 +550,10 @@ impl Orbital<u64> {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
                 bits.checked_add(by)
             })
-            .map(|previous| previous + by)
+            .map(|previous| {
+                slot.changed();
+                previous + by
+            })
             .map_err(|_| Error::Overflow)
     }
 
@@ -495,7 +563,10 @@ impl Orbital<u64> {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
                 bits.checked_sub(by)
             })
-            .map(|previous| previous - by)
+            .map(|previous| {
+                slot.changed();
+                previous - by
+            })
             .map_err(|_| Error::Overflow)
     }
 }
@@ -511,6 +582,7 @@ impl Orbital<f64> {
                 Some((f64::from_bits(bits) + by).to_bits())
             })
             .unwrap_or_else(|bits| bits);
+        slot.changed();
         Ok(f64::from_bits(previous) + by)
     }
 }
@@ -575,7 +647,13 @@ struct CellSlot {
     _reserved: [u8; 2],
     generation: AtomicU32,
     value: AtomicU64,
-    _padding: [u8; 48],
+    /// Bumped by every write and by release: the word a waiter parks on.
+    /// Linux futex wants 32 bits, so the value itself cannot be that word.
+    changes: AtomicU32,
+    /// Waiters parked on `changes`; a writer wakes only when this is nonzero,
+    /// so the write path costs one extra load when nobody is listening.
+    waiters: AtomicU32,
+    _padding: [u8; 40],
 }
 
 impl CellSlot {
@@ -586,7 +664,20 @@ impl CellSlot {
             _reserved: [0; 2],
             generation: AtomicU32::new(0),
             value: AtomicU64::new(0),
-            _padding: [0; 48],
+            changes: AtomicU32::new(0),
+            waiters: AtomicU32::new(0),
+            _padding: [0; 40],
+        }
+    }
+
+    /// After a write: count it, and wake whoever is waiting for one. `SeqCst`
+    /// on both sides of the exchange with [`Orbital::wait_changed`], so a
+    /// waiter that announced itself just before this write is either seen
+    /// here or sees the new count itself; never neither.
+    fn changed(&self) {
+        self.changes.fetch_add(1, Ordering::SeqCst);
+        if self.waiters.load(Ordering::SeqCst) > 0 {
+            wake_on(&self.changes);
         }
     }
 
@@ -606,6 +697,8 @@ impl CellSlot {
             .max(1);
         self.tag.store(tag, Ordering::Relaxed);
         self.value.store(value, Ordering::Relaxed);
+        self.changes.store(0, Ordering::Relaxed);
+        self.waiters.store(0, Ordering::Relaxed);
         self.generation.store(generation, Ordering::Relaxed);
         self.state.store(SLOT_OCCUPIED, Ordering::Release);
         generation
@@ -734,3 +827,54 @@ const _: () = assert!(CELL_CAPACITY.is_power_of_two());
 const _: () = assert!(CELL_CAPACITY <= u32::MAX as usize);
 const _: () = assert!(size_of::<CellStateHeader>() == 64);
 const _: () = assert!(size_of::<CellSlot>() == 64);
+
+#[cfg(test)]
+mod wait_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use orbit_core::Fleet;
+
+    use super::{Cells, Error};
+
+    fn cells() -> Cells {
+        Cells::new(Arc::new(Fleet::join("cell-wait-test", 1).unwrap())).unwrap()
+    }
+
+    /// A waiter parks on the change count and a write from another thread
+    /// wakes it; it then reads the value the write left. Ten writes while
+    /// parked are one wake.
+    #[test]
+    fn a_write_wakes_a_waiter_once() {
+        let cells = cells();
+        let cell = cells.allocate(0_i64).unwrap();
+        let since = cell.version().unwrap();
+        let watcher = cell.clone();
+        let waiter = std::thread::spawn(move || watcher.wait_changed(since));
+
+        std::thread::sleep(Duration::from_millis(30));
+        for _ in 0..10 {
+            cell.fetch_add(1).unwrap();
+        }
+        let now = waiter.join().unwrap().unwrap();
+        assert!(now > since);
+        assert_eq!(cell.load().unwrap(), 10);
+        // Nothing new since: a wait would park; the count says so.
+        assert_eq!(cell.version().unwrap(), cell.version().unwrap());
+    }
+
+    /// Releasing the cell is a change too: a parked waiter comes back Stale
+    /// instead of sleeping on a slot somebody else may take.
+    #[test]
+    fn release_wakes_a_waiter_stale() {
+        let cells = cells();
+        let cell = cells.allocate(7_i64).unwrap();
+        let since = cell.version().unwrap();
+        let watcher = cell.clone();
+        let waiter = std::thread::spawn(move || watcher.wait_changed(since));
+
+        std::thread::sleep(Duration::from_millis(30));
+        cell.release().unwrap();
+        assert!(matches!(waiter.join().unwrap(), Err(Error::Stale(_))));
+    }
+}

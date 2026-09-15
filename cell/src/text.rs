@@ -35,7 +35,7 @@ pub const CELL_TEXT_MAX: usize =
 #[cfg(unix)]
 const TEXT_MAGIC: u32 = 0x43_54_58_54; // "CTXT"
 #[cfg(unix)]
-const TEXT_VERSION: u16 = 1;
+const TEXT_VERSION: u16 = 2;
 
 /// The address of one text cell; prints as `text:<slot>:<generation>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -163,6 +163,44 @@ impl Text {
         self.table.release(self.id)
     }
 
+    /// The seqlock sequence at rest, the thing [`Self::wait_changed`] waits
+    /// on. Take it before [`Self::load`] and the wait misses nothing.
+    pub fn version(&self) -> Result<u32> {
+        let slot = self.slot()?;
+        loop {
+            let version = slot.version.load(Ordering::Acquire);
+            if version & 1 == 0 {
+                return Ok(version);
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Park until the text has been written since `since`, then return the
+    /// sequence now. A released cell wakes every waiter with
+    /// [`Error::StaleText`]. Blocking; an async runtime wraps it.
+    pub fn wait_changed(&self, since: u32) -> Result<u32> {
+        loop {
+            let slot = self.slot()?;
+            let now = slot.version.load(Ordering::SeqCst);
+            if now != since {
+                if now & 1 == 1 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                return Ok(now);
+            }
+            slot.waiters.fetch_add(1, Ordering::SeqCst);
+            let outcome = if slot.version.load(Ordering::SeqCst) == since {
+                crate::wait_on(&slot.version, since)
+            } else {
+                Ok(())
+            };
+            slot.waiters.fetch_sub(1, Ordering::SeqCst);
+            outcome?;
+        }
+    }
+
     fn slot(&self) -> Result<&TextSlot> {
         self.table.slot(self.id)
     }
@@ -237,6 +275,9 @@ impl TextBackend {
                 .filter(|slot| slot.is(id))
                 .ok_or(Error::StaleText(id))?;
             slot.state.store(SLOT_EMPTY, Ordering::Release);
+            // An even step keeps the seqlock at rest; waiters find it gone.
+            slot.version.fetch_add(2, Ordering::SeqCst);
+            slot.wake_waiters();
             Ok(())
         })
     }
@@ -249,6 +290,8 @@ impl TextBackend {
         self.with_structure(|slots, hint| {
             for slot in slots {
                 slot.state.store(SLOT_EMPTY, Ordering::Release);
+                slot.version.fetch_add(2, Ordering::SeqCst);
+                slot.wake_waiters();
             }
             hint.store(0, Ordering::Relaxed);
             Ok(())
@@ -338,8 +381,11 @@ struct TextSlot {
     writer: AtomicU8,
     len: AtomicU16,
     generation: AtomicU32,
+    /// The seqlock's sequence: odd while a write is in progress, and the
+    /// word a waiter parks on, since every write moves it.
     version: AtomicU32,
-    _reserved: [u8; 4],
+    /// Waiters parked on `version`; a writer wakes only when nonzero.
+    waiters: AtomicU32,
     bytes: [AtomicU8; CELL_TEXT_MAX],
 }
 
@@ -351,7 +397,7 @@ impl TextSlot {
             len: AtomicU16::new(0),
             generation: AtomicU32::new(0),
             version: AtomicU32::new(0),
-            _reserved: [0; 4],
+            waiters: AtomicU32::new(0),
             bytes: std::array::from_fn(|_| AtomicU8::new(0)),
         }
     }
@@ -373,6 +419,7 @@ impl TextSlot {
         }
         self.len.store(text.len() as u16, Ordering::Relaxed);
         self.version.store(0, Ordering::Relaxed);
+        self.waiters.store(0, Ordering::Relaxed);
         self.writer.store(0, Ordering::Relaxed);
         self.generation.store(generation, Ordering::Relaxed);
         self.state.store(SLOT_OCCUPIED, Ordering::Release);
@@ -401,7 +448,15 @@ impl TextSlot {
         }
         self.len
             .store((offset + bytes.len()) as u16, Ordering::Relaxed);
-        self.version.fetch_add(1, Ordering::AcqRel);
+        self.version.fetch_add(1, Ordering::SeqCst);
+        self.wake_waiters();
+    }
+
+    /// The sequence moved: wake whoever parked on it, if anyone did.
+    fn wake_waiters(&self) {
+        if self.waiters.load(Ordering::SeqCst) > 0 {
+            crate::wake_on(&self.version);
+        }
     }
 }
 
