@@ -46,6 +46,20 @@ use std::ptr::NonNull;
 /// Namespace used by Orbit POSIX shared-memory objects.
 pub const SHM_NAMESPACE: &str = "orbit";
 
+/// Result of physically validating an existing POSIX SHM object.
+///
+/// This check is deliberately below ring semantics: it verifies that the
+/// named object can be opened and is large enough for the requested mapping,
+/// but it does not inspect an owning data structure's magic, version, or
+/// geometry header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShmValidation {
+    /// No object currently exists under the requested name.
+    Missing,
+    /// The object exists and can safely back at least the requested mapping.
+    Valid { actual_size: usize },
+}
+
 /// A mapped POSIX SHM region. Drop unmaps; `unlink` removes the
 /// underlying name and any companion lock file (only the *creator*
 /// should call it on shutdown).
@@ -67,6 +81,40 @@ pub struct ShmRegion {
 }
 
 impl ShmRegion {
+    /// Validate an existing shared-memory object without creating, mapping,
+    /// resetting, or unlinking it.
+    ///
+    /// Returns [`ShmValidation::Missing`] when the name does not exist. A
+    /// present object must be at least `minimum_size` bytes; larger objects
+    /// are accepted because some platforms report page-rounded SHM sizes.
+    /// The owning ring or table remains responsible for validating its own
+    /// persisted ABI header after mapping.
+    pub fn validate_existing(name: &str, minimum_size: usize) -> io::Result<ShmValidation> {
+        let cname = CString::new(name)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
+        let raw_fd = loop {
+            // SAFETY: passing a valid C string and well-known POSIX flags.
+            let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
+            if fd >= 0 {
+                break fd;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(ShmValidation::Missing);
+            }
+            return Err(error);
+        };
+        // SAFETY: `raw_fd` was returned by `shm_open` and is now uniquely
+        // owned by this scope.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let actual_size = shm_object_size(&fd, name)?;
+        validate_minimum_size(name, actual_size, minimum_size)?;
+        Ok(ShmValidation::Valid { actual_size })
+    }
+
     /// Open or create a shared-memory segment of `size` bytes,
     /// memory-mapped read/write. Idempotent: if the segment already
     /// exists with the same name and enough mapped bytes, it is reused
@@ -147,26 +195,20 @@ impl ShmRegion {
         // SIGBUS. A larger reported size is valid on platforms (notably
         // macOS) that page-round POSIX SHM objects; callers verify their
         // own ABI metadata after mapping.
-        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        let stat_rc = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
-        if stat_rc != 0 {
-            let err = io::Error::last_os_error();
+        let actual_size = match shm_object_size(&fd, name) {
+            Ok(actual_size) => actual_size,
+            Err(error) => {
+                if created {
+                    let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = validate_minimum_size(name, actual_size, size) {
             if created {
                 let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
             }
-            return Err(err);
-        }
-        let actual_size = unsafe { stat.assume_init() }.st_size;
-        if actual_size < 0 || (actual_size as usize) < size {
-            if created {
-                let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "SHM segment {name} size {actual_size} is smaller than requested mapping {size}"
-                ),
-            ));
+            return Err(error);
         }
 
         // Memory-map the segment.
@@ -285,6 +327,35 @@ impl ShmRegion {
         }
         Ok(())
     }
+}
+
+fn shm_object_size(fd: &OwnedFd, name: &str) -> io::Result<usize> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fd` is valid and `stat` points to writable storage.
+    let stat_rc = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
+    if stat_rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fstat` succeeded and initialized the structure.
+    let actual_size = unsafe { stat.assume_init() }.st_size;
+    usize::try_from(actual_size).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("SHM segment {name} reported invalid size {actual_size}"),
+        )
+    })
+}
+
+fn validate_minimum_size(name: &str, actual_size: usize, minimum_size: usize) -> io::Result<()> {
+    if actual_size < minimum_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SHM segment {name} size {actual_size} is smaller than requested mapping {minimum_size}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// RAII guard for a [`ShmRegion`]'s process-recoverable exclusive lock.
