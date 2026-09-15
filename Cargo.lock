@@ -500,14 +500,14 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "orbit-arena"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "orbit-core",
 ]
 
 [[package]]
 name = "orbit-cache"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "bytes",
  "criterion",
@@ -519,14 +519,14 @@ dependencies = [
 
 [[package]]
 name = "orbit-cell"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "orbit-core",
 ]
 
 [[package]]
 name = "orbit-core"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "bytes",
  "dashmap",
@@ -538,14 +538,14 @@ dependencies = [
 
 [[package]]
 name = "orbit-counter"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "orbit-core",
 ]
 
 [[package]]
 name = "orbit-events"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "bytes",
  "libc",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-invoke"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "bytes",
  "orbit-core",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-lock"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "bytes",
  "libc",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-metrics"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "bytes",
  "orbit-core",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "orbitive"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "orbit-arena",
  "orbit-cache",
