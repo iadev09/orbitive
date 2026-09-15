@@ -1,11 +1,15 @@
 # orbit-cell
 
-`orbit-cell` provides typed atomic cells in one fleet-shared table, addressed
-by id rather than by name. A cell is a place: allocate it once, pass its id to
-any process in the fleet, and every handle reads and updates the same 64 bits
-atomically, without a lock and without publishing a frame. `orbit-counter` is
-the keyed sibling; this is memory rather than a dictionary. Applications
-normally use it through `orbitive::cell`.
+A variable that several processes hold at once.
+
+`orbit-cell` keeps typed atomic cells in one fleet-shared table in shared
+memory, addressed by id rather than by name. A cell is a place: allocate it
+once, hand its id to any process in the fleet, and every handle reads and
+updates the same 64 bits atomically, without a lock, without a copy and
+without publishing a frame. The id is the only thing that ever travels: in a
+message, in a cache, in a web page. Whoever opens it is looking at the same
+memory. `orbit-counter` is the keyed sibling; this is memory rather than a
+dictionary. Applications normally use it through `orbitive::cell`.
 
 ```rust
 use std::sync::Arc;
@@ -41,6 +45,57 @@ current text, `store` replaces it and `append` extends it atomically with
 respect to every other writer; a write that would not fit is refused whole,
 never cut. Readers go through a seqlock and never observe a torn string. A
 `TextId` prints as `text:<slot>:<generation>`.
+
+## Waiting for a change
+
+A cell is state, not a message: nobody is told when it changes, and a reader
+that wants the latest value reads it. Between the two sits one more thing a
+cell can do, which neither an atomic nor an event can: park a reader until
+the cell has been written.
+
+```rust
+# use std::sync::Arc;
+# use orbitive::cell::Cells;
+# use orbitive::Fleet;
+# let cells = Cells::new(Arc::new(Fleet::join("example-wait", 1)?))?;
+let progress = cells.allocate(0_i64)?;
+
+// Elsewhere, in any process: a loop that adds as fast as it likes.
+let writer = progress.clone();
+std::thread::spawn(move || {
+    for _ in 0..1_000_000 {
+        writer.fetch_add(1).unwrap();
+    }
+});
+
+// Here: sleep until something happened, read what it is now, repeat.
+let mut seen = progress.version()?;
+loop {
+    seen = progress.wait_changed(seen)?;    // parks; one wake for any number of writes
+    let now = progress.load()?;
+    if now >= 1_000_000 { break; }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`version` is the cell's write count; `wait_changed(since)` parks until the
+count has moved past `since` and returns the count now. A million writes
+while the reader is parked wake it once, and `load` gives the latest: this is
+a gauge, not a queue, and nothing in between is retained. The same pair
+exists on `Text`, where the seqlock's own sequence is the count.
+
+The wait is the memory's, not a channel's. Linux futex, FreeBSD umtx and
+macOS `os_sync_wait_on_address` (14.4 and later; earlier releases poll) key
+waiters by the physical location of the word, so a write in one process
+wakes a reader parked in another with nothing carried between them: no
+descriptor to share, no ring to drain, no subscription to keep. A writer
+pays one extra load per write to see whether anyone is parked, and a wake
+only when someone is, so an unwatched cell costs what an atomic costs.
+
+Releasing a cell is a change too: whoever is parked on it wakes with
+`Error::Stale` rather than sleeping on a slot somebody else may take next.
+
+## Lifetime and geometry
 
 Every id carries the generation its slot was allocated in, and `release`
 retires that generation: a handle kept past a release reports `Error::Stale`
