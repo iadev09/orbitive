@@ -514,6 +514,66 @@ pub fn ring_segment_name_for_uid(fleet_name: &str, kind: u8, uid: u32) -> String
     format!("/{SHM_NAMESPACE}-{fleet_name}-{kind}-{uid}")
 }
 
+/// Where a fleet's members hold their presence: `<lock dir>/orbit-<fleet>.fleet`.
+pub fn fleet_lock_path(fleet_name: &str) -> PathBuf {
+    lock_dir().join(format!("{SHM_NAMESPACE}-{fleet_name}.fleet"))
+}
+
+/// The same for another user's fleet, for lifecycle tools that address a uid
+/// other than their own.
+pub fn fleet_lock_path_for_uid(fleet_name: &str, uid: u32) -> PathBuf {
+    lock_dir_for_uid(uid).join(format!("{SHM_NAMESPACE}-{fleet_name}.fleet"))
+}
+
+/// A process's membership in a fleet: a shared `flock` on the fleet's lock
+/// file, held for as long as this lives and released by the kernel when the
+/// process dies, however it dies. It is what [`try_lock_fleet_exclusive`]
+/// contends with, so a tool that removes the fleet's segments cannot do so
+/// while any member is alive.
+pub struct FleetMembership {
+    lock_fd: OwnedFd,
+}
+
+impl Drop for FleetMembership {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.lock_fd.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Join the fleet's membership. Waits for a lifecycle tool that holds the
+/// exclusive lock at that moment; a clear in progress finishes first.
+pub fn join_fleet_membership(fleet_name: &str) -> io::Result<FleetMembership> {
+    let lock_fd = open_lock_file(&fleet_lock_path(fleet_name))?;
+    // SAFETY: `lock_fd` is an open descriptor owned by this call.
+    let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_SH) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(FleetMembership { lock_fd })
+}
+
+/// Exclusive hold on a fleet, for the tool that removes its segments.
+///
+/// `Ok(None)` means a member is alive and the fleet must not be touched;
+/// there is deliberately no way to force past it. `Ok(Some(_))` keeps the
+/// fleet closed to new members until the guard is dropped, so a removal
+/// cannot interleave with a start. Never waits.
+pub fn try_lock_fleet_exclusive(fleet_name: &str, uid: u32) -> io::Result<Option<ShmRegionLock>> {
+    // Creating the file when no member ever joined is right: the guard then
+    // keeps a first member from starting in the middle of a removal.
+    let lock_fd = open_lock_file(&fleet_lock_path_for_uid(fleet_name, uid))?;
+    // SAFETY: `lock_fd` is an open descriptor owned by this call.
+    let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(Some(ShmRegionLock { lock_fd }));
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(error)
+}
+
 fn lock_file_path(shm_name: &str) -> PathBuf {
     lock_dir().join(format!("{}.lock", shm_name.trim_start_matches('/')))
 }
@@ -543,6 +603,10 @@ fn lock_file_path(shm_name: &str) -> PathBuf {
 /// `/tmp` is the fallback, with the checks above carrying the weight.
 fn lock_dir() -> PathBuf {
     let uid = unsafe { libc::geteuid() };
+    lock_dir_for_uid(uid)
+}
+
+fn lock_dir_for_uid(uid: u32) -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
@@ -608,4 +672,32 @@ fn ensure_private_dir(dir: &Path, uid: u32) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod fleet_lock_tests {
+    use super::{join_fleet_membership, try_lock_fleet_exclusive};
+
+    /// A member alive means the fleet cannot be cleared, and there is no
+    /// flag that says otherwise; the member going away is what opens it.
+    #[test]
+    fn a_member_holds_the_fleet_against_exclusive_takers() {
+        let fleet = format!("fl{:x}", std::process::id());
+        let uid = unsafe { libc::geteuid() };
+
+        let member = join_fleet_membership(&fleet).expect("join");
+        assert!(
+            try_lock_fleet_exclusive(&fleet, uid)
+                .expect("try")
+                .is_none()
+        );
+
+        drop(member);
+        let exclusive = try_lock_fleet_exclusive(&fleet, uid).expect("try");
+        assert!(exclusive.is_some());
+        // And a member cannot join while a removal holds the fleet: the
+        // shared lock would block, which is the behaviour, not a test to run.
+        drop(exclusive);
+        let _ = std::fs::remove_file(super::fleet_lock_path_for_uid(&fleet, uid));
+    }
 }

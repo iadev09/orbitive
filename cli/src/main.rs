@@ -129,9 +129,16 @@ fn clear(args: ClearArgs) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    eprintln!(
-        "warning: clear only a stopped fleet; existing mappings survive unlink while new opens do not"
-    );
+    // Members hold the fleet's lock for as long as they live; holding it
+    // exclusively is the only way in, and there is no flag around it.
+    let Some(_fleet_held) = orbit_core::shm::try_lock_fleet_exclusive(&args.target.fleet, uid)?
+    else {
+        return Err(format!(
+            "fleet {} is running: a member holds its lock; stop the fleet before clearing",
+            args.target.fleet
+        )
+        .into());
+    };
 
     let mut removed = 0usize;
     let mut failures = Vec::new();

@@ -145,6 +145,12 @@ struct FleetInner {
     /// in-process for unit-test / single-process use, or POSIX SHM
     /// for real cross-process visibility (V1, master+worker fleet).
     backing: RingBacking,
+    /// Held for as long as this process is in a shared-memory fleet, so
+    /// a lifecycle tool can tell a live fleet from a stopped one and refuse
+    /// to remove what is in use. Read-only attachments hold none.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    membership: Option<crate::shm::FleetMembership>,
 }
 
 /// Backing storage for the fleet's ring buffers — chosen at
@@ -187,6 +193,8 @@ impl Fleet {
                 node_id,
                 id_counters: DashMap::new(),
                 backing: RingBacking::InMemory(RingRegistry::new(fleet_capacity)),
+                #[cfg(unix)]
+                membership: None,
             }),
         })
     }
@@ -223,6 +231,7 @@ impl Fleet {
                 fleet_capacity,
             });
         }
+        let membership = crate::shm::join_fleet_membership(name).map_err(Error::Io)?;
         Ok(Self {
             inner: Arc::new(FleetInner {
                 name,
@@ -230,6 +239,7 @@ impl Fleet {
                 node_id,
                 id_counters: DashMap::new(),
                 backing: RingBacking::Shm(ShmRingRegistry::new(name, fleet_capacity)),
+                membership: Some(membership),
             }),
         })
     }
