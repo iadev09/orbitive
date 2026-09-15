@@ -59,6 +59,7 @@ bus.publish("worker.ready", b"worker-1")?;
 | always | `orbitive::core` | the complete low-level core surface |
 | `cache` | `orbitive::cache` | process-local L1 caches with fleet-wide mutation propagation |
 | `counter` | `orbitive::counter` | keyed signed counters shared across the fleet |
+| `cell` | `orbitive::cell` | typed atomic cells addressed by id, shared across the fleet |
 | `events` | `orbitive::events` | raw topic and byte-payload event streams |
 | `invoke` | `orbitive::invoke` | bounded invocation requests with operation routing |
 | `lock` | `orbitive::lock` | keyed leases with ownership checks and fencing tokens |
@@ -67,7 +68,7 @@ bus.publish("worker.ready", b"worker-1")?;
 
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
-[`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
+[`orbit-cell`](cell/README.md), [`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
 [`orbit-invoke`](invoke/README.md), [`orbit-lock`](lock/README.md),
 [`orbit-metrics`](metrics/README.md), and
 [`orbit-rustls`](rustls/README.md). Direct dependencies are supported when an

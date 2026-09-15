@@ -1,0 +1,14 @@
+[package]
+name = "orbit-cell"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-shared typed atomic cells over Orbit shared memory, addressed by id rather than by name."
+license.workspace = true
+repository.workspace = true
+keywords = ["cell", "shm", "fleet", "orbit", "atomic"]
+categories = ["concurrency"]
+exclude.workspace = true
+
+[dependencies]
+orbit-core.workspace = true

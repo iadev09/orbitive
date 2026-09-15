@@ -511,6 +511,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-cell"
+version = "0.3.10"
+dependencies = [
+ "orbit-core",
+]
+
+[[package]]
 name = "orbit-core"
 version = "0.3.10"
 dependencies = [
@@ -583,6 +590,7 @@ name = "orbitive"
 version = "0.3.10"
 dependencies = [
  "orbit-cache",
+ "orbit-cell",
  "orbit-core",
  "orbit-counter",
  "orbit-events",

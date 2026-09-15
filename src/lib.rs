@@ -43,6 +43,11 @@ pub mod counter {
     pub use orbit_counter::*;
 }
 
+#[cfg(feature = "cell")]
+pub mod cell {
+    pub use orbit_cell::*;
+}
+
 #[cfg(feature = "invoke")]
 pub mod invoke {
     pub use orbit_invoke::*;
