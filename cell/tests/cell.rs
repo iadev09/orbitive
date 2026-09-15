@@ -118,3 +118,55 @@ fn ids_round_trip_through_text_and_bits() {
         3
     );
 }
+
+#[test]
+fn text_cells_append_atomically_and_refuse_what_does_not_fit() {
+    let cells = cells();
+    let text = cells.allocate_text("ab").expect("allocate");
+    let same = cells.open_text(text.id()).expect("open");
+    assert_eq!(same.append("cd").expect("append"), 4);
+    assert_eq!(text.load().expect("load"), "abcd");
+    text.store("x").expect("store");
+    assert_eq!(same.load().expect("load"), "x");
+
+    let big = "y".repeat(orbit_cell::CELL_TEXT_MAX);
+    assert!(matches!(same.append(&big), Err(Error::TooLong { .. })));
+    assert_eq!(
+        text.load().expect("load"),
+        "x",
+        "a refused append writes nothing"
+    );
+    assert!(cells.allocate_text(&format!("{big}z")).is_err());
+
+    let id = text.id();
+    assert!(id.to_string().starts_with("text:"));
+    text.release().expect("release");
+    assert!(matches!(same.load(), Err(Error::StaleText(stale)) if stale == id));
+}
+
+#[test]
+fn text_readers_never_see_a_torn_write() {
+    let cells = cells();
+    let text = cells.allocate_text("aaaaaaaa").expect("allocate");
+    let writer = cells.open_text(text.id()).expect("open");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        let mut flip = false;
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            writer
+                .store(if flip { "bbbbbbbb" } else { "aaaaaaaa" })
+                .expect("store");
+            flip = !flip;
+        }
+    });
+    for _ in 0..5_000 {
+        let seen = text.load().expect("load");
+        assert!(
+            seen == "aaaaaaaa" || seen == "bbbbbbbb",
+            "torn read: {seen:?}"
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    thread.join().expect("writer");
+}

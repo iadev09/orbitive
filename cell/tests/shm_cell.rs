@@ -31,5 +31,10 @@ fn a_second_mapping_reaches_the_same_cell_by_id() {
     counter.release().expect("release");
     assert!(matches!(same.load(), Err(Error::Stale(_))));
 
+    let text = owner.allocate_text("shared ").expect("allocate text");
+    let peer_text = peer.open_text(text.id()).expect("open text");
+    peer_text.append("memory").expect("append");
+    assert_eq!(text.load().expect("load"), "shared memory");
+
     owner.unlink().expect("unlink");
 }

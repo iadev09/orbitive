@@ -23,6 +23,10 @@ use orbit_core::Fleet;
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
+mod text;
+
+pub use text::{CELL_TEXT_CAPACITY, CELL_TEXT_KIND, CELL_TEXT_MAX, Text, TextId};
+
 /// Reserved Orbit SHM kind for the cell table.
 pub const CELL_STATE_KIND: u8 = 233;
 /// Number of cells one fleet generation can hold at once.
@@ -33,8 +37,8 @@ pub const CELL_STATE_KIND: u8 = 233;
 pub const CELL_CAPACITY: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_CELL_CAPACITY"), 4_096);
 
-const SLOT_EMPTY: u8 = 0;
-const SLOT_OCCUPIED: u8 = 1;
+pub(crate) const SLOT_EMPTY: u8 = 0;
+pub(crate) const SLOT_OCCUPIED: u8 = 1;
 
 #[cfg(unix)]
 const STATE_MAGIC: u32 = 0x43_45_4C_4C; // "CELL"
@@ -48,6 +52,16 @@ pub enum Error {
     /// The id names a slot nothing occupies, or a generation that has been
     /// released since the id was minted.
     Stale(CellId),
+    /// The same, for a text cell.
+    StaleText(TextId),
+    /// The text would not fit the cell; nothing was written.
+    TooLong {
+        len: usize,
+        max: usize,
+    },
+    /// A text cell held bytes that are not UTF-8: something wrote past the
+    /// contract.
+    Corrupt(String),
     /// The id names a live cell of another type.
     TypeMismatch {
         id: CellId,
@@ -69,6 +83,11 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Stale(id) => write!(f, "cell {id} has been released"),
+            Self::StaleText(id) => write!(f, "text cell {id} has been released"),
+            Self::TooLong { len, max } => {
+                write!(f, "text does not fit the cell: len={len} max={max}")
+            }
+            Self::Corrupt(id) => write!(f, "text cell {id} holds bytes that are not UTF-8"),
             Self::TypeMismatch {
                 id,
                 expected,
@@ -221,10 +240,11 @@ fn type_name(tag: u8) -> &'static str {
     }
 }
 
-/// The fleet's cell table. Cheap to clone.
+/// The fleet's cell tables, scalar and text. Cheap to clone.
 #[derive(Clone)]
 pub struct Cells {
     backend: CellBackend,
+    text: text::TextBackend,
 }
 
 #[derive(Clone)]
@@ -249,7 +269,26 @@ impl Cells {
         } else {
             CellBackend::InMemory(memory_table(&fleet))
         };
-        Ok(Self { backend })
+        let text = text::TextBackend::new(&fleet)?;
+        Ok(Self { backend, text })
+    }
+
+    /// Take a text cell holding `initial`; up to [`CELL_TEXT_MAX`] bytes.
+    pub fn allocate_text(&self, initial: &str) -> Result<Text> {
+        self.text.allocate(initial)
+    }
+
+    /// A handle to a live text cell.
+    pub fn open_text(&self, id: TextId) -> Result<Text> {
+        self.text.open(id)
+    }
+
+    pub fn release_text(&self, id: TextId) -> Result<()> {
+        self.text.release(id)
+    }
+
+    pub fn is_text_live(&self, id: TextId) -> bool {
+        self.text.is_live(id)
     }
 
     /// Take a free slot, stamp it with `T` and `initial`, and return the
@@ -314,7 +353,7 @@ impl Cells {
         self.slot(id).is_ok()
     }
 
-    /// Clear the complete table during quiescent owner boot.
+    /// Clear both tables during quiescent owner boot.
     pub fn reset_all(&self) -> Result<()> {
         self.with_structure(|slots, hint| {
             for slot in slots {
@@ -322,7 +361,8 @@ impl Cells {
             }
             hint.store(0, Ordering::Relaxed);
             Ok(())
-        })
+        })?;
+        self.text.reset_all()
     }
 
     /// Remove the cell SHM object. Existing mappings remain valid until their
@@ -330,9 +370,10 @@ impl Cells {
     #[cfg(unix)]
     pub fn unlink(&self) -> Result<()> {
         match &self.backend {
-            CellBackend::InMemory(_) => self.reset_all(),
-            CellBackend::Shm(table) => table.region.unlink().map_err(Error::Io),
+            CellBackend::InMemory(_) => self.reset_all()?,
+            CellBackend::Shm(table) => table.region.unlink().map_err(Error::Io)?,
         }
+        self.text.unlink()
     }
 
     fn slots(&self) -> &[CellSlot] {
@@ -571,7 +612,7 @@ impl CellSlot {
     }
 }
 
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 

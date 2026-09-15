@@ -34,6 +34,14 @@ Four types fit a cell: `i64`, `u64`, `f64` and `bool`. Integers get checked
 `set` / `clear`; every type has `load`, `store`, `swap` and
 `compare_exchange`. Opening an id as the wrong type is refused.
 
+Text has its own arena: `allocate_text` / `open_text` give a `Text` handle
+holding up to `CELL_TEXT_MAX` bytes of UTF-8 (default 240, sized by
+`ORBIT_CELL_TEXT_CAPACITY` and `ORBIT_CELL_TEXT_MAX`). `load` copies the
+current text, `store` replaces it and `append` extends it atomically with
+respect to every other writer; a write that would not fit is refused whole,
+never cut. Readers go through a seqlock and never observe a torn string. A
+`TextId` prints as `text:<slot>:<generation>`.
+
 Every id carries the generation its slot was allocated in, and `release`
 retires that generation: a handle kept past a release reports `Error::Stale`
 instead of reaching whoever took the slot next. Cells have no lifetime of
