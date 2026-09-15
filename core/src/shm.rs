@@ -94,8 +94,9 @@ impl ShmRegion {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
         let raw_fd = loop {
             // SAFETY: passing a valid C string and well-known POSIX flags.
-            let fd =
-                unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0o600) };
+            // macOS `shm_open` rejects `O_CLOEXEC` with EINVAL. The descriptor
+            // is scoped to this validation call and closes before return.
+            let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0o600) };
             if fd >= 0 {
                 break fd;
             }
@@ -127,8 +128,10 @@ impl ShmRegion {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
         let raw_fd = loop {
             // SAFETY: passing a valid C string and read-only POSIX flags.
-            let fd =
-                unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0o600) };
+            // macOS `shm_open` rejects `O_CLOEXEC` with EINVAL. This
+            // descriptor closes immediately after `mmap`, before the view is
+            // returned, so it cannot leak across a later exec.
+            let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0o600) };
             if fd >= 0 {
                 break fd;
             }
