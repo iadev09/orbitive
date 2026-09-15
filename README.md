@@ -30,7 +30,7 @@ use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
 
 ```toml
 [dependencies]
-orbitive = { version = "0.3.10", features = ["events", "lock"] }
+orbitive = { version = "0.3.13", features = ["events", "lock"] }
 ```
 
 Core types used by most integrations are available at the crate root. The full
@@ -140,7 +140,7 @@ orbit clear example --all --yes
 Do not clear a running fleet. Existing POSIX mappings survive unlink while a
 later process can create a different object under the same name.
 
-## Read-only process observation
+## External read-only observation (no fleet join)
 
 On Unix, an independent Rust process can inspect an existing SHM ring without
 joining as a writer or reproducing the producer's fleet geometry:
@@ -169,6 +169,12 @@ belongs to core; the crate that owns a kind remains responsible for payload
 decoding and freshness or liveness judgments. A consumer linked to the same
 typed contract can use `observer.typed_ring::<T>()` for an additional
 `OrbitTyped::RING_SPEC` check.
+
+This is intentionally observation rather than another form of `Fleet::join`:
+the external process receives no node id, holds no fleet membership, owns no
+writer lane, and does not keep the fleet alive. `ring(kind)` opens only that
+already-existing uid-scoped object. Use `attach_existing_for_uid` when an
+operator process is permitted to inspect a different user's namespace.
 
 ## Runtime contract
 
