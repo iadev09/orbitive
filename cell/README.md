@@ -2,6 +2,13 @@
 
 A variable that several processes hold at once.
 
+Two processes, one value: a task on one worker adds to a cell twenty million
+times as fast as it can; an application on another worker sleeps on the
+same cell, is woken by the writes, and pushes what it sees to a browser at
+fifty frames a second. Nothing is copied, nothing is sent between the two,
+and the writer never learns it was watched. That is the whole idea, and the
+rest of this file is how it holds.
+
 `orbit-cell` keeps typed atomic cells in one fleet-shared table in shared
 memory, addressed by id rather than by name. A cell is a place: allocate it
 once, hand its id to any process in the fleet, and every handle reads and
@@ -32,6 +39,23 @@ assert!(same.load().is_err());
 
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+## What a cell is, and is not
+
+A cell is the shared-memory form of a variable: one value, one place, read
+and written in place by every process that holds its id. Three things it
+deliberately is not:
+
+- **Not a counter by key.** `orbit-counter` names values; a cell names a
+  place. There is no lookup, no string, no hashing on the hot path, and two
+  handles to one id are the same memory, not two entries that agree.
+- **Not an event.** Nobody is told that a cell changed, and no change is
+  retained. A reader that wants to know reads; a reader that wants to wait
+  waits (below). Writes that happen while nobody looks leave only their
+  result behind. That is the gauge contract: the latest value wins, and the
+  history was never the point.
+- **Not a queue.** Nothing is delivered, acknowledged or replayed. If every
+  change matters, that is a ring of events, and `orbit-events` is next door.
 
 Four types fit a cell: `i64`, `u64`, `f64` and `bool`. Integers get checked
 `fetch_add` / `fetch_sub`, floats a compare-and-swap `fetch_add`, flags
@@ -94,6 +118,38 @@ only when someone is, so an unwatched cell costs what an atomic costs.
 
 Releasing a cell is a change too: whoever is parked on it wakes with
 `Error::Stale` rather than sleeping on a slot somebody else may take next.
+
+### Why nothing is lost
+
+The exchange is the forty-year-old futex idiom. A reader announces itself
+(`waiters += 1`), checks the count again, and only then parks; the park
+itself is a compare-and-sleep in the kernel, so a write that lands between
+the check and the sleep makes the sleep return at once. A writer bumps the
+count and only then looks for waiters. Both sides are sequentially
+consistent, so of the two races that could lose a wake, neither can happen:
+either the writer sees the waiter, or the waiter sees the new count.
+
+A change made while the reader is *not* parked is not lost either. The
+count moved, so the reader's next `wait_changed(seen)` returns without
+sleeping. What the reader never sees are the intermediate values, and a
+gauge has none to show.
+
+### What a write costs
+
+With nobody parked, a write is the atomic operation plus one atomic
+increment and one atomic load: a few nanoseconds, no system call. With a
+reader parked, the write also issues one wake, which lifts every parked
+reader at once. A reader is parked only between its own reads, so a hot
+writer with one reader pays a wake at the reader's pace, not its own: twenty
+million writes and a reader that holds twenty milliseconds between looks is
+a few hundred wakes.
+
+The pathological shape is a hot writer with readers parked at all times, so
+that every write finds someone waiting and pays a system call. That is a
+reader-side problem with a reader-side answer: park once per process and
+fan out locally. One watcher parks on the cell; the sockets, tasks or
+threads in that process subscribe to the watcher. The cell then sees as
+many waiters as there are processes, whatever the number of readers.
 
 ## Lifetime and geometry
 
