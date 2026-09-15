@@ -68,7 +68,7 @@ bus.publish("worker.ready", b"worker-1")?;
 
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
-[`orbit-cell`](cell/README.md), [`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
+[`orbit-arena`](arena/README.md), [`orbit-cell`](cell/README.md), [`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
 [`orbit-invoke`](invoke/README.md), [`orbit-lock`](lock/README.md),
 [`orbit-metrics`](metrics/README.md), and
 [`orbit-rustls`](rustls/README.md). Direct dependencies are supported when an

@@ -1,0 +1,14 @@
+[package]
+name = "orbit-arena"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-shared byte store over Orbit shared memory: a keyed index over a ring arena, read without copying, evicted by overwrite."
+license.workspace = true
+repository.workspace = true
+keywords = ["arena", "shm", "fleet", "orbit", "cache"]
+categories = ["concurrency", "caching"]
+exclude.workspace = true
+
+[dependencies]
+orbit-core.workspace = true

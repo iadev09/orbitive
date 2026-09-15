@@ -48,6 +48,11 @@ pub mod cell {
     pub use orbit_cell::*;
 }
 
+#[cfg(feature = "arena")]
+pub mod arena {
+    pub use orbit_arena::*;
+}
+
 #[cfg(feature = "invoke")]
 pub mod invoke {
     pub use orbit_invoke::*;

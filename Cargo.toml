@@ -20,13 +20,14 @@ lock = ["dep:orbit-lock"]
 events = ["dep:orbit-events"]
 counter = ["dep:orbit-counter"]
 cell = ["dep:orbit-cell"]
+arena = ["dep:orbit-arena"]
 invoke = ["dep:orbit-invoke"]
 invoke-tokio = ["invoke", "orbit-invoke?/tokio"]
 metrics = ["dep:orbit-metrics"]
 rustls = ["rustls_0_23"]
 rustls_0_23 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_23"]
 rustls_0_24 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_24"]
-full = ["cache", "cell", "events", "counter", "invoke", "metrics", "lock", "rustls"]
+full = ["arena", "cache", "cell", "events", "counter", "invoke", "metrics", "lock", "rustls"]
 
 [dependencies]
 orbit-core.workspace = true
@@ -35,12 +36,14 @@ orbit-lock = { workspace = true, optional = true }
 orbit-events = { workspace = true, optional = true }
 orbit-counter = { workspace = true, optional = true }
 orbit-cell = { workspace = true, optional = true }
+orbit-arena = { workspace = true, optional = true }
 orbit-invoke = { workspace = true, optional = true }
 orbit-metrics = { workspace = true, optional = true }
 orbit-rustls = { workspace = true, optional = true }
 
 [workspace]
 members = [
+    "arena",
     "cache",
     "cli",
     "counter",
@@ -78,6 +81,7 @@ orbit-lock = { version = "0.3.11", path = "lock", default-features = false }
 orbit-events = { version = "0.3.11", path = "events", default-features = false }
 orbit-counter = { version = "0.3.11", path = "counter", default-features = false }
 orbit-cell = { version = "0.3.11", path = "cell", default-features = false }
+orbit-arena = { version = "0.3.11", path = "arena", default-features = false }
 orbit-invoke = { version = "0.3.11", path = "invoke", default-features = false }
 orbit-metrics = { version = "0.3.11", path = "metrics", default-features = false }
 orbit-rustls = { version = "0.3.3", path = "rustls", default-features = false }
