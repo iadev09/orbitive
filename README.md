@@ -30,7 +30,7 @@ use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
 
 ```toml
 [dependencies]
-orbitive = { version = "0.3.4", features = ["events", "lock"] }
+orbitive = { version = "0.3.8", features = ["events", "lock"] }
 ```
 
 Core types used by most integrations are available at the crate root. The full
@@ -138,6 +138,36 @@ orbit clear example --all --yes
 
 Do not clear a running fleet. Existing POSIX mappings survive unlink while a
 later process can create a different object under the same name.
+
+## Read-only process observation
+
+On Unix, an independent Rust process can inspect an existing SHM ring without
+joining as a writer or reproducing the producer's fleet geometry:
+
+```rust,no_run
+use orbitive::FleetObserver;
+use orbitive::ring::cursor::{RingCursor, poll_ring};
+
+let observer = FleetObserver::attach_existing("example")?;
+let ring = observer.ring(221)?;
+
+for lane_index in 0..ring.metadata().lane_count {
+    let lane = ring.lane(lane_index)?;
+    let mut cursor = RingCursor::from_counter(lane.retained_range().start);
+    for frame in poll_ring(&lane, &mut cursor).frames {
+        println!("{lane_index}: {frame:?}");
+    }
+}
+
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The observer opens exact existing objects read-only. It cannot create, reset,
+publish, or unlink, and dropping it only unmaps local memory. Raw frame access
+belongs to core; the crate that owns a kind remains responsible for payload
+decoding and freshness or liveness judgments. A consumer linked to the same
+typed contract can use `observer.typed_ring::<T>()` for an additional
+`OrbitTyped::RING_SPEC` check.
 
 ## Runtime contract
 

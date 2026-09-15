@@ -94,7 +94,8 @@ impl ShmRegion {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
         let raw_fd = loop {
             // SAFETY: passing a valid C string and well-known POSIX flags.
-            let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
+            let fd =
+                unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0o600) };
             if fd >= 0 {
                 break fd;
             }
@@ -113,6 +114,64 @@ impl ShmRegion {
         let actual_size = shm_object_size(&fd, name)?;
         validate_minimum_size(name, actual_size, minimum_size)?;
         Ok(ShmValidation::Valid { actual_size })
+    }
+
+    /// Map an existing shared-memory object read-only.
+    ///
+    /// This path never creates, sizes, locks, resets, or unlinks the object.
+    /// It is kept crate-private so callers receive a capability such as a
+    /// read-only ring view rather than a [`ShmRegion`] that also exposes
+    /// lifecycle and writable-pointer operations.
+    pub(crate) fn open_existing_read_only(name: &str, minimum_size: usize) -> io::Result<Self> {
+        let cname = CString::new(name)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
+        let raw_fd = loop {
+            // SAFETY: passing a valid C string and read-only POSIX flags.
+            let fd =
+                unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0o600) };
+            if fd >= 0 {
+                break fd;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        };
+        // SAFETY: `raw_fd` was returned by `shm_open` and is now uniquely
+        // owned by this scope.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let actual_size = shm_object_size(&fd, name)?;
+        validate_minimum_size(name, actual_size, minimum_size)?;
+
+        // Map the complete object so its persisted header can describe the
+        // geometry without the observer reproducing the producer's layout.
+        // SAFETY: fd is valid, actual_size is positive after minimum
+        // validation, and the mapping is read-only.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                actual_size,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: mmap returned a non-null pointer (checked above).
+        let ptr = NonNull::new(ptr.cast::<u8>()).expect("mmap returned non-null on success");
+
+        Ok(Self {
+            lock_path: lock_file_path(name),
+            name: cname,
+            process_lock: false,
+            ptr,
+            len: actual_size,
+            created: false,
+        })
     }
 
     /// Open or create a shared-memory segment of `size` bytes,

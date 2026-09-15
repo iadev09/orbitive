@@ -19,6 +19,84 @@ use crate::ring::{Frame, Ring, RingRegistry, RingTopology};
 mod cursor;
 pub use cursor::{FleetLaneCursor, FleetLanePoll};
 
+/// Read-only namespace handle for inspecting an existing SHM fleet.
+///
+/// Unlike [`Fleet`], this handle has no node id, creates no rings, and can
+/// never publish, reset, or unlink. Opening a ring maps only an object that
+/// already exists; dropping the observer or a ring view only unmaps local
+/// memory.
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FleetObserver {
+    name: String,
+    uid: u32,
+}
+
+#[cfg(unix)]
+impl FleetObserver {
+    /// Create an observer for the effective user's existing fleet namespace.
+    ///
+    /// This constructor itself performs no SHM operation. Each [`Self::ring`]
+    /// call attaches to one exact existing kind and returns `NotFound` when it
+    /// is absent.
+    pub fn attach_existing(name: impl Into<String>) -> std::io::Result<Self> {
+        // SAFETY: `geteuid` has no error path.
+        let uid = unsafe { libc::geteuid() };
+        Self::attach_existing_for_uid(name, uid)
+    }
+
+    /// Address an explicit uid-scoped fleet namespace.
+    ///
+    /// POSIX permissions still decide whether the caller may read another
+    /// user's SHM objects.
+    pub fn attach_existing_for_uid(name: impl Into<String>, uid: u32) -> std::io::Result<Self> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "fleet name must not be empty",
+            ));
+        }
+        if name.contains('/') || name.contains('\0') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "fleet name must not contain '/' or a NUL byte",
+            ));
+        }
+        Ok(Self { name, uid })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Attach read-only to one exact existing ring kind.
+    pub fn ring(&self, kind: u8) -> std::io::Result<crate::ring::shm::ShmRingView> {
+        crate::ring::shm::ShmRingView::attach_existing_for_uid(&self.name, kind, self.uid)
+    }
+
+    /// Attach read-only and verify a linked [`OrbitTyped`] contract.
+    pub fn typed_ring<T: OrbitTyped>(&self) -> std::io::Result<crate::ring::shm::ShmRingView> {
+        let view = self.ring(T::KIND)?;
+        if view.metadata().spec != T::RING_SPEC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "OrbitTyped KIND {} declares {:?}; existing spec is {:?}",
+                    T::KIND,
+                    T::RING_SPEC,
+                    view.metadata().spec
+                ),
+            ));
+        }
+        Ok(view)
+    }
+}
+
 /// A node's physical writer slot inside the fleet.
 ///
 /// Orbit validates the address against fleet capacity but does not allocate

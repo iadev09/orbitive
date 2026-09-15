@@ -4,9 +4,10 @@
 //!
 //! Fleet-shared same-host runtime storage between workers.
 //!
-//! Every process in the fleet is an equal member. There is no master,
-//! no worker — only peers. Whatever role distinction matters to the
-//! embedder is the embedder's concern; not Orbit's.
+//! Every process that joins the fleet is an equal member. There is no master,
+//! no worker — only peers. Whatever role distinction matters to the embedder
+//! is the embedder's concern; not Orbit's. Independent observers can instead
+//! attach existing SHM rings read-only, without becoming members.
 //!
 //! ## Status — first light (V0)
 //!
@@ -37,11 +38,15 @@ pub mod ring_shm {
 
 pub use epoch::OrbitEpoch;
 pub use error::{Error, Result};
+#[cfg(unix)]
+pub use fleet::FleetObserver;
 pub use fleet::{Fleet, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use ring::RingEventFd;
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};
+#[cfg(unix)]
+pub use ring::shm::{ShmRingLaneView, ShmRingMetadata, ShmRingView};
 pub use ring::{Frame, Ring, RingSpec, RingTopology};
 
 /// Marker for a type that has a stable wire identity across the fleet.

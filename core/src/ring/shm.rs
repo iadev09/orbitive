@@ -885,6 +885,380 @@ impl ShmRing {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Read-only inspection
+// ─────────────────────────────────────────────────────────────────────
+
+/// Persisted geometry of one existing Orbit SHM ring.
+///
+/// The values come from the mapped ring header. An observer does not need the
+/// producer's fleet capacity or compile-time [`RingSpec`] to inspect raw
+/// frames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShmRingMetadata {
+    /// Exact POSIX SHM object name that was opened.
+    pub name: String,
+    /// Number of bytes reported by the existing SHM object.
+    pub segment_size: usize,
+    /// Persisted Orbit ring format version.
+    pub format_version: u32,
+    /// Stable Orbit type kind carried by this ring.
+    pub kind: u8,
+    /// Persisted per-lane capacity, payload limit, and topology.
+    pub spec: RingSpec,
+    /// Number of physical lanes present in the mapping.
+    pub lane_count: usize,
+}
+
+/// Read-only attachment to one existing Orbit SHM ring.
+///
+/// Attaching never creates, initializes, resets, locks, or unlinks a segment.
+/// Dropping the view only unmaps this process's local mapping. Use
+/// [`ShmRingView::lane`] to obtain a
+/// [`RingFrameSource`](crate::ring::cursor::RingFrameSource) for one physical
+/// lane.
+pub struct ShmRingView {
+    region: ShmRegion,
+    metadata: ShmRingMetadata,
+    slot_stride: usize,
+    slots_offset: usize,
+    lane_stride: usize,
+}
+
+impl std::fmt::Debug for ShmRingView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShmRingView")
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
+impl ShmRingView {
+    /// Attach to an existing ring owned by the effective user.
+    pub fn attach_existing(fleet_name: &str, kind: u8) -> std::io::Result<Self> {
+        // SAFETY: `geteuid` has no error path.
+        let uid = unsafe { libc::geteuid() };
+        Self::attach_existing_for_uid(fleet_name, kind, uid)
+    }
+
+    /// Attach to an existing ring under an explicit uid-scoped name.
+    ///
+    /// POSIX permissions still decide whether the calling process may open
+    /// another user's object.
+    pub fn attach_existing_for_uid(fleet_name: &str, kind: u8, uid: u32) -> std::io::Result<Self> {
+        let name = shm::ring_segment_name_for_uid(fleet_name, kind, uid);
+        let region = ShmRegion::open_existing_read_only(&name, HEADER_SIZE)?;
+
+        // SAFETY: the mapping is at least HEADER_SIZE bytes and the header is
+        // cache-line aligned at offset zero.
+        let header = unsafe { &*(region.as_ptr() as *const ShmRingHeader) };
+        if header.magic != MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {} has wrong magic 0x{:08X} (expected 0x{:08X})",
+                    name, header.magic, MAGIC
+                ),
+            ));
+        }
+        if header.version != VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {} version {} != local {}",
+                    name, header.version, VERSION
+                ),
+            ));
+        }
+        if header.kind != kind {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {} kind {} != requested {}",
+                    name, header.kind, kind
+                ),
+            ));
+        }
+
+        let topology = match header.topology {
+            value if value == RingTopology::Shared as u8 => RingTopology::Shared,
+            value if value == RingTopology::PerNode as u8 => RingTopology::PerNode,
+            value if value == RingTopology::SharedOrdered as u8 => RingTopology::SharedOrdered,
+            value => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("SHM segment {name} has unknown topology {value}"),
+                ));
+            }
+        };
+        let capacity = usize::try_from(header.capacity).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {name} capacity {} does not fit this platform",
+                    header.capacity
+                ),
+            )
+        })?;
+        let lane_count = usize::from(header.lane_count);
+        if lane_count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("SHM segment {name} has zero lanes"),
+            ));
+        }
+        if topology != RingTopology::PerNode && lane_count != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {name} topology {topology:?} requires one lane, found {lane_count}"
+                ),
+            ));
+        }
+        let spec = RingSpec {
+            capacity,
+            payload_capacity: header.payload_capacity as usize,
+            topology,
+        };
+        let fleet_capacity = if topology == RingTopology::PerNode {
+            header.lane_count
+        } else {
+            1
+        };
+        let (slot_stride, slots_offset, expected_size) = checked_layout(spec, fleet_capacity)
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("SHM segment {name} has invalid geometry: {error}"),
+                )
+            })?;
+        if header.slot_stride as usize != slot_stride {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {} slot stride {} != geometry {}",
+                    name, header.slot_stride, slot_stride
+                ),
+            ));
+        }
+        if region.len() < expected_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {} size {} is smaller than persisted geometry {}",
+                    name,
+                    region.len(),
+                    expected_size
+                ),
+            ));
+        }
+        let lane_stride = capacity
+            .checked_mul(slot_stride)
+            .ok_or_else(|| invalid_input(format!("SHM segment {name} lane stride overflow")))?;
+
+        Ok(Self {
+            metadata: ShmRingMetadata {
+                name,
+                segment_size: region.len(),
+                format_version: header.version,
+                kind,
+                spec,
+                lane_count,
+            },
+            region,
+            slot_stride,
+            slots_offset,
+            lane_stride,
+        })
+    }
+
+    /// Attach and also verify the caller's typed ring contract.
+    pub fn attach_typed<T: crate::OrbitTyped>(fleet_name: &str) -> std::io::Result<Self> {
+        let view = Self::attach_existing(fleet_name, T::KIND)?;
+        if view.metadata.spec != T::RING_SPEC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "OrbitTyped KIND {} declares {:?}; existing spec is {:?}",
+                    T::KIND,
+                    T::RING_SPEC,
+                    view.metadata.spec
+                ),
+            ));
+        }
+        Ok(view)
+    }
+
+    pub fn metadata(&self) -> &ShmRingMetadata {
+        &self.metadata
+    }
+
+    /// Last semantic version allocated by the ring at observation time.
+    pub fn current_version(&self) -> u64 {
+        self.header().version_counter.load(Ordering::Acquire)
+    }
+
+    /// Current notification generation used by native readiness bridges.
+    pub fn notification_generation(&self) -> u32 {
+        self.header()
+            .notification_generation
+            .load(Ordering::Acquire)
+    }
+
+    /// Select one physical lane as a generic read-only frame source.
+    pub fn lane(&self, lane: usize) -> std::io::Result<ShmRingLaneView<'_>> {
+        if lane >= self.metadata.lane_count {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "lane {lane} is outside SHM ring lane count {}",
+                    self.metadata.lane_count
+                ),
+            ));
+        }
+        Ok(ShmRingLaneView { ring: self, lane })
+    }
+
+    fn header(&self) -> &ShmRingHeader {
+        // SAFETY: construction validated the mapped header.
+        unsafe { &*(self.region.as_ptr() as *const ShmRingHeader) }
+    }
+
+    fn lane_header(&self, lane: usize) -> &ShmLaneHeader {
+        debug_assert!(lane < self.metadata.lane_count);
+        // SAFETY: construction validated lane count and the complete geometry.
+        unsafe {
+            &*(self
+                .region
+                .as_ptr()
+                .add(HEADER_SIZE + lane * LANE_HEADER_SIZE) as *const ShmLaneHeader)
+        }
+    }
+
+    fn slot_ptr(&self, lane: usize, counter: u64) -> *mut ShmSlotHeader {
+        debug_assert!(lane < self.metadata.lane_count);
+        let slot = (counter as usize) & (self.metadata.spec.capacity - 1);
+        // SAFETY: construction checked the complete persisted geometry and the
+        // lane/slot indices are bounded above.
+        unsafe {
+            self.region
+                .as_ptr()
+                .add(self.slots_offset + lane * self.lane_stride + slot * self.slot_stride)
+                .cast::<ShmSlotHeader>()
+        }
+    }
+
+    fn read_lane_state_at(&self, lane: usize, counter: u64) -> crate::ring::cursor::RingRead {
+        use crate::ring::cursor::RingRead;
+
+        let slot_ptr = self.slot_ptr(lane, counter);
+        let Some(expected_committed) = counter
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(2))
+        else {
+            return RingRead::Unavailable;
+        };
+
+        for _ in 0..3 {
+            // SAFETY: `slot_ptr` addresses a validated slot in the mapping.
+            let sequence = unsafe { &*slot_ptr }.seq.load(Ordering::Acquire);
+            if sequence < expected_committed {
+                return if self.metadata.spec.topology == RingTopology::Shared {
+                    RingRead::Pending
+                } else {
+                    RingRead::Unavailable
+                };
+            }
+            if sequence > expected_committed {
+                return RingRead::Unavailable;
+            }
+            // SAFETY: `slot_ptr` addresses a validated slot in the mapping.
+            if let Some(frame) =
+                unsafe { read_committed_frame(slot_ptr, self.metadata.spec.payload_capacity) }
+            {
+                let lane_matches = self.metadata.spec.topology != RingTopology::PerNode
+                    || usize::from(frame.id.node()) == lane;
+                return if frame.id.kind() == self.metadata.kind
+                    && frame.id.counter() == counter
+                    && lane_matches
+                {
+                    RingRead::Ready(frame)
+                } else {
+                    RingRead::Unavailable
+                };
+            }
+        }
+        RingRead::Unavailable
+    }
+}
+
+/// One physical lane of a [`ShmRingView`].
+#[derive(Clone, Copy, Debug)]
+pub struct ShmRingLaneView<'a> {
+    ring: &'a ShmRingView,
+    lane: usize,
+}
+
+impl ShmRingLaneView<'_> {
+    pub fn index(self) -> usize {
+        self.lane
+    }
+
+    /// Snapshot the currently visible committed/reserved head.
+    pub fn head(self) -> u64 {
+        self.ring
+            .lane_header(self.lane)
+            .write_pos
+            .load(Ordering::Acquire)
+    }
+
+    /// Counter range that may still be retained at the observed head.
+    pub fn retained_range(self) -> std::ops::Range<u64> {
+        let head = self.head();
+        head.saturating_sub(self.ring.metadata.spec.capacity as u64)..head
+    }
+
+    /// Read the exact counter if its frame is still committed in this lane.
+    pub fn read_at(self, counter: u64) -> Option<Frame> {
+        match self.ring.read_lane_state_at(self.lane, counter) {
+            crate::ring::cursor::RingRead::Ready(frame) => Some(frame),
+            crate::ring::cursor::RingRead::Pending | crate::ring::cursor::RingRead::Unavailable => {
+                None
+            }
+        }
+    }
+
+    /// Read the frame immediately below the observed head.
+    pub fn read_head(self) -> Option<Frame> {
+        let head = self.head();
+        head.checked_sub(1)
+            .and_then(|counter| self.read_at(counter))
+    }
+}
+
+impl crate::ring::cursor::RingFrameSource for ShmRingLaneView<'_> {
+    fn kind(&self) -> u8 {
+        self.ring.metadata.kind
+    }
+
+    fn head(&self) -> u64 {
+        (*self).head()
+    }
+
+    fn capacity(&self) -> usize {
+        self.ring.metadata.spec.capacity
+    }
+
+    fn read_at(&self, counter: u64) -> Option<Frame> {
+        (*self).read_at(counter)
+    }
+
+    fn read_state_at(&self, counter: u64) -> crate::ring::cursor::RingRead {
+        self.ring.read_lane_state_at(self.lane, counter)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // ShmRingRegistry — per-fleet, per-KIND map of ShmRings
 // ─────────────────────────────────────────────────────────────────────
 
