@@ -4,6 +4,10 @@
 //! `poll_writable`, which register the waker on `Pending`) and then tries
 //! the operation once. Nothing here blocks: the wake arrives from the peer
 //! directly (standalone) or from this process's doorbell driver (fleet).
+//!
+//! Every poll also spends one unit of Tokio's cooperative budget, so a
+//! task draining a ring that is never empty (or filling one that is never
+//! full) still yields to its neighbours on the worker.
 
 use std::io;
 use std::pin::Pin;
@@ -19,12 +23,14 @@ impl AsyncRead for ReadHalf {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
         loop {
             if let Err(error) = std::task::ready!(self.poll_readable(cx)) {
                 return Poll::Ready(Err(error.into()));
             }
             match self.try_read(buf.initialize_unfilled()) {
                 Ok(n) => {
+                    coop.made_progress();
                     buf.advance(n);
                     return Poll::Ready(Ok(()));
                 }
@@ -43,13 +49,17 @@ impl AsyncWrite for WriteHalf {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
         loop {
             if let Err(error) = std::task::ready!(self.poll_writable(cx)) {
                 return Poll::Ready(Err(error.into()));
             }
             match self.try_write(buf) {
                 Err(Error::WouldBlock) => continue,
-                other => return Poll::Ready(other.map_err(io::Error::from)),
+                other => {
+                    coop.made_progress();
+                    return Poll::Ready(other.map_err(io::Error::from));
+                }
             }
         }
     }
