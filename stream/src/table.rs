@@ -55,6 +55,9 @@ unsafe impl Send for AlignedBytes {}
 unsafe impl Sync for AlignedBytes {}
 
 pub(crate) struct Table {
+    /// Held so the fleet's address, which keys the in-memory registry,
+    /// cannot be reused by another fleet while this table lives.
+    _fleet: Arc<Fleet>,
     backing: Backing,
     geometry: Geometry,
     node: u16,
@@ -505,6 +508,7 @@ pub(crate) fn open(fleet: &Arc<Fleet>, incarnation: Incarnation) -> Result<Arc<T
         Key::Shm(name, _) => Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?),
     };
     let table = Arc::new(Table {
+        _fleet: Arc::clone(fleet),
         backing,
         geometry,
         node: fleet.node_id().get(),
