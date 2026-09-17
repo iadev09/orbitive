@@ -183,11 +183,17 @@ impl Table {
     }
 
     /// After anything changed on `direction` of `slot`: count it for
-    /// blocking waiters, then tell the processes holding the stream's sides.
-    pub(crate) fn notify(&self, index: usize, slot: &Slot, direction: &Direction) {
+    /// blocking waiters, then, when `ring` says the change is one a parked
+    /// task could be waiting for, tell the processes holding the stream's
+    /// sides. Blocking waiters are always counted; they park on the word
+    /// itself and are woken only when present.
+    pub(crate) fn notify(&self, index: usize, slot: &Slot, direction: &Direction, ring: bool) {
         direction.changes.fetch_add(1, Ordering::SeqCst);
         if direction.waiters.load(Ordering::SeqCst) > 0 {
             crate::wake_on(&direction.changes);
+        }
+        if !ring {
+            return;
         }
         if !self.is_shared() {
             self.registry.wake(index);
@@ -344,8 +350,8 @@ impl Table {
                 let reads = &slot.directions[1 - side];
                 writes.flags.fetch_or(FLAG_RESET, Ordering::SeqCst);
                 reads.flags.fetch_or(FLAG_READER_GONE, Ordering::SeqCst);
-                self.notify(index, slot, writes);
-                self.notify(index, slot, reads);
+                self.notify(index, slot, writes, true);
+                self.notify(index, slot, reads, true);
             }
             if touched
                 && slot

@@ -364,7 +364,7 @@ impl Streams {
         slot.node[ticket.side.index()].store(self.table.node(), Ordering::Release);
         // Whoever was waiting for this side to show up.
         for direction in &slot.directions {
-            self.table.notify(index, slot, direction);
+            self.table.notify(index, slot, direction, true);
         }
         Ok(Endpoint::new(Arc::new(Handle {
             table: Arc::clone(&self.table),
@@ -546,7 +546,10 @@ impl Handle {
             std::ptr::copy_nonoverlapping(buf.as_ptr().add(first), base, len - first);
         }
         direction.head.store(head + len as u64, Ordering::Release);
-        self.table.notify(self.index, slot, direction);
+        // A reader parks only on an empty ring: it looks, registers, looks
+        // again. So a commit onto a non-empty ring has nobody to wake, and
+        // only the transition from empty rings the peer.
+        self.table.notify(self.index, slot, direction, head == tail);
         Ok(len)
     }
 
@@ -583,7 +586,14 @@ impl Handle {
             std::ptr::copy_nonoverlapping(base, buf.as_mut_ptr().add(first), len - first);
         }
         direction.tail.store(tail + len as u64, Ordering::Release);
-        self.table.notify(self.index, slot, direction);
+        // The mirror image: a writer parks only on a full ring, so only
+        // the transition from full rings the peer.
+        self.table.notify(
+            self.index,
+            slot,
+            direction,
+            available == STREAM_BUFFER_BYTES,
+        );
         Ok(len)
     }
 
@@ -591,7 +601,7 @@ impl Handle {
         if let Ok(slot) = self.slot() {
             let direction = Self::direction(slot, direction_index);
             if direction.flags.fetch_or(flag, Ordering::SeqCst) & flag == 0 {
-                self.table.notify(self.index, slot, direction);
+                self.table.notify(self.index, slot, direction, true);
             }
         }
     }

@@ -75,9 +75,14 @@ Two independent mechanisms, both hints over authoritative state:
   (the cell idiom, SeqCst on both sides). Every commit, consume and flag
   change bumps `changes` and wakes only when `waiters > 0`.
 - **Async tasks** register a `Waker` per (slot, direction, role) in a
-  process-local registry. After a change the writer sets the slot's bit in
-  the pending bitmap of each node holding a side, bumps that node's doorbell
-  generation, and wakes it only when its `listening` count is nonzero. One
+  process-local registry. After a change that a parked task could be
+  waiting for (a commit onto an empty ring, a consume from a full ring,
+  any flag or claim change) the writer sets the slot's bit in the pending
+  bitmap of each node holding a side, bumps that node's doorbell
+  generation, and wakes it only when its `listening` count is nonzero. A
+  commit onto a non-empty ring or a consume from a non-full one rings
+  nobody: under look/register/look-again a reader parks only on empty and
+  a writer only on full. One
   driver thread per process per (segment, node) parks on the doorbell,
   swaps the bitmap words out and wakes the registered tasks. Bit before
   bump, drain before compare: either the driver sees the bump or the park
