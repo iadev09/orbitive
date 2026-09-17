@@ -584,7 +584,6 @@ dependencies = [
 name = "orbit-pool"
 version = "0.3.14"
 dependencies = [
- "bytes",
  "orbit-core",
  "orbit-stream",
 ]

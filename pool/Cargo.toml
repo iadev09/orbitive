@@ -11,6 +11,7 @@ keywords = ["pool", "shm", "fleet", "orbit", "ring"]
 exclude.workspace = true
 
 [dependencies]
-bytes.workspace = true
 orbit-core.workspace = true
+
+[dev-dependencies]
 orbit-stream.workspace = true
