@@ -1,0 +1,16 @@
+[package]
+name = "orbit-pool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-wide resource leases, reservations and creation claims over Orbit shared memory."
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/orbit-pool"
+keywords = ["pool", "shm", "fleet", "orbit", "ring"]
+exclude.workspace = true
+
+[dependencies]
+bytes.workspace = true
+orbit-core.workspace = true
+orbit-stream.workspace = true

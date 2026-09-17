@@ -37,6 +37,6 @@ smoke-freebsd:
 race:
     TSAN_OPTIONS=halt_on_error=1 \
     RUSTFLAGS=-Zsanitizer=thread \
-    cargo +nightly test -p orbit-core -p orbit-lock \
+    cargo +nightly test -p orbit-core -p orbit-lock -p orbit-stream \
         --target "$(rustc -vV | awk '/^host:/{print $2}')" \
         -Zbuild-std --lib --tests -- --test-threads=1

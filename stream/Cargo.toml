@@ -1,0 +1,23 @@
+[package]
+name = "orbit-stream"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Bounded async byte streams backed by memory or shared memory for process fleets."
+keywords = ["async", "stream", "shared-memory", "ipc", "fleet"]
+categories = ["asynchronous", "concurrency"]
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/orbit-stream"
+exclude.workspace = true
+
+[features]
+tokio = ["dep:tokio"]
+
+[dependencies]
+bytes.workspace = true
+orbit-core.workspace = true
+tokio = { version = "1", default-features = false, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util", "time"] }

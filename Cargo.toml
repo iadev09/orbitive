@@ -25,21 +25,39 @@ invoke = ["dep:orbit-invoke"]
 invoke-tokio = ["invoke", "orbit-invoke?/tokio"]
 metrics = ["dep:orbit-metrics"]
 rustls = ["rustls_0_23"]
+stream = ["dep:orbit-stream"]
+stream-tokio = ["stream", "orbit-stream?/tokio"]
+pool = ["dep:orbit-pool"]
 rustls_0_23 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_23"]
 rustls_0_24 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_24"]
-full = ["arena", "cache", "cell", "events", "counter", "invoke", "metrics", "lock", "rustls"]
+full = [
+    "arena",
+    "cache",
+    "cell",
+    "events",
+    "counter",
+    "invoke",
+    "metrics",
+    "lock",
+    "rustls",
+    "stream",
+    "stream-tokio",
+    "pool",
+]
 
 [dependencies]
 orbit-core.workspace = true
+orbit-arena = { workspace = true, optional = true }
 orbit-cache = { workspace = true, optional = true }
 orbit-lock = { workspace = true, optional = true }
 orbit-events = { workspace = true, optional = true }
 orbit-counter = { workspace = true, optional = true }
 orbit-cell = { workspace = true, optional = true }
-orbit-arena = { workspace = true, optional = true }
 orbit-invoke = { workspace = true, optional = true }
 orbit-metrics = { workspace = true, optional = true }
+orbit-pool = { workspace = true, optional = true }
 orbit-rustls = { workspace = true, optional = true }
+orbit-stream = { workspace = true, optional = true }
 
 [workspace]
 members = [
@@ -54,6 +72,8 @@ members = [
     "rustls",
     "core",
     "metrics",
+    "stream",
+    "pool",
 ]
 resolver = "3"
 
@@ -84,6 +104,8 @@ orbit-cell = { version = "0.3.14", path = "cell", default-features = false }
 orbit-arena = { version = "0.3.14", path = "arena", default-features = false }
 orbit-invoke = { version = "0.3.14", path = "invoke", default-features = false }
 orbit-metrics = { version = "0.3.14", path = "metrics", default-features = false }
+orbit-pool = { version = "0.3.14", path = "pool", default-features = false}
+orbit-stream = { version = "0.3.14", path = "stream", default-features = false }
 orbit-rustls = { version = "0.3.3", path = "rustls", default-features = false }
 
 bytes = "1.11"

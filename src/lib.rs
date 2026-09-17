@@ -68,6 +68,16 @@ pub mod lock {
     pub use orbit_lock::*;
 }
 
+#[cfg(feature = "stream")]
+pub mod stream {
+    pub use orbit_stream::*;
+}
+
+#[cfg(feature = "pool")]
+pub mod pool {
+    pub use orbit_pool::*;
+}
+
 #[cfg(any(feature = "rustls", feature = "rustls_0_23", feature = "rustls_0_24"))]
 pub mod rustls {
     pub use orbit_rustls::*;

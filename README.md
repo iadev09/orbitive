@@ -64,6 +64,8 @@ bus.publish("worker.ready", b"worker-1")?;
 | `invoke` | `orbitive::invoke` | bounded invocation requests with operation routing |
 | `lock` | `orbitive::lock` | keyed leases with ownership checks and fencing tokens |
 | `metrics` | `orbitive::metrics` | current metrics snapshots across workers |
+| `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
+| `stream` / `stream-tokio` | `orbitive::stream` | bounded byte streams between two fleet members, in memory or shared memory |
 | `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls 0.23/0.24 server-session storage |
 
 The implementation crates are also published separately as

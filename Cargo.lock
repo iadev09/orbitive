@@ -581,6 +581,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-pool"
+version = "0.3.14"
+dependencies = [
+ "bytes",
+ "orbit-core",
+ "orbit-stream",
+]
+
+[[package]]
 name = "orbit-rustls"
 version = "0.3.3"
 dependencies = [
@@ -590,6 +599,15 @@ dependencies = [
  "rustls 0.23.43",
  "rustls 0.24.0-dev.1",
  "tracing",
+]
+
+[[package]]
+name = "orbit-stream"
+version = "0.3.14"
+dependencies = [
+ "bytes",
+ "orbit-core",
+ "tokio",
 ]
 
 [[package]]
@@ -605,7 +623,9 @@ dependencies = [
  "orbit-invoke",
  "orbit-lock",
  "orbit-metrics",
+ "orbit-pool",
  "orbit-rustls",
+ "orbit-stream",
 ]
 
 [[package]]
@@ -951,6 +971,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",
