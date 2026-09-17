@@ -94,6 +94,56 @@ stopped and joined when the table drops, before the mapping goes away; a
 forked child that inherited the table skips the join because the thread is
 not there. Create tables after fork, as with ring readiness fds.
 
+## Geometry for a deployment (Linux is production)
+
+Measured 2026-09-17 on the same M3 Max, macOS host and a Debian aarch64
+guest (`xd01`); logs in `BENCHMARKS.local.md`:
+
+| | macOS host | Linux guest |
+|---|---|---|
+| wake latency (one park and wake through the doorbell driver) | ~12 µs | ~55 µs |
+| stream one way, 64 KiB ring, bodies ≥ 64 KiB | ~5 GiB/s | ~1.1 GiB/s |
+| Unix socket one way, 1 MiB body | ~1 GiB/s | ~4 GiB/s |
+| round trip 128 B, SHM vs socket | 11.7 vs 12.2 µs | 54 vs 62 µs |
+
+The stream moves at most one ring per wake cycle, so its bulk
+throughput is
+
+```text
+throughput ≈ STREAM_BUFFER_BYTES / wake latency
+```
+
+and both rows above obey it (64 KiB / 12 µs ≈ 5 GiB/s, 64 KiB / 55 µs ≈
+1.15 GiB/s). The socket's advantage on Linux is a larger kernel buffer
+and no user-space wake hop, not a faster copy. Consequences:
+
+- **The ring size is a per-deployment number**, chosen as
+  `ring ≥ wake latency × target bandwidth`. For 4 GiB/s at 55 µs that is
+  ~220 KiB; the deployment default in `claviron-full/.cargo/config.toml`
+  is therefore **256 KiB per direction on Linux**, provisional until the
+  ring-size sweep in `BENCHMARKS.local.md` confirms the formula there.
+  The crate default stays 64 KiB: it is the host-agnostic floor and what
+  the tests and the macOS numbers were taken with.
+- Address space is `fleet × lanes × 2 × ring`, backed only as touched:
+  17 × 512 × 2 × 256 KiB is 4.25 GiB of sparse mapping and costs what
+  live streams use. On Linux the segment lives on `/dev/shm` (tmpfs);
+  its size limit applies to touched pages, but a container's `/dev/shm`
+  must still admit the mapping.
+- **Write and read in large pieces.** A byte-by-byte reader rings the
+  peer only on transitions now, but each `poll` still costs a budget
+  check and each wake ~55 µs; a consumer that frames a header should
+  read it with one `read_buf` into a local buffer, not one byte per
+  call.
+- **Round trips are the guest's, not ours.** Every transport pays the
+  same ~50 µs there; the stream is no worse than a socket and no
+  better. Anything latency-shaped (a lease handshake, a small RPC)
+  should count its hops: each stream setup and each direction reversal
+  is one wake.
+- The driver-thread hop (writer → futex → driver → waker → runtime) is
+  one of those wakes on both hosts. Parking the runtime directly on a
+  per-process fd fed by the doorbell would remove it; it stays on the
+  list until a consumer needs the microseconds and measures them.
+
 ## Invariants
 
 - Bytes are never overwritten before they are read; there is no lag.

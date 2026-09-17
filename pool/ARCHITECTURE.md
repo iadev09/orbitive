@@ -75,6 +75,27 @@ as listening if the recorded incarnation matches. Leases the dead process
 held on others' resources are not in the table; their owners complete
 them when the streams that carried them end.
 
+## What remote reuse costs (measured)
+
+Load test, 8 tasks on one resource of capacity 4, both nodes in one
+process (`BENCHMARKS.local.md`):
+
+| | macOS host | Linux guest |
+|---|---|---|
+| local one-shot (`claim_create`) | ~1.0–1.3 M ops/s, ~2 µs CPU | 1.7 M ops/s, 1.9 µs CPU |
+| local reuse (`reserve`/`accept`/`complete`) | ~1.0–1.7 M ops/s, 2–3 µs CPU | 1.9 M ops/s, 1.9 µs CPU |
+| remote reuse over a stream, 128 B payload | 68 k ops/s, p50 70 µs, 40 µs CPU | 6.2 k ops/s, p50 197 µs, 54 µs CPU, 1.85 parks |
+
+A remote request pays three to four wakes (offer, header, payload,
+reply) at the host's wake latency. On the Linux guest that is ~200 µs
+before any work is done, so remote reuse only beats a fresh local
+connection whose connect costs more than that: a TLS handshake to a far
+origin, yes; a Unix-socket connect to a local FastCGI, no. This is why
+`LocalFirst` and `LocalOnly` are the shipped policies and why no cost
+figure is built in: the embedder measures its connect cost on its host
+and writes the comparison into its own `Policy`. Fairness across
+contending tasks was exact on both hosts.
+
 ## Invariants
 
 - Capacity is never over-admitted; under-admission lasts until the owner
