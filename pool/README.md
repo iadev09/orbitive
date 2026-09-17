@@ -67,8 +67,10 @@ A **lease** is one unit of that capacity, reserved by any process with one
 compare-and-swap; a snapshot that showed room is not a lease. The lease is
 plain data: the resource's address, a fence that grows with every
 reservation on that resource, and who holds it. The owner **accepts** it,
-which turns the reserved unit into an active one, and the returned
-`Execution` guard gives the unit back when dropped or completed.
+which takes that fence out of the resource's pending reservations exactly
+once and turns the unit into an active one; the returned `Execution` guard
+gives the unit back when dropped or completed. A lease accepted twice, or
+after the owner aged it out, is refused.
 
 That guard is the only way capacity returns. A caller that gives up, times
 out or dies frees nothing, because only the owner knows when the resource

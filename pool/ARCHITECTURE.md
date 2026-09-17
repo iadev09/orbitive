@@ -14,10 +14,10 @@ slots registered under it. Keys are found by open addressing on the
 caller's digest and installed under the process lock; they are never
 removed within an epoch.
 
-`ResourceSlot` (128 B): state (EMPTY / LIVE / DRAINING / CLOSED /
+`ResourceSlot` (384 B): state (EMPTY / LIVE / DRAINING / CLOSED /
 EXHAUSTED), generation, owner node and incarnation, key, capacity,
 `key_index`, `units = reserved << 32 | active`, `fence`,
-`last_reserve_ms`. `ResourceId(NetId64)`: kind 247, node = the owner's
+`last_reserve_ms`, the pending set. `ResourceId(NetId64)`: kind 247, node = the owner's
 lane, counter = `generation (24) | slot (16)`, allocated in the owner's
 lane under a process-local mutex; CLOSED slots are reused, EXHAUSTED ones
 wait for the next epoch.
@@ -25,13 +25,20 @@ wait for the next epoch.
 ## Units
 
 Capacity applies to `reserved + active`. `reserve` is one CAS that adds a
-reserved unit and mints a fence; `accept` (owner only, live only) moves a
-unit from reserved to active and returns an `Execution`; dropping it
-subtracts an active unit and wakes the key. Nothing a caller does after
+reserved unit, mints a fence and files it in the slot's pending set (16
+entries of fence and time; a resource whose owner is that far behind
+refuses further reservations as busy). `accept` (owner only, live only)
+takes the fence out of the pending set with one CAS, which succeeds
+exactly once, then moves a unit from reserved to active and returns an
+`Execution`; a second accept, one after the owner aged the entry out, or
+one on an ended generation is `NotReserved`. Several leases on one
+resource are told apart by their fences, so HTTP/2-style capacity works
+without a "latest fence" rule. Dropping the `Execution` subtracts an
+active unit and wakes the key. Nothing a caller does after
 reserving changes the counts: the resource is busy until the owner says it
-is not. A reservation that never reached the owner is aged out by the
-owner's `reconcile(id, active, grace)`, which also makes the owner's
-active count the table's. The ordering keeps every error on the safe side:
+is not. A reservation that never reached the owner is aged out, entry by entry,
+by the owner's `reconcile(id, active, grace)`, which also makes the
+owner's active count the table's. The ordering keeps every error on the safe side:
 the table may under-admit until the owner reconciles, never over-admit.
 
 ## Creation claims

@@ -38,6 +38,7 @@ mod layout;
 mod policy;
 mod table;
 
+pub use layout::PENDING_RESERVATIONS;
 use layout::{
     GENERATION_MASK, RESOURCE_DRAINING, RESOURCE_LIVE, ResourceSlot, SLOT_BITS, SLOT_MASK,
     pack_counts, unpack_counts,
@@ -62,6 +63,10 @@ pub const POOL_RESOURCE_LANE_CAPACITY: usize =
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// A pending entry between being claimed and carrying its fence. Never a
+/// real fence: fences start at one and count up.
+const PLACING: u64 = u64::MAX;
+
 #[derive(Debug)]
 pub enum Error {
     /// The id names a slot nothing occupies, or a generation that ended.
@@ -72,6 +77,10 @@ pub enum Error {
     Draining(ResourceId),
     /// Only the owner may do this to a resource.
     NotOwner(ResourceId),
+    /// The lease is not among the resource's unaccepted reservations: it
+    /// was accepted already, aged out by the owner's reconcile, or taken
+    /// on a generation that ended.
+    NotReserved(Lease),
     /// The key's creation budget is spent: live plus in-progress reached
     /// the limit the caller gave.
     CreationBudget {
@@ -97,6 +106,11 @@ impl fmt::Display for Error {
             Self::Busy(id) => write!(f, "resource {id} has no capacity left"),
             Self::Draining(id) => write!(f, "resource {id} is draining"),
             Self::NotOwner(id) => write!(f, "resource {id} belongs to another node"),
+            Self::NotReserved(lease) => write!(
+                f,
+                "lease {} on {} is not an unaccepted reservation",
+                lease.fence, lease.id
+            ),
             Self::CreationBudget { key, max_live } => {
                 write!(f, "creation budget for {key} is spent: max_live={max_live}")
             }
@@ -341,21 +355,35 @@ impl Pool {
     }
 
     /// The owner's truth: `active` becomes the table's active count, and
-    /// reservations older than `grace` that nobody ever brought to the
-    /// owner are aged out. The shared counts guide selection; the owner
-    /// knows what is really running. `grace` bounds how long an abandoned
-    /// reservation keeps a unit; it says nothing about running work.
+    /// every reservation older than `grace` that nobody brought to the
+    /// owner is aged out, so its unit returns and a late accept of it is
+    /// refused. `grace` bounds how long an abandoned reservation keeps a
+    /// unit; it says nothing about running work.
     pub fn reconcile(&self, id: ResourceId, active: u32, grace: std::time::Duration) -> Result<()> {
         let (_, slot) = self.owned(id)?;
         let now = OrbitEpoch::now().as_unix_ms();
-        let stale_reservations = now.saturating_sub(slot.last_reserve_ms.load(Ordering::Acquire))
-            > grace.as_millis() as u64;
+        let mut aged = 0_u32;
+        for reservation in &slot.pending {
+            let fence = reservation.fence.load(Ordering::Acquire);
+            if fence == 0 || fence == PLACING {
+                continue;
+            }
+            let since = reservation.since_ms.load(Ordering::Relaxed);
+            if now.saturating_sub(since) > grace.as_millis() as u64
+                && reservation
+                    .fence
+                    .compare_exchange(fence, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                aged += 1;
+            }
+        }
         let mut freed = false;
         let _ = slot
             .units
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
                 let (reserved, was_active) = unpack_counts(units);
-                let reserved = if stale_reservations { 0 } else { reserved };
+                let reserved = reserved.saturating_sub(aged);
                 freed = reserved + active < unpack_counts(units).0 + was_active;
                 Some(pack_counts(reserved, active))
             });
@@ -445,8 +473,34 @@ impl Pool {
             return Err(Error::Stale(id));
         }
         let fence = slot.fence.fetch_add(1, Ordering::SeqCst) + 1;
-        slot.last_reserve_ms
-            .store(OrbitEpoch::now().as_unix_ms(), Ordering::Release);
+        let now = OrbitEpoch::now().as_unix_ms();
+        let mut placed = false;
+        for reservation in &slot.pending {
+            // Claim the entry, stamp it, then publish the fence, so a
+            // reader that sees the fence sees this reservation's time and
+            // no other reservation's entry is ever touched.
+            if reservation
+                .fence
+                .compare_exchange(0, PLACING, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                reservation.since_ms.store(now, Ordering::Relaxed);
+                reservation.fence.store(fence, Ordering::SeqCst);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            // The owner is behind; give the unit back and say busy.
+            let _ = slot
+                .units
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+                    let (reserved, active) = unpack_counts(units);
+                    Some(pack_counts(reserved.saturating_sub(1), active))
+                });
+            return Err(Error::Busy(id));
+        }
+        slot.last_reserve_ms.store(now, Ordering::Release);
         Ok(Lease {
             id,
             fence,
@@ -465,6 +519,17 @@ impl Pool {
         let (_, slot) = self.owned(lease.id)?;
         if slot.state.load(Ordering::Acquire) != RESOURCE_LIVE {
             return Err(Error::Draining(lease.id));
+        }
+        // Exactly one accept per reservation: the fence leaves the pending
+        // set here or the lease is not ours to run.
+        let taken = slot.pending.iter().any(|reservation| {
+            reservation
+                .fence
+                .compare_exchange(lease.fence, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        });
+        if !taken {
+            return Err(Error::NotReserved(lease));
         }
         let _ = slot
             .units
@@ -831,15 +896,57 @@ mod tests {
     fn an_abandoned_reservation_is_aged_out_by_the_owner_not_by_time_alone() {
         let pool = pool("pool-abandon");
         let id = pool.register(KEY, 1).unwrap();
-        let _abandoned = pool.reserve(id).unwrap();
+        let abandoned = pool.reserve(id).unwrap();
         assert!(matches!(pool.reserve(id), Err(Error::Busy(_))));
         // Within the grace the reservation is honoured.
         pool.reconcile(id, 0, Duration::from_secs(60)).unwrap();
         assert!(matches!(pool.reserve(id), Err(Error::Busy(_))));
-        // Past it, the owner's reconcile frees the unit it never saw.
+        // Past it, the owner's reconcile frees the unit it never saw, and a
+        // late accept of that lease is refused rather than counted again.
         std::thread::sleep(Duration::from_millis(5));
         pool.reconcile(id, 0, Duration::from_millis(1)).unwrap();
+        assert!(matches!(pool.accept(abandoned), Err(Error::NotReserved(_))));
         assert!(pool.reserve(id).is_ok());
+    }
+
+    #[test]
+    fn a_lease_is_accepted_exactly_once_and_leases_are_told_apart() {
+        let pool = pool("pool-fence");
+        let id = pool.register(KEY, 2).unwrap();
+        let first = pool.reserve(id).unwrap();
+        let second = pool.reserve(id).unwrap();
+        assert_ne!(first.fence, second.fence);
+        // Out of order, each once.
+        let running_second = pool.accept(second).unwrap();
+        assert!(matches!(pool.accept(second), Err(Error::NotReserved(_))));
+        let running_first = pool.accept(first).unwrap();
+        assert!(matches!(pool.accept(first), Err(Error::NotReserved(_))));
+        let snapshot = pool.candidates(KEY)[0];
+        assert_eq!((snapshot.reserved, snapshot.active), (0, 2));
+        drop(running_first);
+        drop(running_second);
+        assert_eq!(pool.candidates(KEY)[0].free(), 2);
+
+        // Aging is per reservation: an old one goes, a fresh one stays.
+        let old = pool.reserve(id).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let fresh = pool.reserve(id).unwrap();
+        pool.reconcile(id, 0, Duration::from_millis(2)).unwrap();
+        assert!(matches!(pool.accept(old), Err(Error::NotReserved(_))));
+        assert!(pool.accept(fresh).is_ok());
+    }
+
+    #[test]
+    fn an_owner_far_behind_makes_the_resource_refuse_reservations() {
+        let pool = pool("pool-pending");
+        let id = pool.register(KEY, u32::MAX).unwrap();
+        let leases = (0..super::PENDING_RESERVATIONS)
+            .map(|_| pool.reserve(id).unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(pool.reserve(id), Err(Error::Busy(_))));
+        let running = pool.accept(leases[0]).unwrap();
+        assert!(pool.reserve(id).is_ok());
+        drop(running);
     }
 
     #[test]

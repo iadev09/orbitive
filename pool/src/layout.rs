@@ -141,11 +141,30 @@ pub(crate) struct ResourceSlot {
     /// Monotonic per slot; every reservation takes the next value, so a
     /// lease can be told from every earlier lease on the same slot.
     pub(crate) fence: AtomicU64,
-    /// When the newest reservation was taken; the owner's reconcile uses
-    /// it to age out reservations that never arrived.
+    /// When the newest reservation was taken, for selection.
     pub(crate) last_reserve_ms: AtomicU64,
     _padding: [u8; 64],
+    /// Reservations the owner has not accepted yet, by fence. A lease is
+    /// accepted by taking its fence out of here exactly once, so a second
+    /// accept, or one arriving after the owner aged the entry out, is
+    /// refused. Bounded: a resource with this many unaccepted
+    /// reservations refuses further ones until the owner catches up.
+    pub(crate) pending: [Reservation; PENDING_RESERVATIONS],
 }
+
+/// One reservation the owner has not seen yet. `since_ms` is written
+/// before `fence` is published, so a reader that sees the fence sees when
+/// it was taken.
+#[repr(C)]
+pub(crate) struct Reservation {
+    pub(crate) fence: AtomicU64,
+    pub(crate) since_ms: AtomicU64,
+}
+
+/// Unaccepted reservations one resource can hold at once. Part of the
+/// slot ABI, not a tunable: an owner that is this far behind is the
+/// problem, not the table.
+pub const PENDING_RESERVATIONS: usize = 16;
 
 impl ResourceSlot {
     pub(crate) fn is(&self, generation: u32) -> bool {
@@ -179,6 +198,10 @@ impl ResourceSlot {
         self.units.store(0, Ordering::Relaxed);
         self.fence.store(0, Ordering::Relaxed);
         self.last_reserve_ms.store(now_ms, Ordering::Relaxed);
+        for reservation in &self.pending {
+            reservation.fence.store(0, Ordering::Relaxed);
+            reservation.since_ms.store(0, Ordering::Relaxed);
+        }
         self.generation.store(generation, Ordering::Relaxed);
         self.state.store(RESOURCE_LIVE, Ordering::Release);
         Some(generation)
@@ -188,7 +211,7 @@ impl ResourceSlot {
 const _: () = assert!(size_of::<Header>() == 64);
 const _: () = assert!(size_of::<Doorbell>() == 64);
 const _: () = assert!(size_of::<KeySlot>() == 64);
-const _: () = assert!(size_of::<ResourceSlot>() == 128);
+const _: () = assert!(size_of::<ResourceSlot>() == 128 + 16 * PENDING_RESERVATIONS);
 const _: () = assert!(POOL_KEY_CAPACITY.is_power_of_two());
 const _: () = assert!(POOL_RESOURCE_LANE_CAPACITY.is_power_of_two());
 const _: () = assert!(POOL_RESOURCE_LANE_CAPACITY <= 1 << SLOT_BITS);
