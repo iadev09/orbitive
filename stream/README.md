@@ -20,7 +20,8 @@ use orbitive::Fleet;
 let fleet = Arc::new(Fleet::join("example", 1)?);
 // The incarnation is whatever tells this life of the process apart from
 // the next one under the same node id: a start stamp, a supervisor's
-// generation. Orbit does not mint it.
+// generation. Orbit does not mint it, and it is one value per process
+// life, never one per request. `1` here is a stand-in.
 let streams = Streams::new(fleet, Incarnation::new(1))?;
 
 // One end creates the stream and hands the ticket to the other end,
@@ -28,15 +29,37 @@ let streams = Streams::new(fleet, Incarnation::new(1))?;
 let (mut a, ticket) = streams.create()?;
 let ticket_text = ticket.to_string();
 
-// The other end, in any process of the fleet:
+// The other end. This example opens it from the same handle in the same
+// process to stay short; in another process, B joins the same fleet,
+// makes its own `Streams`, and opens the ticket it was handed. Nothing of
+// A's, no `Arc`, no handle, crosses over: only the ticket's text.
 let b = streams.open(ticket_text.parse::<Ticket>()?)?;
 
+// Write then read on one thread works because five bytes fit the ring.
+// A body larger than the ring needs the reader running at the same time:
+// the writer parks when the ring is full and only the reader frees it.
 a.blocking_write_all(b"hello")?;
 a.finish()?;                                  // FIN: nothing more this way
 assert_eq!(b.blocking_read_chunk(16)?.as_ref(), b"hello");
 assert!(b.blocking_read_chunk(16)?.is_empty()); // clean end of stream
 
 # Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The two-process shape, with the peer on Tokio:
+
+```rust,ignore
+// Process A (node 0): create, hand the ticket over, stream.
+let (a, ticket) = streams.create()?;
+streams.offer(ticket, NodeId::new(1))?;      // or publish `ticket.to_string()` anywhere
+let (mut a_read, mut a_write) = a.split();
+tokio::spawn(async move { a_write.write_all(&body).await?; a_write.shutdown().await });
+a_read.read_to_end(&mut reply).await?;       // the reader runs while the writer waits
+
+// Process B (node 1): its own fleet handle, its own `Streams`.
+let streams = Streams::new(fleet, supervisor_incarnation)?;
+let ticket = streams.blocking_take_offer()?;  // or parse the text it was sent
+let b = streams.open(ticket)?;
 ```
 
 ## What a stream is
@@ -49,8 +72,13 @@ empty one makes the reader wait. The two directions are independent, so a
 request body can still be going one way while the response starts the
 other.
 
-A writer that is done calls `finish`; the reader drains what is buffered
-and then sees a clean end (`Ok(0)`, or an empty chunk). A writer that gives
+A read returns what is there, up to what was asked: `blocking_read_chunk(16)`
+means at most sixteen bytes, not a frame, and a five-byte write may well
+arrive in two reads once both ends are running at full speed. The bytes
+and their order are the contract; message boundaries belong to the
+protocol above, which accumulates or reads exact lengths. A writer that is
+done calls `finish`; the reader drains what is buffered and then sees a
+clean end (`Ok(0)`, or an empty chunk). A writer that gives
 up calls `reset`, or is dropped without finishing, and the reader gets an
 error instead. A reader that is dropped tells the writer, whose next write
 fails. Each side is held once: an `Endpoint` can be split into a `ReadHalf`
@@ -82,7 +110,11 @@ The blocking calls (`blocking_read`, `blocking_write`, `blocking_write_all`,
 the direction's own change word through the platform's shared address wait
 (Linux futex, FreeBSD umtx, macOS `os_sync_wait_on_address` from 14.4;
 earlier releases poll). A writer pays one extra load to see whether anyone
-is parked, and a wake only when someone is.
+is parked, and a wake only when someone is. They are for a thread that is
+free to sleep: a dedicated PHP thread, a synchronous Rust consumer. Inside
+a Tokio task use the halves' `AsyncRead` / `AsyncWrite` instead; the
+difference is that a poll with nothing to do registers a wake and returns
+`Pending` rather than parking a runtime thread.
 
 With the `tokio` feature, `ReadHalf` implements `AsyncRead`, `WriteHalf`
 implements `AsyncWrite`, and `Endpoint` implements both. A poll that finds

@@ -606,6 +606,7 @@ name = "orbit-stream"
 version = "0.3.14"
 dependencies = [
  "bytes",
+ "criterion",
  "orbit-core",
  "tokio",
 ]

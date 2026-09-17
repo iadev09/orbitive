@@ -20,4 +20,10 @@ orbit-core.workspace = true
 tokio = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util", "time"] }
+criterion.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util", "net", "time"] }
+
+[[bench]]
+name = "transport"
+harness = false
+required-features = ["tokio"]
