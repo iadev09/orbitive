@@ -584,8 +584,10 @@ dependencies = [
 name = "orbit-pool"
 version = "0.3.14"
 dependencies = [
+ "libc",
  "orbit-core",
  "orbit-stream",
+ "tokio",
 ]
 
 [[package]]

@@ -14,4 +14,12 @@ exclude.workspace = true
 orbit-core.workspace = true
 
 [dev-dependencies]
-orbit-stream.workspace = true
+orbit-stream = { workspace = true, features = ["tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util", "time"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
+[[bench]]
+name = "load"
+harness = false

@@ -340,3 +340,60 @@ impl Peer {
         self.pool.candidates(key)
     }
 }
+
+impl Owner {
+    fn kill(&mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
+/// The owner dies while executing. Nothing in the segment changes by
+/// itself; the supervisor's death reports end the owner's side of the
+/// stream and close its resources, and the peer, parked on the stream,
+/// wakes with a reset and finds nothing left to reuse.
+#[test]
+fn a_dead_owner_ends_the_stream_and_takes_its_resource_with_it() {
+    let peer = Peer::new("k");
+    let mut owner = Owner::spawn(peer.name);
+
+    owner.send("hold");
+    let (lease, endpoint) = peer.dispatch(b"partial", false);
+    owner.expect("accepted");
+    let reader = std::thread::spawn(move || {
+        let outcome = endpoint.blocking_read_chunk(16);
+        (endpoint, outcome)
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    owner.kill();
+
+    // Death alone: the resource still looks busy and the reader is parked.
+    assert!(peer.candidates(KEY).len() == 1);
+    assert!(matches!(
+        peer.pool.reserve(owner.resource),
+        Err(Error::Busy(_))
+    ));
+
+    peer.streams.node_dead(
+        NodeId::ZERO,
+        orbit_stream::Incarnation::new(OWNER_INCARNATION),
+    );
+    peer.pool
+        .node_dead(NodeId::ZERO, Incarnation::new(OWNER_INCARNATION));
+    let (_endpoint, outcome) = reader.join().unwrap();
+    assert!(
+        matches!(outcome, Err(orbit_stream::Error::Reset)),
+        "{outcome:?}"
+    );
+    assert!(!peer.pool.is_current(lease));
+    assert!(peer.candidates(KEY).is_empty());
+    // The budget is free again: the next acquire would create.
+    let limits = Limits {
+        max_live: 1,
+        attempts: 1,
+    };
+    assert!(matches!(
+        peer.pool.acquire(KEY, &limits, &LocalFirst).unwrap(),
+        Plan::Create(_)
+    ));
+}
