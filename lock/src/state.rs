@@ -245,7 +245,7 @@ impl<L: LockLayout> LockStateStore<L> {
         match &self.backend {
             StateBacking::InMemory(table) => {
                 let mut table = lock_unpoisoned(table);
-                let MemoryTable { header, slots } = &mut *table;
+                let MemoryTable { header, slots, .. } = &mut *table;
                 operation(header, slots)
             }
             #[cfg(unix)]
@@ -397,13 +397,17 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 struct MemoryTable {
+    /// Held so the fleet's address, which keys the registry, cannot be
+    /// reused by another fleet while this table lives.
+    _fleet: Arc<Fleet>,
     header: LockStateHeader,
     slots: Vec<LockStateSlot>,
 }
 
 impl MemoryTable {
-    fn new() -> Self {
+    fn new(fleet: Arc<Fleet>) -> Self {
         Self {
+            _fleet: fleet,
             header: LockStateHeader::new(),
             slots: (0..LOCK_STATE_CAPACITY)
                 .map(|_| LockStateSlot::empty())
@@ -426,7 +430,7 @@ fn memory_table(fleet: &Arc<Fleet>, state_kind: u8) -> Arc<Mutex<MemoryTable>> {
     {
         return table;
     }
-    let table = Arc::new(Mutex::new(MemoryTable::new()));
+    let table = Arc::new(Mutex::new(MemoryTable::new(Arc::clone(fleet))));
     tables.insert((fleet_identity, state_kind), Arc::downgrade(&table));
     table
 }

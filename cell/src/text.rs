@@ -469,14 +469,18 @@ impl Drop for WriterGuard<'_> {
 }
 
 pub(crate) struct MemoryTextTable {
+    /// Held so the fleet's address, which keys the registry, cannot be
+    /// reused by another fleet while this table lives.
+    _fleet: Arc<Fleet>,
     slots: Vec<TextSlot>,
     hint: AtomicU32,
     structural_lock: Mutex<()>,
 }
 
 impl MemoryTextTable {
-    fn new() -> Self {
+    fn new(fleet: Arc<Fleet>) -> Self {
         Self {
+            _fleet: fleet,
             slots: (0..CELL_TEXT_CAPACITY).map(|_| TextSlot::empty()).collect(),
             hint: AtomicU32::new(0),
             structural_lock: Mutex::new(()),
@@ -496,7 +500,7 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryTextTable> {
     if let Some(table) = tables.get(&fleet_identity).and_then(Weak::upgrade) {
         return table;
     }
-    let table = Arc::new(MemoryTextTable::new());
+    let table = Arc::new(MemoryTextTable::new(Arc::clone(fleet)));
     tables.insert(fleet_identity, Arc::downgrade(&table));
     table
 }

@@ -321,12 +321,16 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 struct MemoryCounterTable {
+    /// Held so the fleet's address, which keys the registry, cannot be
+    /// reused by another fleet while this table lives.
+    _fleet: Arc<Fleet>,
     slots: Mutex<Vec<CounterSlot>>,
 }
 
 impl MemoryCounterTable {
-    fn new() -> Self {
+    fn new(fleet: Arc<Fleet>) -> Self {
         Self {
+            _fleet: fleet,
             slots: Mutex::new(
                 (0..COUNTER_CAPACITY)
                     .map(|_| CounterSlot::empty())
@@ -347,7 +351,7 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryCounterTable> {
     if let Some(table) = tables.get(&fleet_identity).and_then(Weak::upgrade) {
         return table;
     }
-    let table = Arc::new(MemoryCounterTable::new());
+    let table = Arc::new(MemoryCounterTable::new(Arc::clone(fleet)));
     tables.insert(fleet_identity, Arc::downgrade(&table));
     table
 }

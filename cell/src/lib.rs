@@ -578,7 +578,7 @@ impl Orbital<f64> {
         let slot = self.slot()?;
         let previous = slot
             .value
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
                 Some((f64::from_bits(bits) + by).to_bits())
             })
             .unwrap_or_else(|bits| bits);
@@ -710,14 +710,18 @@ pub(crate) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 struct MemoryCellTable {
+    /// Held so the fleet's address, which keys the registry, cannot be
+    /// reused by another fleet while this table lives.
+    _fleet: Arc<Fleet>,
     slots: Vec<CellSlot>,
     hint: AtomicU32,
     structural_lock: Mutex<()>,
 }
 
 impl MemoryCellTable {
-    fn new() -> Self {
+    fn new(fleet: Arc<Fleet>) -> Self {
         Self {
+            _fleet: fleet,
             slots: (0..CELL_CAPACITY).map(|_| CellSlot::empty()).collect(),
             hint: AtomicU32::new(0),
             structural_lock: Mutex::new(()),
@@ -737,7 +741,7 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryCellTable> {
     if let Some(table) = tables.get(&fleet_identity).and_then(Weak::upgrade) {
         return table;
     }
-    let table = Arc::new(MemoryCellTable::new());
+    let table = Arc::new(MemoryCellTable::new(Arc::clone(fleet)));
     tables.insert(fleet_identity, Arc::downgrade(&table));
     table
 }
@@ -827,6 +831,28 @@ const _: () = assert!(CELL_CAPACITY.is_power_of_two());
 const _: () = assert!(CELL_CAPACITY <= u32::MAX as usize);
 const _: () = assert!(size_of::<CellStateHeader>() == 64);
 const _: () = assert!(size_of::<CellSlot>() == 64);
+
+#[cfg(test)]
+mod registry_tests {
+    use std::sync::Arc;
+
+    use orbit_core::Fleet;
+
+    use super::Cells;
+
+    /// The in-memory registry keys tables by the fleet's address. The
+    /// table therefore keeps the fleet alive: otherwise a dropped fleet's
+    /// address could be reused by a new one, which would then find and
+    /// share the old table.
+    #[test]
+    fn a_memory_table_keeps_its_fleet_alive() {
+        let fleet = Arc::new(Fleet::join("cell-registry-test", 1).unwrap());
+        let cells = Cells::new(Arc::clone(&fleet)).unwrap();
+        assert!(Arc::strong_count(&fleet) > 1);
+        drop(cells);
+        assert_eq!(Arc::strong_count(&fleet), 1);
+    }
+}
 
 #[cfg(test)]
 mod wait_tests {
