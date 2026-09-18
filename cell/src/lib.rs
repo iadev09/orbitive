@@ -40,24 +40,30 @@ pub const CELL_CAPACITY: usize =
 pub(crate) const SLOT_EMPTY: u8 = 0;
 pub(crate) const SLOT_OCCUPIED: u8 = 1;
 
+/// Whether this build can park on a shared word. A table refuses to open
+/// where it cannot: a sleep loop wearing the shape of a wait is worse
+/// than a clear no, and nothing above here should have to ask again.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub(crate) fn waits_supported() -> bool {
+    orbit_core::sync::supported()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+pub(crate) fn waits_supported() -> bool {
+    false
+}
+
 /// Park until `word` no longer holds `expected`, through the platform's
-/// shared address wait; where there is none, a short sleep and a re-check.
+/// shared address wait. There is no polling fallback: a table refuses to
+/// open where the platform cannot wait, so by here it can.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub(crate) fn wait_on(word: &AtomicU32, expected: u32) -> Result<()> {
-    match orbit_core::sync::wait_word(word, expected) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            Ok(())
-        }
-        Err(error) => Err(Error::Io(error)),
-    }
+    orbit_core::sync::wait_word(word, expected).map_err(Error::Io)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
 pub(crate) fn wait_on(_word: &AtomicU32, _expected: u32) -> Result<()> {
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    Ok(())
+    Err(Error::Io(std::io::Error::new(std::io::ErrorKind::Unsupported, "orbit-cell needs a platform that can wait on a shared word")))
 }
 
 /// Wake everyone parked on `word`; nothing to do where nobody can park.
@@ -284,6 +290,12 @@ enum CellBackend {
 
 impl Cells {
     pub fn new(fleet: Arc<Fleet>) -> Result<Self> {
+    if !crate::waits_supported() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "orbit-cell needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later",
+        )));
+    }
         let backend = if fleet.is_shm() {
             #[cfg(unix)]
             {

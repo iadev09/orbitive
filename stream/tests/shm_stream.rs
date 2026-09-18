@@ -291,3 +291,48 @@ fn poll_readable(fd: std::os::fd::RawFd, millis: i32) -> bool {
     let ready = unsafe { libc::poll(&mut watched, 1, millis) };
     ready > 0 && watched.revents & libc::POLLIN != 0
 }
+
+/// A bounded wait: the deadline is the caller's, and giving up on it does
+/// not give up the stream. This is what a worker with a shutdown to
+/// observe, or a request with a deadline, uses instead of parking on the
+/// next thing forever.
+#[test]
+fn a_wait_can_be_bounded_without_losing_the_stream() {
+    let name = fleet_name("t");
+    let owner = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
+        Incarnation::new(10),
+    )
+    .expect("owner streams");
+    owner.reset_all();
+    let peer = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
+        Incarnation::new(11),
+    )
+    .expect("peer streams");
+
+    // Nothing offered: the wait ends at the deadline, not at an answer.
+    let started = std::time::Instant::now();
+    assert!(peer.take_offer_timeout(Duration::from_millis(150)).expect("wait").is_none());
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_millis(100), "gave up after {waited:?}");
+    assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+
+    // And when one arrives, the same call answers with it.
+    let (a, ticket) = owner.create().expect("create");
+    owner.offer(ticket, NodeId::new(1)).expect("offer");
+    let taken = peer
+        .take_offer_timeout(Duration::from_secs(5))
+        .expect("wait")
+        .expect("the offer");
+    let (b_read, _b_write) = peer.open(taken).expect("open").split();
+
+    // The same for readability: empty until it is not.
+    assert!(!b_read.wait_readable_timeout(Duration::from_millis(100)).expect("wait"));
+    a.try_write(b"soon").expect("write");
+    assert!(b_read.wait_readable_timeout(Duration::from_secs(5)).expect("wait"));
+    let mut sink = [0_u8; 4];
+    assert_eq!(b_read.try_read(&mut sink).expect("read"), 4);
+
+    let _ = owner.unlink();
+}

@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::task::Waker;
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
@@ -21,8 +20,6 @@ use crate::layout::{
 use orbit_core::readiness::{Readiness, Signal};
 
 use crate::{Error, Incarnation, PoolSpec, Result, lock_unpoisoned};
-
-const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 enum Backing {
     Memory(AlignedBytes),
@@ -453,12 +450,11 @@ impl Table {
                 seen = now;
                 continue;
             }
-            match crate::wait_on(&doorbell.generation, seen) {
-                Ok(()) => {}
-                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => {
-                    std::thread::sleep(FALLBACK_POLL_INTERVAL);
-                }
-                Err(_) => break,
+            // The table refused to open where the platform cannot wait, so
+            // a failure here is the table going away, not a system to poll
+            // around.
+            if crate::wait_on(&doorbell.generation, seen).is_err() {
+                break;
             }
         }
         doorbell.listening.fetch_sub(1, Ordering::SeqCst);
@@ -614,6 +610,12 @@ pub(crate) fn open(
     incarnation: Incarnation,
     spec: PoolSpec,
 ) -> Result<Arc<Table>> {
+    if !crate::waits_supported() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "orbit-pool needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later",
+        )));
+    }
     // The kind is part of the identity in both backings: two specs are two
     // tables, in one process as in the fleet.
     let key = if fleet.is_shm() {

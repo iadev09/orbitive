@@ -290,6 +290,24 @@ impl Table {
     }
 
     /// Park the calling thread until an offer arrives for this node.
+    /// The same wait, bounded: `false` is the timeout and nothing else.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    pub(crate) fn wait_offer_timeout(&self, timeout: std::time::Duration) -> Result<bool> {
+        let doorbell = self.doorbell(usize::from(self.node));
+        if self.has_offer() {
+            return Ok(true);
+        }
+        doorbell.listening.fetch_add(1, Ordering::SeqCst);
+        let seen = doorbell.generation.load(Ordering::SeqCst);
+        let outcome = if self.has_offer() {
+            Ok(true)
+        } else {
+            crate::wait_on_timeout(&doorbell.generation, seen, timeout)
+        };
+        doorbell.listening.fetch_sub(1, Ordering::SeqCst);
+        outcome
+    }
+
     pub(crate) fn wait_offer(&self) -> Result<()> {
         let doorbell = self.doorbell(usize::from(self.node));
         loop {
@@ -519,6 +537,12 @@ pub(crate) fn open(
     incarnation: Incarnation,
     spec: StreamSpec,
 ) -> Result<Arc<Table>> {
+    if !crate::waits_supported() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "orbit-stream needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later",
+        )));
+    }
     let key = if fleet.is_shm() {
         #[cfg(unix)]
         {

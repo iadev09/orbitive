@@ -11,13 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use crate::lock_unpoisoned;
-
-/// How long the driver sleeps between looks when the platform has no shared
-/// address wait (macOS before 14.4).
-const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Which task on a slot a waker belongs to: reader or writer of one direction.
 #[derive(Clone, Copy)]
@@ -174,12 +169,10 @@ fn run<T: Doorstep>(table: &T, stop: &AtomicBool) {
             seen = now;
             continue;
         }
-        match crate::wait_on(generation, seen) {
-            Ok(()) => {}
-            Err(crate::Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => {
-                std::thread::sleep(FALLBACK_POLL_INTERVAL);
-            }
-            Err(_) => break,
+        // The table refused to open where the platform cannot wait, so a
+        // failure here is the table going away, not a system to poll around.
+        if crate::wait_on(generation, seen).is_err() {
+            break;
         }
     }
     table.listening(-1);

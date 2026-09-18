@@ -28,6 +28,7 @@ use std::fmt;
 use std::io;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::{Bytes, BytesMut};
@@ -513,6 +514,26 @@ impl Streams {
         None
     }
 
+    /// The same wait, bounded: `None` is the timeout and nothing else.
+    /// A worker whose shutdown must be observed waits this way rather
+    /// than parking on the next request forever.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    pub fn take_offer_timeout(&self, timeout: Duration) -> Result<Option<Ticket>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(ticket) = self.take_offer() {
+                return Ok(Some(ticket));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(self.take_offer());
+            }
+            if !self.table.wait_offer_timeout(left)? {
+                return Ok(self.take_offer());
+            }
+        }
+    }
+
     /// Park the thread until a stream is offered to this node.
     pub fn blocking_take_offer(&self) -> Result<Ticket> {
         loop {
@@ -724,6 +745,42 @@ impl Handle {
     }
 
     /// Park until `ready` holds for the direction, or the stream ends.
+    /// The same wait, bounded: `false` is the timeout and nothing else.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    fn wait_until_timeout(
+        &self,
+        direction_index: usize,
+        ready: impl Fn(&Direction) -> bool,
+        timeout: Duration,
+    ) -> Result<bool> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let slot = self.slot()?;
+            let direction = Self::direction(slot, direction_index);
+            if ready(direction) {
+                return Ok(true);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            direction.waiters.fetch_add(1, Ordering::SeqCst);
+            let since = direction.changes.load(Ordering::SeqCst);
+            let outcome = if ready(direction) {
+                Ok(true)
+            } else {
+                wait_on_timeout(&direction.changes, since, left)
+            };
+            direction.waiters.fetch_sub(1, Ordering::SeqCst);
+            if !outcome? {
+                // The deadline passed; one last look, since readiness may
+                // have landed between the wait giving up and this line.
+                let slot = self.slot()?;
+                return Ok(ready(Self::direction(slot, direction_index)));
+            }
+        }
+    }
+
     fn wait_until(&self, direction_index: usize, ready: impl Fn(&Direction) -> bool) -> Result<()> {
         loop {
             let slot = self.slot()?;
@@ -930,6 +987,13 @@ impl ReadHalf {
         Ok(chunk.freeze())
     }
 
+    /// The same wait, bounded: `false` is the timeout and nothing else.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    pub fn wait_readable_timeout(&self, timeout: Duration) -> Result<bool> {
+        self.handle
+            .wait_until_timeout(self.handle.side.read_direction(), readable, timeout)
+    }
+
     /// Park until a read would make progress or the direction ended.
     pub fn wait_readable(&self) -> Result<()> {
         self.handle
@@ -1014,6 +1078,19 @@ impl WriteHalf {
             .set_flag(self.handle.side.write_direction(), FLAG_RESET);
     }
 
+    /// The same wait, bounded: `false` is the timeout and nothing else,
+    /// which is how a caller with a deadline of its own gives up without
+    /// giving up its stream.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    pub fn wait_writable_timeout(&self, timeout: Duration) -> Result<bool> {
+        let buffer_bytes = self.handle.table.geometry().buffer_bytes;
+        self.handle.wait_until_timeout(
+            self.handle.side.write_direction(),
+            |direction| writable(direction, buffer_bytes),
+            timeout,
+        )
+    }
+
     /// Park until a write would make progress or the direction ended.
     pub fn wait_writable(&self) -> Result<()> {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
@@ -1048,24 +1125,37 @@ impl Drop for WriteHalf {
     }
 }
 
-/// Park until `word` no longer holds `expected`, through the platform's
-/// shared address wait; where there is none, a short sleep and a re-check.
+/// Whether this build can park on a shared word. A table refuses to open
+/// where it cannot: a sleep loop wearing the shape of a wait is worse
+/// than a clear no, and nothing above here should have to ask again.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub(crate) fn waits_supported() -> bool {
+    orbit_core::sync::supported()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+pub(crate) fn waits_supported() -> bool {
+    false
+}
+
+/// Park until `word` no longer holds `expected`, through the platform's
+/// shared address wait. There is no polling fallback: a table refuses to
+/// open where the platform cannot wait, so by here it can.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+/// Park until the word moves or `timeout` passes. `false` is the
+/// timeout and nothing else.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub(crate) fn wait_on_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> Result<bool> {
+    orbit_core::sync::wait_word_timeout(word, expected, timeout).map_err(Error::Io)
+}
+
 pub(crate) fn wait_on(word: &AtomicU32, expected: u32) -> Result<()> {
-    match orbit_core::sync::wait_word(word, expected) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            Ok(())
-        }
-        Err(error) => Err(Error::Io(error)),
-    }
+    orbit_core::sync::wait_word(word, expected).map_err(Error::Io)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
 pub(crate) fn wait_on(_word: &AtomicU32, _expected: u32) -> Result<()> {
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    Ok(())
+    Err(Error::Io(std::io::Error::new(std::io::ErrorKind::Unsupported, "orbit-stream needs a platform that can wait on a shared word")))
 }
 
 /// Wake everyone parked on `word`; nothing to do where nobody can park.

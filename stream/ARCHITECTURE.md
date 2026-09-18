@@ -74,6 +74,19 @@ Three mechanisms, all hints over authoritative state:
   `orbit_core::sync::wait_word`, announcing themselves in `waiters` first
   (the cell idiom, SeqCst on both sides). Every commit, consume and flag
   change bumps `changes` and wakes only when `waiters > 0`.
+
+  Bounded forms take the same path with a deadline —
+  `wait_readable_timeout`, `wait_writable_timeout`, `take_offer_timeout`
+  — and answer `false`/`None` for the timeout and nothing else, after one
+  last look. They are for a caller whose deadline is its own: a worker
+  with a shutdown to observe, a request that must answer rather than
+  queue. A caller waiting for several things at once uses the descriptor
+  instead, since one `poll` can hold both.
+
+  There is no polling fallback anywhere below this. Where the platform
+  cannot wait on a shared word — macOS before 14.4 — the table refuses to
+  open (`ErrorKind::Unsupported`) rather than degrade to a sleep loop
+  wearing the shape of a wait.
 - **Async tasks** register a `Waker` per (slot, direction, role) in a
   process-local registry. After a change that a parked task could be
   waiting for (a commit onto an empty ring, a consume from a full ring,

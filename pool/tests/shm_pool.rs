@@ -150,3 +150,40 @@ fn one_kind_has_one_geometry_in_a_process() {
     assert!(matches!(odd, Err(Error::Malformed(_))));
     let _ = first.unlink();
 }
+
+/// The admission window a consumer actually has: wait this long for
+/// capacity, then answer busy. The deadline is the caller's, and the
+/// release that ends the wait comes from the other node.
+#[test]
+fn waiting_for_capacity_can_be_bounded() {
+    let (owner, peer) = pair("t");
+    let id = owner.register(KEY, 1).expect("register");
+    let lease = peer.reserve(id).expect("reserve");
+    let execution = owner.accept(lease).expect("accept");
+
+    // Busy, and it stays busy: the wait ends at the deadline.
+    let since = peer.version(KEY).expect("version");
+    assert!(matches!(peer.reserve(id), Err(Error::Busy(_))));
+    let started = std::time::Instant::now();
+    assert!(
+        peer.wait_capacity_timeout(KEY, since, Duration::from_millis(150))
+            .expect("wait")
+            .is_none()
+    );
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_millis(100), "gave up after {waited:?}");
+    assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+
+    // The owner completes, and the same call answers before its deadline.
+    let since = peer.version(KEY).expect("version");
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        execution.complete();
+    });
+    let version = peer
+        .wait_capacity_timeout(KEY, since, Duration::from_secs(5))
+        .expect("wait")
+        .expect("capacity came back");
+    assert!(version > since);
+    assert!(peer.reserve(id).is_ok());
+}

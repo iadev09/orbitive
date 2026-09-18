@@ -32,6 +32,7 @@ use std::io;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use orbit_core::{Fleet, NetId64, NodeId, OrbitEpoch};
 
@@ -727,6 +728,49 @@ impl Pool {
         }
     }
 
+    /// The same wait, bounded: `None` is the timeout and nothing else.
+    ///
+    /// This is what a caller with a deadline of its own uses — an
+    /// admission window, a request that must answer busy rather than
+    /// queue forever. Take the version before the attempt, as with
+    /// [`Pool::wait_capacity`], so a change between the two is seen
+    /// instead of waited for.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    pub fn wait_capacity_timeout(
+        &self,
+        key: Key,
+        since: u32,
+        timeout: Duration,
+    ) -> Result<Option<u32>> {
+        let (lo, hi) = key.parts();
+        let key_index = self.table.key_index(lo, hi)?;
+        let slot = self.table.key(key_index);
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = slot.changes.load(Ordering::SeqCst);
+            if now != since {
+                return Ok(Some(now));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            slot.waiters.fetch_add(1, Ordering::SeqCst);
+            let outcome = if slot.changes.load(Ordering::SeqCst) == since {
+                wait_on_timeout(&slot.changes, since, left)
+            } else {
+                Ok(true)
+            };
+            slot.waiters.fetch_sub(1, Ordering::SeqCst);
+            if !outcome? {
+                // The deadline passed. One last look: a change may have
+                // landed between the wait giving up and this line.
+                let now = slot.changes.load(Ordering::SeqCst);
+                return Ok((now != since).then_some(now));
+            }
+        }
+    }
+
     /// The key's change count; what [`Pool::wait_capacity`] waits past.
     pub fn version(&self, key: Key) -> Result<u32> {
         let (lo, hi) = key.parts();
@@ -931,21 +975,33 @@ impl Drop for CreationPermit {
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+/// Whether this build can park on a shared word. A table refuses to open
+/// where it cannot: a sleep loop wearing the shape of a wait is worse
+/// than a clear no, and nothing above here should have to ask again.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub(crate) fn waits_supported() -> bool {
+    orbit_core::sync::supported()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+pub(crate) fn waits_supported() -> bool {
+    false
+}
+
+/// Park until the word moves or `timeout` passes. `false` is the
+/// timeout and nothing else.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub(crate) fn wait_on_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> Result<bool> {
+    orbit_core::sync::wait_word_timeout(word, expected, timeout).map_err(Error::Io)
+}
+
 pub(crate) fn wait_on(word: &AtomicU32, expected: u32) -> Result<()> {
-    match orbit_core::sync::wait_word(word, expected) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            Ok(())
-        }
-        Err(error) => Err(Error::Io(error)),
-    }
+    orbit_core::sync::wait_word(word, expected).map_err(Error::Io)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
 pub(crate) fn wait_on(_word: &AtomicU32, _expected: u32) -> Result<()> {
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    Ok(())
+    Err(Error::Io(std::io::Error::new(std::io::ErrorKind::Unsupported, "orbit-pool needs a platform that can wait on a shared word")))
 }
 
 pub(crate) fn wake_on(word: &AtomicU32) {

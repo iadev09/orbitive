@@ -78,7 +78,12 @@ then the least loaded remote one, then creation within budget, then wait.
 
 ## Waking
 
-Blocking waiters park on the key's `changes` word (the cell idiom). Tasks
+Blocking waiters park on the key's `changes` word (the cell idiom), with
+a bounded form — `wait_capacity_timeout` — that answers `None` for the
+timeout and nothing else, after one last look. That is the admission
+window a consumer has when it must answer busy rather than queue. There
+is no polling fallback below it: where the platform cannot wait on a
+shared word (macOS before 14.4), the table refuses to open. Tasks
 register a waker per key in the process; the node marks interest in the
 key in its interest bitmap; a `key_changed` sets the pending bit and rings
 the doorbell of every interested node, and the node's driver thread wakes
