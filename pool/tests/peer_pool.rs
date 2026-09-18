@@ -5,10 +5,15 @@
 //! the output back and only then completes the lease. A peer that gives up
 //! mid-way frees nothing; the owner's completion does.
 //!
-//! No transport lives in the pool: the stream is the existing crate, and
-//! the lease crosses it as text in the first line.
+//! The rendezvous itself is the pool's, through `open_session` and
+//! `accept_session`: the lease crosses the stream in one frame and is
+//! accepted exactly once before a byte of the payload is trusted. What
+//! crosses afterwards — here, text to uppercase — is this test's.
 
-#![cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#![cfg(all(
+    feature = "stream",
+    any(target_os = "linux", target_os = "freebsd", target_os = "macos")
+))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -18,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use orbit_core::{Fleet, NodeId};
 use orbit_pool::{Error, Incarnation, Key, Lease, Limits, LocalFirst, Plan, Pool, ResourceId};
-use orbit_stream::{Streams, Ticket};
+use orbit_stream::{ReadHalf, Streams, WriteHalf};
 
 const KEY: Key = Key::new(0x5EED);
 const OWNER_INCARNATION: u64 = 10;
@@ -27,27 +32,6 @@ const PEER_INCARNATION: u64 = 11;
 fn report(line: &str) {
     println!("ORBIT:{line}");
     std::io::stdout().flush().unwrap();
-}
-
-/// The lease as it crosses the stream: one line, plain numbers.
-fn encode_lease(lease: &Lease) -> String {
-    format!(
-        "{} {} {} {}\n",
-        lease.id,
-        lease.fence,
-        lease.holder.get(),
-        lease.holder_incarnation.get()
-    )
-}
-
-fn decode_lease(line: &str) -> Lease {
-    let mut parts = line.split_whitespace();
-    Lease {
-        id: parts.next().unwrap().parse::<ResourceId>().unwrap(),
-        fence: parts.next().unwrap().parse().unwrap(),
-        holder: NodeId::new(parts.next().unwrap().parse().unwrap()),
-        holder_incarnation: Incarnation::new(parts.next().unwrap().parse().unwrap()),
-    }
 }
 
 /// The owner process (node 0). Runs only when exec'd by a test below.
@@ -96,31 +80,20 @@ fn pool_owner() {
             // Serve one request end to end.
             "serve" => {
                 let ticket = streams.blocking_take_offer().unwrap();
-                let mut endpoint = streams.open(ticket).unwrap();
-                let mut header = Vec::new();
-                loop {
-                    let mut byte = [0_u8; 1];
-                    assert_eq!(endpoint.blocking_read(&mut byte).unwrap(), 1);
-                    if byte[0] == b'\n' {
-                        break;
-                    }
-                    header.push(byte[0]);
-                }
-                let lease = decode_lease(std::str::from_utf8(&header).unwrap());
-                let execution = pool.accept(lease).unwrap();
-                report(&format!("accepted {}", lease.fence));
+                let (execution, read, mut write) = pool.accept_session(&streams, ticket).unwrap();
+                report(&format!("accepted {}", execution.lease().fence));
                 let mut input = Vec::new();
                 loop {
-                    let chunk = endpoint.blocking_read_chunk(4_096).unwrap();
+                    let chunk = read.blocking_read_chunk(4_096).unwrap();
                     if chunk.is_empty() {
                         break;
                     }
                     input.extend_from_slice(&chunk);
                 }
-                endpoint
+                write
                     .blocking_write_all(&input.to_ascii_uppercase())
                     .unwrap();
-                endpoint.finish().unwrap();
+                write.finish().unwrap();
                 execution.complete();
                 report(&format!("completed {}", input.len()));
             }
@@ -128,23 +101,12 @@ fn pool_owner() {
             // the peer's fate meanwhile must not free the resource.
             "hold" => {
                 let ticket = streams.blocking_take_offer().unwrap();
-                let endpoint = streams.open(ticket).unwrap();
-                let mut header = Vec::new();
-                loop {
-                    let mut byte = [0_u8; 1];
-                    assert_eq!(endpoint.blocking_read(&mut byte).unwrap(), 1);
-                    if byte[0] == b'\n' {
-                        break;
-                    }
-                    header.push(byte[0]);
-                }
-                let lease = decode_lease(std::str::from_utf8(&header).unwrap());
-                let execution = pool.accept(lease).unwrap();
-                report(&format!("accepted {}", lease.fence));
+                let (execution, read, _write) = pool.accept_session(&streams, ticket).unwrap();
+                report(&format!("accepted {}", execution.lease().fence));
                 // Drain what the peer sent until it goes away: its input
                 // resets. The work is still "running" here until we say so.
                 let outcome = loop {
-                    match endpoint.blocking_read_chunk(64) {
+                    match read.blocking_read_chunk(64) {
                         Ok(chunk) if chunk.is_empty() => break "eof",
                         Ok(_) => continue,
                         Err(orbit_stream::Error::Reset) => break "reset",
@@ -283,10 +245,10 @@ impl Peer {
         }
     }
 
-    /// Reserve through the pool, open a stream to the owner, send the
-    /// lease and the input; `finish` says whether the input is complete.
-    /// Returns the lease and the peer's endpoint.
-    fn dispatch(&self, input: &[u8], finish: bool) -> (Lease, orbit_stream::Endpoint) {
+    /// Reserve through the pool, reach the owner with the lease, send the
+    /// input; `finish` says whether the input is complete. Returns the
+    /// lease and the peer's halves.
+    fn dispatch(&self, input: &[u8], finish: bool) -> (Lease, ReadHalf, WriteHalf) {
         let limits = Limits {
             max_live: 1,
             attempts: 2,
@@ -294,17 +256,12 @@ impl Peer {
         let Plan::RemoteReuse(lease) = self.pool.acquire(KEY, &limits, &LocalFirst).unwrap() else {
             panic!("the owner's resource is remote to the peer");
         };
-        let (mut endpoint, ticket) = self.streams.create().unwrap();
-        self.streams.offer(ticket, NodeId::ZERO).unwrap();
-        endpoint
-            .blocking_write_all(encode_lease(&lease).as_bytes())
-            .unwrap();
-        endpoint.blocking_write_all(input).unwrap();
+        let (read, mut write) = self.pool.open_session(lease, &self.streams).unwrap();
+        write.blocking_write_all(input).unwrap();
         if finish {
-            endpoint.finish().unwrap();
+            write.finish().unwrap();
         }
-        let _ = ticket.to_string().parse::<Ticket>().unwrap();
-        (lease, endpoint)
+        (lease, read, write)
     }
 }
 
@@ -323,14 +280,14 @@ fn a_remote_lease_is_executed_by_the_owner_over_a_stream() {
     assert!(!peer.candidates(KEY)[0].local);
 
     owner.send("serve");
-    let (lease, endpoint) = peer.dispatch(b"hello over the fleet", true);
+    let (lease, read, _write) = peer.dispatch(b"hello over the fleet", true);
     assert_eq!(
         owner.expect("accepted"),
         format!("accepted {}", lease.fence)
     );
     let mut output = Vec::new();
     loop {
-        let chunk = endpoint.blocking_read_chunk(64).unwrap();
+        let chunk = read.blocking_read_chunk(64).unwrap();
         if chunk.is_empty() {
             break;
         }
@@ -349,11 +306,11 @@ fn a_peer_that_gives_up_does_not_free_a_running_resource() {
     let mut owner = Owner::spawn(peer.name);
 
     owner.send("hold");
-    let (lease, endpoint) = peer.dispatch(b"partial", false);
+    let (lease, read, write) = peer.dispatch(b"partial", false);
     owner.expect("accepted");
     // The peer "times out" and drops its end mid-input: the owner sees a
     // reset, the work is still running there, and the resource stays busy.
-    drop(endpoint);
+    drop((read, write));
     owner.expect("peer reset");
     assert!(matches!(
         peer.pool.reserve(owner.resource),
@@ -395,11 +352,11 @@ fn a_dead_owner_ends_the_stream_and_takes_its_resource_with_it() {
     let mut owner = Owner::spawn(peer.name);
 
     owner.send("hold");
-    let (lease, endpoint) = peer.dispatch(b"partial", false);
+    let (lease, read, write) = peer.dispatch(b"partial", false);
     owner.expect("accepted");
     let reader = std::thread::spawn(move || {
-        let outcome = endpoint.blocking_read_chunk(16);
-        (endpoint, outcome)
+        let outcome = read.blocking_read_chunk(16);
+        (read, write, outcome)
     });
     std::thread::sleep(Duration::from_millis(50));
     owner.kill();
@@ -417,7 +374,7 @@ fn a_dead_owner_ends_the_stream_and_takes_its_resource_with_it() {
     );
     peer.pool
         .node_dead(NodeId::ZERO, Incarnation::new(OWNER_INCARNATION));
-    let (_endpoint, outcome) = reader.join().unwrap();
+    let (_read, _write, outcome) = reader.join().unwrap();
     assert!(
         matches!(outcome, Err(orbit_stream::Error::Reset)),
         "{outcome:?}"

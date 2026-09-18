@@ -36,6 +36,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use orbit_core::{Fleet, NetId64, NodeId, OrbitEpoch};
 
 mod layout;
+#[cfg(feature = "stream")]
+mod session;
 mod policy;
 mod table;
 

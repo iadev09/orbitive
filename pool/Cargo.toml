@@ -10,8 +10,12 @@ documentation = "https://docs.rs/orbit-pool"
 keywords = ["pool", "shm", "fleet", "orbit", "ring"]
 exclude.workspace = true
 
+[features]
+stream = ["dep:orbit-stream"]
+
 [dependencies]
 orbit-core.workspace = true
+orbit-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
 orbit-stream = { workspace = true, features = ["tokio"] }
@@ -23,3 +27,4 @@ libc.workspace = true
 [[bench]]
 name = "load"
 harness = false
+required-features = ["stream"]

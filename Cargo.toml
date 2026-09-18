@@ -28,6 +28,7 @@ rustls = ["rustls_0_23"]
 stream = ["dep:orbit-stream"]
 stream-tokio = ["stream", "orbit-stream?/tokio"]
 pool = ["dep:orbit-pool"]
+pool-stream = ["pool", "stream", "orbit-pool?/stream"]
 rustls_0_23 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_23"]
 rustls_0_24 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_24"]
 full = [
@@ -43,6 +44,7 @@ full = [
     "stream",
     "stream-tokio",
     "pool",
+    "pool-stream",
 ]
 
 [dependencies]

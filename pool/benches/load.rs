@@ -6,10 +6,11 @@
 //!   admission shape; nothing but a CAS on the key and a wake.
 //! - `local reuse`: `reserve` / `accept` / `complete` on a resource this
 //!   process owns; no stream.
-//! - `remote reuse`: `reserve` on the other node's resource, the lease
-//!   and a small payload over an `orbit-stream` stream, the owner's task
-//!   accepts, answers and completes. Both nodes in this process; a real
-//!   second process adds scheduler noise this does not show.
+//! - `remote reuse`: `reserve` on the other node's resource, then the
+//!   pool's own rendezvous (`open_session` / `accept_session`) carrying a
+//!   small payload, the owner's task answers and completes. Both nodes in
+//!   this process; a real second process adds scheduler noise this does
+//!   not show.
 //!
 //! Run: `cargo bench -p orbit-pool --bench load -- [ops] [tasks]`.
 
@@ -151,27 +152,6 @@ async fn reserve_waiting(pool: &Pool, id: ResourceId) -> Lease {
     }
 }
 
-fn encode(lease: &Lease) -> Vec<u8> {
-    format!(
-        "{} {} {} {}\n",
-        lease.id,
-        lease.fence,
-        lease.holder.get(),
-        lease.holder_incarnation.get()
-    )
-    .into_bytes()
-}
-
-fn decode(line: &str) -> Lease {
-    let mut parts = line.split_whitespace();
-    Lease {
-        id: parts.next().unwrap().parse().unwrap(),
-        fence: parts.next().unwrap().parse().unwrap(),
-        holder: NodeId::new(parts.next().unwrap().parse().unwrap()),
-        holder_incarnation: Incarnation::new(parts.next().unwrap().parse().unwrap()),
-    }
-}
-
 fn main() {
     let mut args = std::env::args()
         .skip(1)
@@ -257,28 +237,15 @@ fn main() {
                     let ticket = poll_fn(|cx| owner_streams.poll_take_offer(cx))
                         .await
                         .unwrap();
-                    let Ok(endpoint) = owner_streams.open(ticket) else {
+                    // The lease is read and accepted exactly once here,
+                    // before any of this bench's own bytes.
+                    let Ok((execution, mut read, mut write)) =
+                        owner.accept_session(&owner_streams, ticket)
+                    else {
                         continue;
                     };
-                    let owner = owner.clone();
                     let served = Arc::clone(&served);
                     tokio::spawn(async move {
-                        let (mut read, mut write) = endpoint.split();
-                        let mut line = Vec::new();
-                        loop {
-                            let mut byte = [0_u8; 1];
-                            if read.read_exact(&mut byte).await.is_err() {
-                                return;
-                            }
-                            if byte[0] == b'\n' {
-                                break;
-                            }
-                            line.push(byte[0]);
-                        }
-                        let lease = decode(std::str::from_utf8(&line).unwrap());
-                        let Ok(execution) = owner.accept(lease) else {
-                            return;
-                        };
                         let mut payload = [0_u8; 128];
                         if read.read_exact(&mut payload).await.is_err() {
                             return;
@@ -299,10 +266,7 @@ fn main() {
             async move {
                 let start = Instant::now();
                 let lease = reserve_waiting(&pool, id).await;
-                let (endpoint, ticket) = streams.create().unwrap();
-                streams.offer(ticket, NodeId::ZERO).unwrap();
-                let (mut read, mut write) = endpoint.split();
-                write.write_all(&encode(&lease)).await.unwrap();
+                let (mut read, mut write) = pool.open_session(lease, &streams).unwrap();
                 write.write_all(&[7_u8; 128]).await.unwrap();
                 write.shutdown().await.unwrap();
                 let mut reply = [0_u8; 128];

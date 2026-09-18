@@ -12,6 +12,12 @@ work, and gives the unit back when the work is over. Nothing moves between
 processes but numbers: the connection stays where it is. Applications
 normally use it through `orbitive::pool`.
 
+Bringing the lease to its owner is the one step every consumer shares and
+every consumer can get wrong, so the `stream` feature owns it:
+`open_session` reaches the owner over an `orbit-stream` stream you supply,
+`accept_session` reads the lease and accepts it exactly once before a byte
+of your payload is trusted, and what crosses afterwards is yours alone.
+
 ```rust
 use std::sync::Arc;
 use std::time::Duration;

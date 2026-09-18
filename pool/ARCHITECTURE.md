@@ -121,5 +121,12 @@ contending tasks was exact on both hosts.
   reconciles.
 - Only the owner accepts, drains, unregisters and reconciles; only the
   owner's completion returns a unit.
-- No transport, no execution, no cost figures in this crate.
+- No execution and no cost figures in this crate. No transport either,
+  with one bounded exception under the `stream` feature: `open_session` /
+  `accept_session` carry the lease itself to its owner over a stream the
+  caller supplies, in one 32-byte frame written before the offer, and
+  accept it exactly once before a byte of the consumer's payload is read.
+  The bytes after that frame are never looked at here, the stream table is
+  the caller's choice, and readiness stays with the caller — the pool is
+  handed a ticket, it does not wait for one.
 - No liveness: death is the embedder's confirmed report per incarnation.
