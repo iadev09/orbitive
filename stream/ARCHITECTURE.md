@@ -62,11 +62,18 @@ and the init lock refuses a directory others can write to
 That is a real boundary for a fleet whose processes are one service, and a
 weaker one than a socket where it is not — not because of access control,
 which is stricter here than a filesystem socket's, but because of the
-residue. A consumer carrying credentials over a stream is making a
-deployment decision and should be made to say so: relay the body and keep
-the credential-bearing headers out of the segment, or accept the residue in
-writing. The crate does not zero rings on release today; doing so is a
-memset per release and would need a measurement before it is offered.
+residue.
+
+A consumer carrying credentials over a stream is making a deployment
+decision and should be made to say so. Note what is *not* one of its
+options: a byte stream carries whatever is written to it, and the head of a
+message is the first thing written. Keeping the credential-bearing part out
+of the segment while relaying the rest would require something else to
+construct the message, which is a different design (a proxy) and not this
+one. So the choices are to accept the residue in writing, or not to carry
+that traffic over a stream at all. The crate does not zero rings on
+release; doing so is a memset per release and wants a measurement before it
+is offered as a third.
 
 ## Death
 
