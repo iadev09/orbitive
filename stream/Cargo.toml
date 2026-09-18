@@ -23,7 +23,15 @@ tokio = { version = "1", default-features = false, features = ["rt"], optional =
 criterion.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util", "net", "time"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
 [[bench]]
 name = "transport"
+harness = false
+required-features = ["tokio"]
+
+[[bench]]
+name = "fleet"
 harness = false
 required-features = ["tokio"]
