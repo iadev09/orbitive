@@ -11,12 +11,13 @@
 
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use super::shm::ShmRing;
+use crate::readiness::{Readiness, Signal};
 
 /// Process-local fd readiness bridge for one shared Orbit ring.
 ///
@@ -29,7 +30,7 @@ use super::shm::ShmRing;
 /// then marks this fd readable. Multiple publishes may coalesce into one wake,
 /// so a consumer must drain the fd and poll the ring through its own cursor.
 pub struct RingEventFd {
-    fd: OwnedFd,
+    fd: Readiness,
     ring: Arc<ShmRing>,
     stop: Arc<AtomicBool>,
     driver: Option<JoinHandle<()>>,
@@ -56,7 +57,7 @@ impl RingEventFd {
                         .load(Ordering::Acquire);
                     if current != observed {
                         observed = current;
-                        if signal_event_fd(driver_fd.as_raw_fd()).is_err() {
+                        if driver_fd.signal().is_err() {
                             break;
                         }
                         continue;
@@ -88,41 +89,7 @@ impl RingEventFd {
     /// Ring events themselves remain in SHM; the returned number is only the
     /// local wake count and must not be interpreted as an event count.
     pub fn drain(&self) -> io::Result<u64> {
-        let mut total = 0u64;
-        loop {
-            let mut value = 0u64;
-            let read = unsafe {
-                libc::read(
-                    self.fd.as_raw_fd(),
-                    (&mut value as *mut u64).cast(),
-                    std::mem::size_of::<u64>(),
-                )
-            };
-            if read == std::mem::size_of::<u64>() as isize {
-                #[cfg(target_os = "macos")]
-                debug_assert_eq!(value, 1, "local pipe carries unit readiness tokens only");
-                total = total.saturating_add(value);
-                continue;
-            }
-            if read == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Orbit eventfd closed while draining",
-                ));
-            }
-            if read < 0 {
-                let error = io::Error::last_os_error();
-                match error.raw_os_error() {
-                    Some(libc::EINTR) => continue,
-                    Some(libc::EAGAIN) => return Ok(total),
-                    _ => return Err(error),
-                }
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Orbit eventfd returned a partial counter",
-            ));
-        }
+        self.fd.drain()
     }
 }
 
@@ -163,128 +130,20 @@ impl Drop for RingEventFd {
     }
 }
 
-fn signal_event_fd(fd: RawFd) -> io::Result<()> {
-    let value = 1u64;
-    loop {
-        let written = unsafe {
-            libc::write(
-                fd,
-                (&value as *const u64).cast(),
-                std::mem::size_of::<u64>(),
-            )
-        };
-        if written == std::mem::size_of::<u64>() as isize {
-            return Ok(());
-        }
-        if written < 0 {
-            let error = io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EINTR) => continue,
-                // A full eventfd or pipe is already readable, so the notification is
-                // represented even though this increment could not be added.
-                Some(libc::EAGAIN) => return Ok(()),
-                _ => return Err(error),
-            }
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::WriteZero,
-            "Orbit eventfd accepted a partial counter",
-        ));
-    }
-}
-
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn local_notification_pair() -> io::Result<(OwnedFd, OwnedFd)> {
-    let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-    let driver = fd.try_clone()?;
-    Ok((fd, driver))
+fn local_notification_pair() -> io::Result<(Readiness, Signal)> {
+    crate::readiness::pair()
 }
 
+/// macOS needs 14.4 for the shared address wait the driver parks on, so a
+/// pair is refused there rather than handed out with nothing to feed it.
 #[cfg(target_os = "macos")]
-fn local_notification_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+fn local_notification_pair() -> io::Result<(Readiness, Signal)> {
     if crate::sync::macos::api().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Orbit native readiness requires macOS 14.4 or later",
         ));
     }
-    let mut raw = [-1; 2];
-    if unsafe { libc::pipe(raw.as_mut_ptr()) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // Take ownership of both ends before any fallible setup. Drop joins the
-    // driver before closing the read end, so writes cannot hit a closed pipe.
-    let read = unsafe { OwnedFd::from_raw_fd(raw[0]) };
-    let write = unsafe { OwnedFd::from_raw_fd(raw[1]) };
-    for fd in [&read, &write] {
-        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
-            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok((read, write))
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn full_local_pipe_coalesces_and_rearms() {
-        let (read, write) = local_notification_pair().unwrap();
-        for fd in [&read, &write] {
-            assert_ne!(
-                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK,
-                0
-            );
-            assert_ne!(
-                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
-                0
-            );
-        }
-        // Fill the pipe deliberately, then exercise the bridge's EAGAIN path.
-        let token = 1u64;
-        loop {
-            let n = unsafe { libc::write(write.as_raw_fd(), (&token as *const u64).cast(), 8) };
-            if n < 0 {
-                assert_eq!(
-                    io::Error::last_os_error().raw_os_error(),
-                    Some(libc::EAGAIN)
-                );
-                break;
-            }
-            assert_eq!(n, 8);
-        }
-        signal_event_fd(write.as_raw_fd()).unwrap();
-        let mut buffer = [0u64; 128];
-        loop {
-            let n = unsafe {
-                libc::read(
-                    read.as_raw_fd(),
-                    buffer.as_mut_ptr().cast(),
-                    size_of_val(&buffer),
-                )
-            };
-            if n < 0 {
-                assert_eq!(
-                    io::Error::last_os_error().raw_os_error(),
-                    Some(libc::EAGAIN)
-                );
-                break;
-            }
-            assert!(n > 0);
-        }
-        signal_event_fd(write.as_raw_fd()).unwrap();
-        let mut value = 0u64;
-        assert_eq!(
-            unsafe { libc::read(read.as_raw_fd(), (&mut value as *mut u64).cast(), 8) },
-            8
-        );
-        assert_eq!(value, 1);
-    }
+    crate::readiness::pair()
 }

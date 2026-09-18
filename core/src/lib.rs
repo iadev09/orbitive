@@ -20,6 +20,7 @@ pub mod compile;
 pub mod epoch;
 pub mod error;
 pub mod fleet;
+pub mod readiness;
 pub mod ring;
 #[cfg(unix)]
 pub mod shm;

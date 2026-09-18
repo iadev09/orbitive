@@ -17,7 +17,7 @@ use crate::layout::{
     SLOT_EMPTY, SLOT_LIVE, Slot,
 };
 use crate::wake::{Doorstep, Driver, Interest, Registry};
-use crate::readiness::{Readiness, Signal};
+use orbit_core::readiness::{Readiness, Signal};
 use crate::{Error, Incarnation, Result, StreamSpec, lock_unpoisoned};
 
 enum Backing {
@@ -328,7 +328,7 @@ impl Table {
     /// Hand out this table's readiness descriptor, once. The driver is
     /// what signals it, so asking for one starts it.
     pub(crate) fn take_readiness(self: &Arc<Self>) -> Result<Readiness> {
-        let (readiness, signal) = crate::readiness::pair()?;
+        let (readiness, signal) = orbit_core::readiness::pair()?;
         self.readiness.set(signal).map_err(|_| {
             Error::Malformed(
                 "this process already took the stream table's readiness descriptor".to_owned(),
@@ -340,7 +340,9 @@ impl Table {
 
     fn signal_readiness(&self) {
         if let Some(signal) = self.readiness.get() {
-            signal.signal();
+            // A consumer that has gone away is not this table's problem;
+            // its descriptor stops mattering with it.
+            let _ = signal.signal();
         }
     }
 

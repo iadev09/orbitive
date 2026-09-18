@@ -115,9 +115,9 @@ Three mechanisms, all hints over authoritative state:
   a memory table there is no driver, so `notify` and `offer` signal it
   directly. This is what an embedded runtime needs — libuv, asyncio, any
   foreign loop — and it costs one atomic load per notify when nobody has
-  asked for one. (`orbit_core::RingEventFd` is the same idea for a ring,
-  with its own thread; this one borrows the driver that already exists.
-  A third of these belongs in core.)
+  asked for one. The pair itself is `orbit_core::readiness`, shared with
+  the ring bridge and with `orbit-pool`: one descriptor implementation,
+  three things that signal it.
 
 The driver starts lazily on the first registration in a process, or when
 a readiness descriptor is taken, and is stopped and joined when the table

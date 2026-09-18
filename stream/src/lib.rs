@@ -34,8 +34,6 @@ use bytes::{Bytes, BytesMut};
 use orbit_core::{Fleet, NetId64};
 
 mod layout;
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-mod readiness;
 #[cfg(feature = "tokio")]
 mod poll;
 mod table;
@@ -48,7 +46,7 @@ use layout::{
 use orbit_core::NodeId;
 use table::Table;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-pub use readiness::Readiness;
+pub use orbit_core::readiness::Readiness;
 pub use table::{segment_size, segment_size_for};
 use wake::Interest;
 
