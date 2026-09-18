@@ -19,6 +19,9 @@ bytes.workspace = true
 orbit-core.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "io-util", "net", "time"] }

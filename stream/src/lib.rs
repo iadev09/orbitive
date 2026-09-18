@@ -34,6 +34,8 @@ use bytes::{Bytes, BytesMut};
 use orbit_core::{Fleet, NetId64};
 
 mod layout;
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+mod readiness;
 #[cfg(feature = "tokio")]
 mod poll;
 mod table;
@@ -45,6 +47,8 @@ use layout::{
 };
 use orbit_core::NodeId;
 use table::Table;
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub use readiness::Readiness;
 pub use table::{segment_size, segment_size_for};
 use wake::Interest;
 
@@ -387,6 +391,22 @@ impl Streams {
     /// The kind this table's segment lives under.
     pub fn kind(&self) -> u8 {
         self.table.kind()
+    }
+
+    /// A descriptor that becomes readable when something among this
+    /// process's streams may have changed, for a runtime that parks on
+    /// descriptors rather than on wakers.
+    ///
+    /// Edge-triggered and coalescing: drain it, then re-try the
+    /// non-blocking calls on the streams you hold. It is what makes this
+    /// table usable from a foreign event loop — an embedded runtime, a
+    /// reactor of its own — without a thread or a descriptor per stream.
+    ///
+    /// One per table: a second caller is refused rather than handed a
+    /// descriptor whose signals the first would drain.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    pub fn readiness(&self) -> Result<Readiness> {
+        self.table.take_readiness()
     }
 
     /// The epoch every ticket minted from this table carries right now.

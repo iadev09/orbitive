@@ -17,6 +17,7 @@ use crate::layout::{
     SLOT_EMPTY, SLOT_LIVE, Slot,
 };
 use crate::wake::{Doorstep, Driver, Interest, Registry};
+use crate::readiness::{Readiness, Signal};
 use crate::{Error, Incarnation, Result, StreamSpec, lock_unpoisoned};
 
 enum Backing {
@@ -70,6 +71,10 @@ pub(crate) struct Table {
     allocate: Mutex<usize>,
     pub(crate) registry: Registry,
     driver: Mutex<Option<Driver>>,
+    /// The driver's end of this process's readiness descriptor, once
+    /// somebody has asked for one. Read on every drain, so it is a
+    /// `OnceLock` rather than a lock.
+    readiness: std::sync::OnceLock<Signal>,
 }
 
 impl Table {
@@ -205,6 +210,7 @@ impl Table {
         }
         if !self.is_shared() {
             self.registry.wake(index);
+            self.signal_readiness();
             return;
         }
         let first = usize::from(slot.node[0].load(Ordering::Acquire));
@@ -251,6 +257,7 @@ impl Table {
         self.ring(node, None);
         if !self.is_shared() {
             self.registry.wake_offer();
+            self.signal_readiness();
         }
         Ok(())
     }
@@ -316,6 +323,25 @@ impl Table {
     pub(crate) fn register_offer(self: &Arc<Self>, waker: &std::task::Waker) -> Result<()> {
         self.registry.register_offer(waker);
         self.ensure_driver()
+    }
+
+    /// Hand out this table's readiness descriptor, once. The driver is
+    /// what signals it, so asking for one starts it.
+    pub(crate) fn take_readiness(self: &Arc<Self>) -> Result<Readiness> {
+        let (readiness, signal) = crate::readiness::pair()?;
+        self.readiness.set(signal).map_err(|_| {
+            Error::Malformed(
+                "this process already took the stream table's readiness descriptor".to_owned(),
+            )
+        })?;
+        self.ensure_driver()?;
+        Ok(readiness)
+    }
+
+    fn signal_readiness(&self) {
+        if let Some(signal) = self.readiness.get() {
+            signal.signal();
+        }
     }
 
     fn ensure_driver(self: &Arc<Self>) -> Result<()> {
@@ -458,6 +484,10 @@ impl Doorstep for Table {
         if self.has_offer() {
             self.registry.wake_offer();
         }
+        // After the bits are taken, never before: a consumer that drains
+        // the descriptor and re-tries its streams cannot miss what this
+        // pass just made ready.
+        self.signal_readiness();
     }
 }
 
@@ -547,6 +577,7 @@ pub(crate) fn open(
         allocate: Mutex::new(0),
         registry: Registry::new(geometry.total_slots),
         driver: Mutex::new(None),
+        readiness: std::sync::OnceLock::new(),
     });
     tables.insert(key, Arc::downgrade(&table));
     Ok(table)

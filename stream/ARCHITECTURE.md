@@ -68,7 +68,7 @@ listening while it does. Taking is not claiming: `open` is, once per side.
 
 ## Waking
 
-Two independent mechanisms, both hints over authoritative state:
+Three mechanisms, all hints over authoritative state:
 
 - **Blocking waiters** park on the direction's `changes` word with
   `orbit_core::sync::wait_word`, announcing themselves in `waiters` first
@@ -104,8 +104,24 @@ Two independent mechanisms, both hints over authoritative state:
   returns at once. In memory the writer wakes the registry directly and no
   thread exists.
 
-The driver starts lazily on the first registration in a process and is
-stopped and joined when the table drops, before the mapping goes away; a
+- **A descriptor**, for a runtime that parks on descriptors rather than
+  on wakers or on a word: `Streams::readiness` hands out one `eventfd`
+  (a pipe on macOS) per table, and the driver signals it at the end of
+  every drain — *after* it has taken the pending bits, so a consumer that
+  drains the descriptor and re-tries its streams cannot miss what that
+  pass made ready. Edge-triggered and coalescing: it says something may
+  have changed, not what. One holder per table; a second is refused
+  rather than handed a descriptor whose signals the first would drain. On
+  a memory table there is no driver, so `notify` and `offer` signal it
+  directly. This is what an embedded runtime needs — libuv, asyncio, any
+  foreign loop — and it costs one atomic load per notify when nobody has
+  asked for one. (`orbit_core::RingEventFd` is the same idea for a ring,
+  with its own thread; this one borrows the driver that already exists.
+  A third of these belongs in core.)
+
+The driver starts lazily on the first registration in a process, or when
+a readiness descriptor is taken, and is stopped and joined when the table
+drops, before the mapping goes away; a
 forked child that inherited the table skips the join because the thread is
 not there. Create tables after fork, as with ring readiness fds.
 

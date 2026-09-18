@@ -230,3 +230,64 @@ fn one_kind_has_one_geometry_in_a_process() {
     assert!(matches!(odd, Err(Error::Malformed(_))));
     let _ = first.unlink();
 }
+
+/// What an embedded runtime does with a stream: no wakers, no blocking
+/// Orbit call, just a descriptor in a poll set. This is the shape libuv
+/// and asyncio need, and the reason the driver signals after it has taken
+/// the pending bits rather than before.
+#[test]
+fn a_foreign_runtime_parks_on_a_descriptor_instead_of_a_waker() {
+    use std::os::fd::AsRawFd;
+
+    let name = fleet_name("f");
+    let owner = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
+        Incarnation::new(10),
+    )
+    .expect("owner streams");
+    owner.reset_all();
+    let peer = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
+        Incarnation::new(11),
+    )
+    .expect("peer streams");
+
+    let readiness = peer.readiness().expect("the table's descriptor");
+    // One holder: a second would drain signals the first is waiting for.
+    assert!(matches!(peer.readiness(), Err(Error::Malformed(_))));
+
+    let (a, ticket) = owner.create().expect("create");
+    let b = peer.open(ticket).expect("open");
+
+    // Whatever the open itself signalled, take it and let the descriptor
+    // fall quiet: readiness is a hint about what changed, and nothing has
+    // changed since.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while poll_readable(readiness.as_raw_fd(), 50) {
+        readiness.drain().expect("drain");
+        assert!(std::time::Instant::now() < deadline, "never fell quiet");
+    }
+
+    a.try_write(b"knock").expect("write");
+    assert!(
+        poll_readable(readiness.as_raw_fd(), 5_000),
+        "the peer's write never reached the descriptor"
+    );
+    assert!(readiness.drain().expect("drain") >= 1);
+
+    let mut sink = [0_u8; 5];
+    assert_eq!(b.try_read(&mut sink).expect("read"), 5);
+    assert_eq!(&sink, b"knock");
+    let _ = owner.unlink();
+}
+
+fn poll_readable(fd: std::os::fd::RawFd, millis: i32) -> bool {
+    let mut watched = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one descriptor this test owns, and a timeout.
+    let ready = unsafe { libc::poll(&mut watched, 1, millis) };
+    ready > 0 && watched.revents & libc::POLLIN != 0
+}
