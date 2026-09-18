@@ -182,3 +182,67 @@ async fn a_dropped_pending_operation_does_not_lose_the_next_wake() {
     assert_eq!(rest, b"flows");
     owner.unlink().expect("unlink");
 }
+
+/// A header write and then a body write, round after round, with the
+/// reader asking for both at once. The reader takes the header, finds
+/// nothing behind it and parks; the body's commit has to ring it even
+/// though the ring was not empty when the writer first looked. The
+/// writer's emptiness test is therefore taken after its own commit, not
+/// before: taken before, this stalls within a few thousand rounds and the
+/// bytes sit in the ring until some unrelated poll finds them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_body_behind_a_header_wakes_a_reader_that_parked_between_the_two() {
+    const ROUNDS: usize = 5_000;
+    // Big enough that the copy alone gives the reader time to take the
+    // header, find nothing behind it and park.
+    const BODY: usize = 60 * 1024;
+
+    let name = fleet_name("h");
+    let owner = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
+        Incarnation::new(10),
+    )
+    .expect("owner streams");
+    owner.reset_all();
+    let peer = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
+        Incarnation::new(11),
+    )
+    .expect("peer streams");
+
+    let (a, ticket) = owner.create().expect("create");
+    let b = peer.open(ticket).expect("open");
+    let (mut a_read, mut a_write) = a.split();
+    let (mut b_read, mut b_write) = b.split();
+
+    let answering = tokio::spawn(async move {
+        let mut header = [0_u8; 8];
+        let body = vec![7_u8; BODY - 4];
+        for _ in 0..ROUNDS {
+            b_read.read_exact(&mut header).await.expect("request");
+            b_write.write_all(&header[..4]).await.expect("header");
+            b_write.write_all(&body).await.expect("body");
+        }
+        b_write.finish().expect("fin");
+    });
+    let asking = tokio::spawn(async move {
+        let mut sink = vec![0_u8; BODY];
+        for round in 0..ROUNDS {
+            let request = (round as u64).to_le_bytes();
+            a_write.write_all(&request).await.expect("request");
+            a_read.read_exact(&mut sink).await.expect("response");
+            assert_eq!(sink[..4], request[..4]);
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(60), async {
+        asking.await.expect("asking");
+        answering.await.expect("answering");
+    })
+    .await
+    .expect("a reader was left parked with its answer already in the ring");
+
+    // 64 MiB of sparse segment per run is worth cleaning up, even though
+    // the other tests in this file do not.
+    let _ = owner.unlink();
+}

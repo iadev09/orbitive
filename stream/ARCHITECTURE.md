@@ -80,9 +80,24 @@ Two independent mechanisms, both hints over authoritative state:
   any flag or claim change) the writer sets the slot's bit in the pending
   bitmap of each node holding a side, bumps that node's doorbell
   generation, and wakes it only when its `listening` count is nonzero. A
-  commit onto a non-empty ring or a consume from a non-full one rings
-  nobody: under look/register/look-again a reader parks only on empty and
-  a writer only on full. One
+  commit onto a ring the reader has not drained, or a consume from one the
+  writer never found full, rings nobody: under look/register/look-again a
+  reader parks only on empty and a writer only on full.
+
+  **That test is taken after the change, never before it.** A writer reads
+  the tail again after storing its new head, a reader reads the head again
+  after storing its new tail, each with a `SeqCst` fence between its own
+  store and the other's load. The two fences are what make the pair safe:
+  either the reader sees the new head and does not park, or the writer
+  sees the drained tail and rings. Judged from the tail read before the
+  copy — as it was until 2026-09-18 — a reader that drains the ring and
+  parks while the writer is copying into it is left asleep on bytes that
+  are already there, and only an unrelated poll finds them. Two writes in
+  a row, a small header and then a body, is all it takes; it is pinned by
+  `tokio_stream::a_body_behind_a_header_wakes_a_reader_that_parked_between_the_two`
+  and was found across four processes.
+
+  One
   driver thread per process per (segment, node) parks on the doorbell,
   swaps the bitmap words out and wakes the registered tasks. Bit before
   bump, drain before compare: either the driver sees the bump or the park

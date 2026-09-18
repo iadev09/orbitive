@@ -545,11 +545,19 @@ impl Handle {
             std::ptr::copy_nonoverlapping(buf.as_ptr(), base.add(start), first);
             std::ptr::copy_nonoverlapping(buf.as_ptr().add(first), base, len - first);
         }
-        direction.head.store(head + len as u64, Ordering::Release);
+        direction.head.store(head + len as u64, Ordering::SeqCst);
         // A reader parks only on an empty ring: it looks, registers, looks
-        // again. So a commit onto a non-empty ring has nobody to wake, and
-        // only the transition from empty rings the peer.
-        self.table.notify(self.index, slot, direction, head == tail);
+        // again. Whether one could be parked is the tail *after* this
+        // commit, never the one read before the copy — the reader may have
+        // drained the ring and parked while we were copying into it, and
+        // that older tail would say "nobody to wake" about a task asleep on
+        // these very bytes. Each side orders its own store before the
+        // other's load, so at least one of the two sees the other: the
+        // reader sees the new head and does not park, or this sees the
+        // drained tail and rings.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let drained = direction.tail.load(Ordering::SeqCst) >= head;
+        self.table.notify(self.index, slot, direction, drained);
         Ok(len)
     }
 
@@ -585,15 +593,14 @@ impl Handle {
             std::ptr::copy_nonoverlapping(base.add(start), buf.as_mut_ptr(), first);
             std::ptr::copy_nonoverlapping(base, buf.as_mut_ptr().add(first), len - first);
         }
-        direction.tail.store(tail + len as u64, Ordering::Release);
-        // The mirror image: a writer parks only on a full ring, so only
-        // the transition from full rings the peer.
-        self.table.notify(
-            self.index,
-            slot,
-            direction,
-            available == STREAM_BUFFER_BYTES,
-        );
+        direction.tail.store(tail + len as u64, Ordering::SeqCst);
+        // The mirror image, and the other half of that agreement: a writer
+        // parks only on a full ring, so the head read after this consume is
+        // what says whether one is parked on the space just freed.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let head_now = direction.head.load(Ordering::SeqCst);
+        let was_full = head_now - tail >= STREAM_BUFFER_BYTES as u64;
+        self.table.notify(self.index, slot, direction, was_full);
         Ok(len)
     }
 
