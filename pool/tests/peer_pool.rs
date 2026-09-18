@@ -65,8 +65,34 @@ fn pool_owner() {
     report(&format!("registered {id}"));
 
     let mut executions = Vec::new();
+    let mut permits = Vec::new();
     for line in std::io::stdin().lock().lines() {
         match line.unwrap().as_str() {
+            // Take creation claims and hold them. The budget is the
+            // fleet's, so what matters is what the other process sees.
+            command if command.starts_with("claim ") => {
+                let mut parts = command.split_whitespace().skip(1);
+                let max_live: u32 = parts.next().unwrap().parse().unwrap();
+                let wanted: usize = parts.next().unwrap().parse().unwrap();
+                let mut taken = 0;
+                for _ in 0..wanted {
+                    match pool.claim_create(KEY, max_live) {
+                        Ok(permit) => {
+                            permits.push(permit);
+                            taken += 1;
+                        }
+                        Err(Error::CreationBudget { .. }) => break,
+                        Err(error) => panic!("{error}"),
+                    }
+                }
+                report(&format!("claimed {taken}"));
+            }
+            "release" => {
+                if let Some(permit) = permits.pop() {
+                    permit.finish();
+                }
+                report("released");
+            }
             // Serve one request end to end.
             "serve" => {
                 let ticket = streams.blocking_take_offer().unwrap();
@@ -134,11 +160,22 @@ fn pool_owner() {
                 }
                 report("finished");
             }
-            "drop" => break,
+            "drop" => {
+                report("dropped");
+                return;
+            }
             command => panic!("unknown command {command}"),
         }
     }
-    report("dropped");
+    // Stdin is not how this process ends. Under a parallel test binary the
+    // pipe has been seen to close on its own, and a process that exits
+    // there runs its destructors: a test that means to kill an owner
+    // holding leases or creation claims would then be killing one that had
+    // already given them back. It ends by command, or by the signal.
+    report("stdin closed");
+    loop {
+        std::thread::sleep(Duration::from_secs(3_600));
+    }
 }
 
 struct Owner {
@@ -396,4 +433,112 @@ fn a_dead_owner_ends_the_stream_and_takes_its_resource_with_it() {
         peer.pool.acquire(KEY, &limits, &LocalFirst).unwrap(),
         Plan::Create(_)
     ));
+}
+
+/// The creation budget is the fleet's, not each process's: the ceiling
+/// counts what the other process is already making. Until now this was
+/// only ever exercised with both nodes in one process, where the counter
+/// is the same memory reached the same way; here two processes race for
+/// the last unit of it.
+#[test]
+fn a_creation_budget_is_fleet_wide_across_processes() {
+    const MAX_LIVE: u32 = 4;
+    let peer = Peer::new("b");
+    let mut owner = Owner::spawn(peer.name);
+    // The owner's registered resource is the first live unit of the four.
+    assert_eq!(peer.pool.budget(KEY), (1, 0));
+
+    owner.send(&format!("claim {MAX_LIVE} 2"));
+    assert_eq!(owner.expect("claimed"), "claimed 2");
+    assert_eq!(peer.pool.budget(KEY), (1, 2));
+
+    // One unit is left for the whole fleet, and this process takes it.
+    let permit = peer.pool.claim_create(KEY, MAX_LIVE).expect("the last unit");
+    assert_eq!(peer.pool.budget(KEY), (1, 3));
+    assert!(matches!(
+        peer.pool.claim_create(KEY, MAX_LIVE),
+        Err(Error::CreationBudget { .. })
+    ));
+    // The owner is at the same ceiling, from its own side of the segment.
+    owner.send(&format!("claim {MAX_LIVE} 1"));
+    assert_eq!(owner.expect("claimed"), "claimed 0");
+
+    // Giving it back opens it for the other process, not for this one.
+    permit.finish();
+    assert_eq!(peer.pool.budget(KEY), (1, 2));
+    owner.send(&format!("claim {MAX_LIVE} 1"));
+    assert_eq!(owner.expect("claimed"), "claimed 1");
+    assert_eq!(peer.pool.budget(KEY), (1, 3));
+    owner.finish();
+}
+
+/// A process that dies holding creation claims does not take the fleet's
+/// budget with it. Death alone changes nothing — the claims are still
+/// counted — and the supervisor's report is what gives them back, along
+/// with the resources that incarnation owned.
+#[test]
+fn a_dead_holders_creation_claims_come_back() {
+    const MAX_LIVE: u32 = 3;
+    let peer = Peer::new("c");
+    let mut owner = Owner::spawn(peer.name);
+
+    owner.send(&format!("claim {MAX_LIVE} 2"));
+    assert_eq!(owner.expect("claimed"), "claimed 2");
+    assert_eq!(peer.pool.budget(KEY), (1, 2));
+    assert!(matches!(
+        peer.pool.claim_create(KEY, MAX_LIVE),
+        Err(Error::CreationBudget { .. })
+    ));
+
+    owner.kill();
+    // Death alone gives nothing back: the units are still held by a
+    // process that no longer exists.
+    assert_eq!(peer.pool.budget(KEY), (1, 2));
+
+    peer.pool
+        .node_dead(NodeId::ZERO, Incarnation::new(OWNER_INCARNATION));
+    assert_eq!(peer.pool.budget(KEY), (0, 0));
+    peer.pool
+        .claim_create(KEY, MAX_LIVE)
+        .expect("the budget is free again")
+        .finish();
+}
+
+/// The wait path across a process boundary: a caller at the ceiling parks
+/// on the key's version, and the release that opens capacity happens in
+/// another process. The version is taken before the attempt, so a release
+/// between the two is seen by the wait instead of being missed.
+#[test]
+fn a_waiter_wakes_when_another_process_gives_its_claim_back() {
+    const MAX_LIVE: u32 = 2;
+    let peer = Peer::new("w");
+    let mut owner = Owner::spawn(peer.name);
+
+    owner.send(&format!("claim {MAX_LIVE} 1"));
+    assert_eq!(owner.expect("claimed"), "claimed 1");
+    let since = peer.pool.version(KEY).unwrap();
+    assert!(matches!(
+        peer.pool.claim_create(KEY, MAX_LIVE),
+        Err(Error::CreationBudget { .. })
+    ));
+
+    let (woke, parked) = mpsc::channel();
+    let pool = peer.pool.clone();
+    std::thread::spawn(move || {
+        let _ = woke.send(pool.wait_capacity(KEY, since));
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    owner.send("release");
+    owner.expect("released");
+
+    let version = parked
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiter was left parked")
+        .expect("wait_capacity");
+    assert!(version > since);
+    peer.pool
+        .claim_create(KEY, MAX_LIVE)
+        .expect("capacity came back")
+        .finish();
+    owner.finish();
 }
