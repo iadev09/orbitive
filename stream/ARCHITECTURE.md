@@ -95,7 +95,7 @@ Two independent mechanisms, both hints over authoritative state:
   are already there, and only an unrelated poll finds them. Two writes in
   a row, a small header and then a body, is all it takes; it is pinned by
   `tokio_stream::a_body_behind_a_header_wakes_a_reader_that_parked_between_the_two`
-  and was found across four processes.
+  and was found by `benches/fleet.rs` across four processes.
 
   One
   driver thread per process per (segment, node) parks on the doorbell,
@@ -108,6 +108,30 @@ The driver starts lazily on the first registration in a process and is
 stopped and joined when the table drops, before the mapping goes away; a
 forked child that inherited the table skips the join because the thread is
 not there. Create tables after fork, as with ring readiness fds.
+
+## Specs: one fleet, several tables
+
+A `StreamSpec` names the segment a `Streams` table opens — its kind, its
+lane capacity and its ring size — and `Streams::new` is
+`with_spec(StreamSpec::DEFAULT)`, the kind 246 table built from the
+compile-time geometry. Independent specs are independent tables:
+separate segments, lanes, rings and epochs.
+
+This is what the measurements below ask for. One ring size cannot serve
+both a relay carrying megabyte bodies (which wants a ring near the body,
+or it pays a wake per 64 KiB) and a control channel carrying short frames
+(which is faster with a small one, because concurrency times two times
+the ring is a working set). With one compile-time constant a process had
+to choose; with a spec each table chooses, and `StreamSpec::lane_bytes`
+is the ceiling that choice commits to.
+
+A kind is a fleet-wide identity, not a local choice: every process
+opening it passes the same geometry, the header refuses a peer that does
+not, and a process that opens one kind twice under two geometries is
+refused rather than handed a table that is not the one it asked for.
+Geometry is validated when the table is opened, where a compile-time
+assert used to stand. Each kind still owes the deployment an index row of
+its own.
 
 ## Geometry for a deployment (Linux is production)
 
@@ -132,13 +156,30 @@ and both rows above obey it (64 KiB / 12 µs ≈ 5 GiB/s, 64 KiB / 55 µs ≈
 1.15 GiB/s). The socket's advantage on Linux is a larger kernel buffer
 and no user-space wake hop, not a faster copy. Consequences:
 
-- **The ring size is a per-deployment number**, chosen as
-  `ring ≥ wake latency × target bandwidth`. For 4 GiB/s at 55 µs that is
-  ~220 KiB; the deployment default in `claviron-full/.cargo/config.toml`
-  is therefore **256 KiB per direction on Linux**, provisional until the
-  ring-size sweep in `BENCHMARKS.local.md` confirms the formula there.
-  The crate default stays 64 KiB: it is the host-agnostic floor and what
-  the tests and the macOS numbers were taken with.
+- **The ring size is a per-deployment number.** The sweep was run end to
+  end on `xd01` on 2026-09-18 (`benches/fleet.rs`, four processes) and
+  the formula holds to the wake count: a 1 MiB body one at a time goes
+  2.24 → 7.68 → 21.7 GiB/s as the ring goes 64 KiB → 256 KiB → 1 MiB,
+  with 62.6 → 18.2 → 6.05 voluntary context switches per request. At
+  ring = body the stream passes the Unix socket (12.1 GiB/s) for two
+  thirds of its CPU; at 64 KiB it is a fifth of it. The Linux deficit
+  was geometry.
+
+  It has a second bound, which the same sweep found: a 64 KiB body at 64
+  in flight runs 28.4 GiB/s with a 64 KiB ring and 13.6 GiB/s with a
+  1 MiB one. Concurrent streams × 2 × ring is a working set, and past
+  the last-level cache the copy itself slows down. So:
+
+  ```text
+  ring ≈ the body actually carried,
+         bounded by concurrency × 2 × ring staying near the LLC
+  ```
+
+  For 64 KiB–1 MiB bodies at 8–64 in flight on that guest, 256 KiB was
+  the best single choice. The deployment default in
+  `claviron-full/.cargo/config.toml` is **256 KiB per direction on
+  Linux**. The crate default stays 64 KiB: it is the host-agnostic floor
+  and what the tests and the macOS numbers were taken with.
 - Address space is `fleet × lanes × 2 × ring`, backed only as touched:
   17 × 512 × 2 × 256 KiB is 4.25 GiB of sparse mapping and costs what
   live streams use. On Linux the segment lives on `/dev/shm` (tmpfs);

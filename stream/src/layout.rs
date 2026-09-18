@@ -7,7 +7,7 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use crate::{STREAM_BUFFER_BYTES, STREAM_LANE_CAPACITY};
+use crate::StreamSpec;
 
 pub(crate) const MAGIC: u32 = 0x53_54_52_4D; // "STRM"
 pub(crate) const VERSION: u16 = 2;
@@ -63,14 +63,14 @@ pub(crate) struct Header {
 }
 
 impl Header {
-    pub(crate) fn new(fleet_capacity: u16, epoch: u64) -> Self {
+    pub(crate) fn new(fleet_capacity: u16, geometry: &Geometry, epoch: u64) -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
             header_size: size_of::<Self>() as u16,
-            lane_capacity: STREAM_LANE_CAPACITY as u32,
+            lane_capacity: geometry.lane_capacity as u32,
             slot_size: size_of::<Slot>() as u32,
-            buffer_bytes: STREAM_BUFFER_BYTES as u32,
+            buffer_bytes: geometry.buffer_bytes as u32,
             fleet_capacity,
             _reserved: [0; 2],
             epoch: AtomicU64::new(epoch),
@@ -78,13 +78,16 @@ impl Header {
         }
     }
 
-    pub(crate) fn compatible(&self, fleet_capacity: u16) -> bool {
+    /// The geometry a peer built its side with is part of the wire
+    /// contract: a segment opened under one kind answers only to that
+    /// kind's lane and ring size.
+    pub(crate) fn compatible(&self, fleet_capacity: u16, geometry: &Geometry) -> bool {
         self.magic == MAGIC
             && self.version == VERSION
             && usize::from(self.header_size) == size_of::<Self>()
-            && self.lane_capacity as usize == STREAM_LANE_CAPACITY
+            && self.lane_capacity as usize == geometry.lane_capacity
             && self.slot_size as usize == size_of::<Slot>()
-            && self.buffer_bytes as usize == STREAM_BUFFER_BYTES
+            && self.buffer_bytes as usize == geometry.buffer_bytes
             && self.fleet_capacity == fleet_capacity
     }
 }
@@ -186,15 +189,13 @@ const _: () = assert!(size_of::<Header>() == 64);
 const _: () = assert!(size_of::<Doorbell>() == 64);
 const _: () = assert!(size_of::<Direction>() == 32);
 const _: () = assert!(size_of::<Slot>() == 128);
-const _: () = assert!(STREAM_LANE_CAPACITY.is_power_of_two());
-const _: () = assert!(STREAM_LANE_CAPACITY <= 1 << SLOT_BITS);
-const _: () = assert!(STREAM_BUFFER_BYTES.is_power_of_two());
-const _: () = assert!(STREAM_BUFFER_BYTES <= u32::MAX as usize);
 
 /// Where everything sits, computed once per opened table from the fleet
 /// capacity, which is runtime geometry like a ring's lane count.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Geometry {
+    pub(crate) lane_capacity: usize,
+    pub(crate) buffer_bytes: usize,
     pub(crate) fleet_capacity: usize,
     pub(crate) total_slots: usize,
     pub(crate) bitmap_words: usize,
@@ -207,9 +208,10 @@ pub(crate) struct Geometry {
 }
 
 impl Geometry {
-    pub(crate) fn new(fleet_capacity: u16) -> Self {
+    pub(crate) fn new(fleet_capacity: u16, spec: StreamSpec) -> Self {
+        let StreamSpec { lane_capacity, buffer_bytes, .. } = spec;
         let fleet_capacity = usize::from(fleet_capacity);
-        let total_slots = fleet_capacity * STREAM_LANE_CAPACITY;
+        let total_slots = fleet_capacity * lane_capacity;
         let bitmap_words = total_slots.div_ceil(64);
         let bitmap_bytes = fleet_capacity * bitmap_words * size_of::<AtomicU64>();
         let doorbells_offset = size_of::<Header>();
@@ -217,8 +219,10 @@ impl Geometry {
         let offers_offset = pending_offset + bitmap_bytes;
         let slots_offset = (offers_offset + bitmap_bytes).next_multiple_of(64);
         let buffers_offset = slots_offset + total_slots * size_of::<Slot>();
-        let segment_size = buffers_offset + total_slots * 2 * STREAM_BUFFER_BYTES;
+        let segment_size = buffers_offset + total_slots * 2 * buffer_bytes;
         Self {
+            lane_capacity,
+            buffer_bytes,
             fleet_capacity,
             total_slots,
             bitmap_words,
@@ -232,6 +236,6 @@ impl Geometry {
     }
 
     pub(crate) fn buffer_offset(&self, slot: usize, direction: usize) -> usize {
-        self.buffers_offset + (slot * 2 + direction) * STREAM_BUFFER_BYTES
+        self.buffers_offset + (slot * 2 + direction) * self.buffer_bytes
     }
 }

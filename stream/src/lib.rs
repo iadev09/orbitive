@@ -45,25 +45,94 @@ use layout::{
 };
 use orbit_core::NodeId;
 use table::Table;
-pub use table::segment_size;
+pub use table::{segment_size, segment_size_for};
 use wake::Interest;
 
-/// Reserved Orbit SHM kind for the stream segment.
+/// Reserved Orbit SHM kind for the default stream segment. Another table
+/// names its own through a [`StreamSpec`].
 pub const STREAM_KIND: u8 = 246;
-/// Streams one fleet node can hold open at once.
+/// Streams one fleet node can hold open at once, in the default spec.
 ///
 /// Compile-time geometry: `ORBIT_STREAM_LANE_CAPACITY` in the application's
 /// `.cargo/config.toml` overrides the default. A power of two, at most
-/// 65 536. Peers built with a different value are refused when they open the
-/// segment.
+/// 65 536. It is the *default* table's value; a [`StreamSpec`] gives
+/// another table another one. Peers opening the same kind with a different
+/// value are refused at the segment.
 pub const STREAM_LANE_CAPACITY: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_STREAM_LANE_CAPACITY"), 256);
-/// Bytes each direction of a stream can hold before its writer waits.
+/// Bytes each direction of a stream can hold before its writer waits, in
+/// the default spec.
 ///
 /// Compile-time geometry: `ORBIT_STREAM_BUFFER_BYTES`. A power of two. Part
-/// of the same wire contract as the lane capacity.
+/// of the same wire contract as the lane capacity, and like it a per-table
+/// choice through [`StreamSpec`].
 pub const STREAM_BUFFER_BYTES: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_STREAM_BUFFER_BYTES"), 64 * 1024);
+
+/// Which segment a [`Streams`] table uses, and how big its lanes and
+/// rings are.
+///
+/// One fleet can hold several independent stream tables. They are not
+/// interchangeable: a relay carrying response bodies wants a ring sized to
+/// a body, while a control channel carrying short frames is faster with a
+/// small one, and a lane is a ceiling on concurrent streams per node. Each
+/// names its own kind, and a kind is a fleet-wide identity — every process
+/// opening it must pass the same geometry, and the segment's header
+/// refuses a peer that does not. [`StreamSpec::DEFAULT`] is what
+/// [`Streams::new`] opens; its values are the compile-time geometry.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct StreamSpec {
+    /// The Orbit SHM kind, and with it the segment name.
+    pub kind: u8,
+    /// Streams one fleet node can hold open at once. A power of two, at
+    /// most 65 536.
+    pub lane_capacity: usize,
+    /// Bytes each direction holds before its writer waits. A power of two.
+    pub buffer_bytes: usize,
+}
+
+impl StreamSpec {
+    pub const DEFAULT: Self = Self::new(STREAM_KIND, STREAM_LANE_CAPACITY, STREAM_BUFFER_BYTES);
+
+    pub const fn new(kind: u8, lane_capacity: usize, buffer_bytes: usize) -> Self {
+        Self { kind, lane_capacity, buffer_bytes }
+    }
+
+    /// The segment one node's streams occupy at most: every slot's two
+    /// rings. Memory is backed as it is touched, but this is the ceiling
+    /// a deployment is choosing when it picks a lane and a ring.
+    pub const fn lane_bytes(&self) -> usize {
+        self.lane_capacity * 2 * self.buffer_bytes
+    }
+
+    /// What the compile-time geometry used to assert. A spec is checked
+    /// once, when its table is opened.
+    fn validate(self) -> Result<()> {
+        if self.lane_capacity == 0
+            || self.buffer_bytes == 0
+            || !self.lane_capacity.is_power_of_two()
+            || !self.buffer_bytes.is_power_of_two()
+            || self.lane_capacity > 1 << SLOT_BITS
+            || self.buffer_bytes > u32::MAX as usize
+        {
+            return Err(Error::Malformed(format!(
+                "stream spec kind={} lane_capacity={} buffer_bytes={}: both are powers of two, a lane holds at most {} streams and a ring at most {} bytes",
+                self.kind,
+                self.lane_capacity,
+                self.buffer_bytes,
+                1_usize << SLOT_BITS,
+                u32::MAX
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for StreamSpec {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -168,9 +237,9 @@ impl StreamId {
         (self.0.counter() >> SLOT_BITS) as u32
     }
 
-    fn make(node: u16, slot: u32, generation: u32) -> Self {
+    fn make(kind: u8, node: u16, slot: u32, generation: u32) -> Self {
         Self(NetId64::make(
-            STREAM_KIND,
+            kind,
             node,
             ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK),
         ))
@@ -297,9 +366,27 @@ impl Streams {
     /// this process claims is stamped with it, and [`Streams::node_dead`]
     /// for the same node and incarnation is what ends those sides.
     pub fn new(fleet: Arc<Fleet>, incarnation: Incarnation) -> Result<Self> {
+        Self::with_spec(fleet, incarnation, StreamSpec::DEFAULT)
+    }
+
+    /// Open the table `spec` names. Independent specs are independent
+    /// tables: separate segments, separate lanes and rings, separate
+    /// epochs, and a `reset_all` on one leaves the others alone. A process
+    /// may hold as many as it has specs, but each under one incarnation.
+    pub fn with_spec(
+        fleet: Arc<Fleet>,
+        incarnation: Incarnation,
+        spec: StreamSpec,
+    ) -> Result<Self> {
+        spec.validate()?;
         Ok(Self {
-            table: table::open(&fleet, incarnation)?,
+            table: table::open(&fleet, incarnation, spec)?,
         })
+    }
+
+    /// The kind this table's segment lives under.
+    pub fn kind(&self) -> u8 {
+        self.table.kind()
     }
 
     /// The epoch every ticket minted from this table carries right now.
@@ -312,8 +399,9 @@ impl Streams {
     pub fn create(&self) -> Result<(Endpoint, Ticket)> {
         let (index, generation) = self.table.allocate()?;
         let id = StreamId::make(
+            self.table.kind(),
             self.table.node(),
-            (index % STREAM_LANE_CAPACITY) as u32,
+            (index % self.table.geometry().lane_capacity) as u32,
             generation,
         );
         let handle = Arc::new(Handle {
@@ -457,9 +545,11 @@ impl Streams {
         if !slot.is(generation) {
             return None;
         }
+        let lane_capacity = self.table.geometry().lane_capacity;
         let id = StreamId::make(
-            (index / STREAM_LANE_CAPACITY) as u16,
-            (index % STREAM_LANE_CAPACITY) as u32,
+            self.table.kind(),
+            (index / lane_capacity) as u16,
+            (index % lane_capacity) as u32,
             generation,
         );
         Some(Ticket {
@@ -478,15 +568,15 @@ impl Streams {
 
     fn locate(&self, id: StreamId) -> Result<usize> {
         let geometry = self.table.geometry();
-        if id.kind() != STREAM_KIND
+        if id.kind() != self.table.kind()
             || usize::from(id.node()) >= geometry.fleet_capacity
-            || id.slot() as usize >= STREAM_LANE_CAPACITY
+            || id.slot() as usize >= geometry.lane_capacity
             || id.generation() == 0
             || id.generation() > GENERATION_MASK
         {
             return Err(Error::Malformed(id.to_string()));
         }
-        Ok(usize::from(id.node()) * STREAM_LANE_CAPACITY + id.slot() as usize)
+        Ok(usize::from(id.node()) * geometry.lane_capacity + id.slot() as usize)
     }
 }
 
@@ -526,9 +616,10 @@ impl Handle {
         if flags & FLAG_READER_GONE != 0 {
             return Err(Error::PeerGone);
         }
+        let buffer_bytes = self.table.geometry().buffer_bytes;
         let head = direction.head.load(Ordering::Relaxed);
         let tail = direction.tail.load(Ordering::Acquire);
-        let free = STREAM_BUFFER_BYTES - (head - tail) as usize;
+        let free = buffer_bytes - (head - tail) as usize;
         if buf.is_empty() {
             return Ok(0);
         }
@@ -537,8 +628,8 @@ impl Handle {
         }
         let len = buf.len().min(free);
         let base = self.table.buffer(self.index, self.side.write_direction());
-        let start = (head as usize) & (STREAM_BUFFER_BYTES - 1);
-        let first = len.min(STREAM_BUFFER_BYTES - start);
+        let start = (head as usize) & (buffer_bytes - 1);
+        let first = len.min(buffer_bytes - start);
         // SAFETY: only this side writes this direction, and `[head, head+len)`
         // is free space the reader will not touch until `head` moves.
         unsafe {
@@ -584,8 +675,9 @@ impl Handle {
         }
         let len = buf.len().min(available);
         let base = self.table.buffer(self.index, self.side.read_direction());
-        let start = (tail as usize) & (STREAM_BUFFER_BYTES - 1);
-        let first = len.min(STREAM_BUFFER_BYTES - start);
+        let buffer_bytes = self.table.geometry().buffer_bytes;
+        let start = (tail as usize) & (buffer_bytes - 1);
+        let first = len.min(buffer_bytes - start);
         // SAFETY: `[tail, head)` was published by the writer's `Release`
         // store of `head`, acquired above, and is not rewritten until `tail`
         // moves past it.
@@ -599,7 +691,7 @@ impl Handle {
         // what says whether one is parked on the space just freed.
         std::sync::atomic::fence(Ordering::SeqCst);
         let head_now = direction.head.load(Ordering::SeqCst);
-        let was_full = head_now - tail >= STREAM_BUFFER_BYTES as u64;
+        let was_full = head_now - tail >= buffer_bytes as u64;
         self.table.notify(self.index, slot, direction, was_full);
         Ok(len)
     }
@@ -665,10 +757,10 @@ fn readable(direction: &Direction) -> bool {
         || direction.flags() & (FLAG_FIN | FLAG_RESET) != 0
 }
 
-fn writable(direction: &Direction) -> bool {
+fn writable(direction: &Direction, buffer_bytes: usize) -> bool {
     let queued =
         (direction.head.load(Ordering::Relaxed) - direction.tail.load(Ordering::Acquire)) as usize;
-    queued < STREAM_BUFFER_BYTES
+    queued < buffer_bytes
         || direction.flags() & (FLAG_FIN | FLAG_RESET | FLAG_READER_GONE) != 0
 }
 
@@ -906,8 +998,10 @@ impl WriteHalf {
 
     /// Park until a write would make progress or the direction ended.
     pub fn wait_writable(&self) -> Result<()> {
-        self.handle
-            .wait_until(self.handle.side.write_direction(), writable)
+        let buffer_bytes = self.handle.table.geometry().buffer_bytes;
+        self.handle.wait_until(self.handle.side.write_direction(), |direction| {
+            writable(direction, buffer_bytes)
+        })
     }
 
     /// Readiness for a task: `Ready` when a write would make progress or
@@ -915,12 +1009,13 @@ impl WriteHalf {
     /// comes back. Runtime-neutral; the `tokio` feature builds `AsyncWrite`
     /// on it.
     pub fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<()>> {
+        let buffer_bytes = self.handle.table.geometry().buffer_bytes;
         self.handle.poll_ready(
             Interest {
                 direction: self.handle.side.write_direction(),
                 writer: true,
             },
-            writable,
+            |direction| writable(direction, buffer_bytes),
             cx,
         )
     }

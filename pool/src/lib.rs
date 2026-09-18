@@ -24,7 +24,8 @@
 //! The pool decides nothing and carries nothing: which candidate wins is
 //! the caller's policy, and the bytes of a remote use travel over
 //! `orbit-stream`. Standalone it lives in process memory; in a fleet, in
-//! the shared segment under kind [`POOL_KIND`].
+//! the shared segment a [`PoolSpec`] names — kind [`POOL_KIND`] by
+//! default, and one fleet may hold several independent pools.
 
 use std::fmt;
 use std::io;
@@ -45,21 +46,79 @@ use layout::{
 };
 pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
 use table::Table;
-pub use table::segment_size;
+pub use table::{segment_size, segment_size_for};
 
-/// Reserved Orbit SHM kind for the pool segment.
+/// Reserved Orbit SHM kind for the default pool segment. Another pool
+/// names its own through a [`PoolSpec`].
 pub const POOL_KIND: u8 = 247;
-/// Distinct keys one fleet epoch can name at once.
+/// Distinct keys one fleet epoch can name at once, in the default spec.
 ///
-/// Compile-time geometry: `ORBIT_POOL_KEY_CAPACITY`, a power of two.
+/// Compile-time geometry: `ORBIT_POOL_KEY_CAPACITY`, a power of two. It is
+/// the *default* pool's value; a [`PoolSpec`] gives another pool another
+/// one.
 pub const POOL_KEY_CAPACITY: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_POOL_KEY_CAPACITY"), 256);
-/// Resources one fleet node can have registered at once.
+/// Resources one fleet node can have registered at once, in the default
+/// spec.
 ///
 /// Compile-time geometry: `ORBIT_POOL_RESOURCE_LANE_CAPACITY`, a power of
-/// two, at most 65 536.
+/// two, at most 65 536; a [`PoolSpec`] gives another pool another one.
 pub const POOL_RESOURCE_LANE_CAPACITY: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_POOL_RESOURCE_LANE_CAPACITY"), 256);
+
+/// Which segment a [`Pool`] uses, and how big it is.
+///
+/// One fleet can hold several independent pools: an upstream's origins and
+/// an outbound client's targets share neither a budget, a key space nor an
+/// epoch, so each names its own kind. A kind is a fleet-wide identity —
+/// every process opening it must pass the same capacities, and the
+/// segment's header refuses a peer that does not. [`PoolSpec::DEFAULT`] is
+/// what [`Pool::new`] opens; its values are the compile-time geometry.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PoolSpec {
+    /// The Orbit SHM kind, and with it the segment name.
+    pub kind: u8,
+    /// Distinct keys this pool can name at once. A power of two.
+    pub key_capacity: usize,
+    /// Resources one fleet node can register at once. A power of two, at
+    /// most 65 536.
+    pub lane_capacity: usize,
+}
+
+impl PoolSpec {
+    pub const DEFAULT: Self =
+        Self::new(POOL_KIND, POOL_KEY_CAPACITY, POOL_RESOURCE_LANE_CAPACITY);
+
+    pub const fn new(kind: u8, key_capacity: usize, lane_capacity: usize) -> Self {
+        Self { kind, key_capacity, lane_capacity }
+    }
+
+    /// What the compile-time geometry used to assert. A spec is checked
+    /// once, when its table is opened.
+    fn validate(self) -> Result<()> {
+        if self.key_capacity == 0
+            || self.lane_capacity == 0
+            || !self.key_capacity.is_power_of_two()
+            || !self.lane_capacity.is_power_of_two()
+            || self.lane_capacity > 1 << SLOT_BITS
+        {
+            return Err(Error::Malformed(format!(
+                "pool spec kind={} key_capacity={} lane_capacity={}: both are powers of two, and a lane holds at most {}",
+                self.kind,
+                self.key_capacity,
+                self.lane_capacity,
+                1_usize << SLOT_BITS
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for PoolSpec {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -215,9 +274,9 @@ impl ResourceId {
         (self.0.counter() >> SLOT_BITS) as u32
     }
 
-    fn make(node: u16, slot: u32, generation: u32) -> Self {
+    fn make(kind: u8, node: u16, slot: u32, generation: u32) -> Self {
         Self(NetId64::make(
-            POOL_KIND,
+            kind,
             node,
             ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK),
         ))
@@ -291,10 +350,29 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// Open the fleet's default pool table.
     pub fn new(fleet: Arc<Fleet>, incarnation: Incarnation) -> Result<Self> {
+        Self::with_spec(fleet, incarnation, PoolSpec::DEFAULT)
+    }
+
+    /// Open the table `spec` names. Independent specs are independent
+    /// pools: separate segments, separate budgets, separate epochs, and a
+    /// `reset_all` on one leaves the others alone. A process may hold as
+    /// many as it has specs, but each under one incarnation.
+    pub fn with_spec(
+        fleet: Arc<Fleet>,
+        incarnation: Incarnation,
+        spec: PoolSpec,
+    ) -> Result<Self> {
+        spec.validate()?;
         Ok(Self {
-            table: table::open(&fleet, incarnation)?,
+            table: table::open(&fleet, incarnation, spec)?,
         })
+    }
+
+    /// The kind this pool's segment lives under.
+    pub fn kind(&self) -> u8 {
+        self.table.kind()
     }
 
     pub fn node(&self) -> NodeId {
@@ -329,8 +407,9 @@ impl Pool {
         );
         self.table.key_changed(key_index);
         Ok(ResourceId::make(
+            self.table.kind(),
             self.table.node(),
-            (index % POOL_RESOURCE_LANE_CAPACITY) as u32,
+            (index % self.table.geometry().lane_capacity) as u32,
             generation,
         ))
     }
@@ -430,8 +509,9 @@ impl Pool {
         let owner = slot.owner_node.load(Ordering::Acquire);
         Some(Candidate {
             id: ResourceId::make(
+                self.table.kind(),
                 owner,
-                (index % POOL_RESOURCE_LANE_CAPACITY) as u32,
+                (index % self.table.geometry().lane_capacity) as u32,
                 slot.generation.load(Ordering::Relaxed),
             ),
             owner: NodeId::new(owner),
@@ -695,15 +775,15 @@ impl Pool {
 
     fn locate(&self, id: ResourceId) -> Result<(usize, &ResourceSlot)> {
         let geometry = self.table.geometry();
-        if id.kind() != POOL_KIND
+        if id.kind() != self.table.kind()
             || usize::from(id.node()) >= geometry.fleet_capacity
-            || id.slot() as usize >= POOL_RESOURCE_LANE_CAPACITY
+            || id.slot() as usize >= geometry.lane_capacity
             || id.generation() == 0
             || id.generation() > GENERATION_MASK
         {
             return Err(Error::Malformed(id.to_string()));
         }
-        let index = usize::from(id.node()) * POOL_RESOURCE_LANE_CAPACITY + id.slot() as usize;
+        let index = usize::from(id.node()) * geometry.lane_capacity + id.slot() as usize;
         Ok((index, &self.table.resources()[index]))
     }
 
@@ -758,7 +838,7 @@ impl Execution {
 
 impl Drop for Execution {
     fn drop(&mut self) {
-        let index = usize::from(self.lease.id.node()) * POOL_RESOURCE_LANE_CAPACITY
+        let index = usize::from(self.lease.id.node()) * self.table.geometry().lane_capacity
             + self.lease.id.slot() as usize;
         let slot = &self.table.resources()[index];
         // Only while the resource is still the one we accepted on: a

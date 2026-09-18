@@ -17,7 +17,7 @@ use crate::layout::{
     SLOT_EMPTY, SLOT_LIVE, Slot,
 };
 use crate::wake::{Doorstep, Driver, Interest, Registry};
-use crate::{Error, Incarnation, Result, STREAM_KIND, STREAM_LANE_CAPACITY, lock_unpoisoned};
+use crate::{Error, Incarnation, Result, StreamSpec, lock_unpoisoned};
 
 enum Backing {
     Memory(AlignedBytes),
@@ -60,6 +60,8 @@ pub(crate) struct Table {
     _fleet: Arc<Fleet>,
     backing: Backing,
     geometry: Geometry,
+    /// The segment's kind, from the spec this table was opened with.
+    kind: u8,
     node: u16,
     incarnation: u64,
     /// Serialises this process's allocations in its own lane. One live
@@ -89,6 +91,11 @@ impl Table {
 
     pub(crate) fn geometry(&self) -> &Geometry {
         &self.geometry
+    }
+
+    /// The kind this table's segment lives under.
+    pub(crate) fn kind(&self) -> u8 {
+        self.kind
     }
 
     pub(crate) fn node(&self) -> u16 {
@@ -165,20 +172,21 @@ impl Table {
     /// Returns the slot index and its generation.
     pub(crate) fn allocate(&self) -> Result<(usize, u32)> {
         let mut hint = lock_unpoisoned(&self.allocate);
-        let lane_start = usize::from(self.node) * STREAM_LANE_CAPACITY;
+        let lane_capacity = self.geometry.lane_capacity;
+        let lane_start = usize::from(self.node) * lane_capacity;
         let slots = self.slots();
-        for offset in 0..STREAM_LANE_CAPACITY {
-            let index = lane_start + ((*hint + offset) & (STREAM_LANE_CAPACITY - 1));
+        for offset in 0..lane_capacity {
+            let index = lane_start + ((*hint + offset) & (lane_capacity - 1));
             let slot = &slots[index];
             if slot.state.load(Ordering::Acquire) == SLOT_EMPTY
                 && let Some(generation) = slot.install(self.node, self.incarnation)
             {
-                *hint = (index - lane_start + 1) & (STREAM_LANE_CAPACITY - 1);
+                *hint = (index - lane_start + 1) & (lane_capacity - 1);
                 return Ok((index, generation));
             }
         }
         Err(Error::Full {
-            capacity: STREAM_LANE_CAPACITY,
+            capacity: lane_capacity,
         })
     }
 
@@ -463,7 +471,7 @@ impl Drop for Table {
 
 #[derive(Hash, PartialEq, Eq)]
 enum Key {
-    Memory(usize),
+    Memory(usize, u8),
     #[cfg(unix)]
     Shm(String, u16),
 }
@@ -471,20 +479,26 @@ enum Key {
 static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// The table for `fleet`, shared by every handle in this process.
-pub(crate) fn open(fleet: &Arc<Fleet>, incarnation: Incarnation) -> Result<Arc<Table>> {
+/// The table `spec` names for `fleet`, shared by every handle in this
+/// process. The kind is part of the identity in both backings: two specs
+/// are two tables, in one process as in the fleet.
+pub(crate) fn open(
+    fleet: &Arc<Fleet>,
+    incarnation: Incarnation,
+    spec: StreamSpec,
+) -> Result<Arc<Table>> {
     let key = if fleet.is_shm() {
         #[cfg(unix)]
         {
             Key::Shm(
-                ring_segment_name(fleet.name(), STREAM_KIND),
+                ring_segment_name(fleet.name(), spec.kind),
                 fleet.node_id().get(),
             )
         }
         #[cfg(not(unix))]
         unreachable!("non-Unix fleets cannot use POSIX SHM")
     } else {
-        Key::Memory(Arc::as_ptr(fleet) as usize)
+        Key::Memory(Arc::as_ptr(fleet) as usize, spec.kind)
     };
     let mut tables = lock_unpoisoned(&TABLES);
     tables.retain(|_, table| table.strong_count() > 0);
@@ -495,17 +509,27 @@ pub(crate) fn open(fleet: &Arc<Fleet>, incarnation: Incarnation) -> Result<Arc<T
                 table.incarnation
             )));
         }
+        // One kind, one geometry: a second spec for the same segment is a
+        // mismatch here rather than a silently shared table.
+        if table.geometry.lane_capacity != spec.lane_capacity
+            || table.geometry.buffer_bytes != spec.buffer_bytes
+        {
+            return Err(Error::Malformed(format!(
+                "this process already opened kind {} with lane_capacity={} buffer_bytes={}",
+                spec.kind, table.geometry.lane_capacity, table.geometry.buffer_bytes
+            )));
+        }
         return Ok(table);
     }
-    let geometry = Geometry::new(fleet.fleet_capacity());
+    let geometry = Geometry::new(fleet.fleet_capacity(), spec);
     let backing = match &key {
-        Key::Memory(_) => {
+        Key::Memory(..) => {
             let bytes = AlignedBytes::zeroed(geometry.segment_size);
             // SAFETY: freshly allocated, aligned, large enough for the header.
             unsafe {
                 std::ptr::write(
                     bytes.ptr.cast::<Header>(),
-                    Header::new(fleet.fleet_capacity(), next_epoch(0)),
+                    Header::new(fleet.fleet_capacity(), &geometry, next_epoch(0)),
                 )
             };
             Backing::Memory(bytes)
@@ -517,6 +541,7 @@ pub(crate) fn open(fleet: &Arc<Fleet>, incarnation: Incarnation) -> Result<Arc<T
         _fleet: Arc::clone(fleet),
         backing,
         geometry,
+        kind: spec.kind,
         node: fleet.node_id().get(),
         incarnation: incarnation.get(),
         allocate: Mutex::new(0),
@@ -540,7 +565,7 @@ fn open_shm(name: &str, fleet_capacity: u16, geometry: &Geometry) -> Result<ShmR
         unsafe {
             std::ptr::write(
                 region.as_ptr().cast::<Header>(),
-                Header::new(fleet_capacity, next_epoch(0)),
+                Header::new(fleet_capacity, geometry, next_epoch(0)),
             );
         }
     } else {
@@ -562,7 +587,7 @@ fn open_shm(name: &str, fleet_capacity: u16, geometry: &Geometry) -> Result<ShmR
                 ),
             )));
         }
-        if !header.compatible(fleet_capacity) {
+        if !header.compatible(fleet_capacity, geometry) {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("SHM segment {name} has an incompatible stream-table layout"),
@@ -575,5 +600,10 @@ fn open_shm(name: &str, fleet_capacity: u16, geometry: &Geometry) -> Result<ShmR
 /// Bytes the segment needs for `fleet_capacity` lanes; what a lifecycle
 /// tool validates an existing object against without mapping it read-write.
 pub fn segment_size(fleet_capacity: u16) -> usize {
-    Geometry::new(fleet_capacity).segment_size
+    segment_size_for(fleet_capacity, StreamSpec::DEFAULT)
+}
+
+/// Bytes `spec`'s segment needs for `fleet_capacity` lanes.
+pub fn segment_size_for(fleet_capacity: u16, spec: StreamSpec) -> usize {
+    Geometry::new(fleet_capacity, spec).segment_size
 }

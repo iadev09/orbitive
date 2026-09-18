@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orbit_core::{Fleet, NodeId};
-use orbit_pool::{Error, Incarnation, Key, Limits, LocalFirst, Plan, Pool};
+use orbit_pool::{Error, Incarnation, Key, Limits, LocalFirst, Plan, Pool, PoolSpec};
 
 const KEY: Key = Key::new(0xBEEF);
 
@@ -82,4 +82,71 @@ fn a_dead_owner_takes_its_resources_with_it_but_not_the_peers() {
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].id, theirs);
     owner.unlink().expect("unlink");
+}
+
+/// Two specs are two pools. An upstream's origin connections, an FCGI
+/// client's sockets and a worker pool have neither the same shape nor the
+/// same life: each names its own kind and its own capacities, and one
+/// fleet carries all of them at once. Nothing crosses: not the budget,
+/// not the key space, not the epoch.
+#[test]
+fn two_specs_are_two_pools_in_one_fleet_and_one_process() {
+    const UPSTREAM: PoolSpec = PoolSpec::new(240, 64, 32);
+    const WORKERS: PoolSpec = PoolSpec::new(241, 8, 4);
+
+    let name = fleet_name("s");
+    let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("fleet"));
+    let upstream =
+        Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), UPSTREAM).expect("upstream pool");
+    upstream.reset_all();
+    let workers =
+        Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), WORKERS).expect("worker pool");
+    workers.reset_all();
+
+    assert_eq!(upstream.kind(), 240);
+    assert_eq!(workers.kind(), 241);
+    assert!(orbit_pool::segment_size_for(2, UPSTREAM) > orbit_pool::segment_size_for(2, WORKERS));
+
+    // The same key in both is two different keys.
+    let origin = upstream.register(KEY, 2).expect("register upstream");
+    let worker = workers.register(KEY, 1).expect("register worker");
+    assert_eq!(origin.kind(), 240);
+    assert_eq!(worker.kind(), 241);
+    assert_eq!(upstream.budget(KEY), (1, 0));
+    assert_eq!(workers.budget(KEY), (1, 0));
+
+    // One pool's creation budget is not the other's.
+    let permit = workers.claim_create(KEY, 2).expect("worker claim");
+    assert_eq!(workers.budget(KEY), (1, 1));
+    assert_eq!(upstream.budget(KEY), (1, 0));
+    permit.finish();
+
+    // Neither does an address from one pool mean anything in the other.
+    assert!(matches!(upstream.reserve(worker), Err(Error::Malformed(_))));
+
+    // And a new epoch on one leaves the other's resources alone.
+    let lease = upstream.reserve(origin).expect("reserve");
+    workers.reset_all();
+    assert!(upstream.is_current(lease));
+    assert!(upstream.accept(lease).is_ok());
+    assert!(workers.reserve(worker).is_err());
+
+    let _ = upstream.unlink();
+    let _ = workers.unlink();
+}
+
+/// The same segment cannot be opened twice under two geometries: the
+/// process refuses it rather than hand back a table that is not the one
+/// asked for.
+#[test]
+fn one_kind_has_one_geometry_in_a_process() {
+    let name = fleet_name("g");
+    let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("fleet"));
+    let first = Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(242, 64, 32))
+        .expect("first pool");
+    let second = Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(242, 8, 8));
+    assert!(matches!(second, Err(Error::Malformed(_))));
+    let odd = Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(243, 3, 8));
+    assert!(matches!(odd, Err(Error::Malformed(_))));
+    let _ = first.unlink();
 }

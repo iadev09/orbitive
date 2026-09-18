@@ -6,6 +6,25 @@ creation-claim counters; the key table; the resource table (per-node
 lanes). Same discipline as the stream segment: atomics only, compile-time
 geometry, header refused on mismatch, memory twin with the same layout.
 
+## Specs: one fleet, several pools
+
+A `PoolSpec` names the segment a `Pool` opens — its kind and its two
+capacities — and `Pool::new` is `with_spec(PoolSpec::DEFAULT)`, the kind
+247 table built from the compile-time geometry. Independent specs are
+independent pools: separate segments, separate key spaces, separate
+creation budgets, separate epochs, and a `reset_all` on one leaves the
+others untouched. A fleet's h1 origin connections, its FastCGI sockets
+and a worker pool have neither the same shape nor the same life, so each
+names its own kind and sizes itself.
+
+A kind is a fleet-wide identity, not a local choice: every process
+opening it passes the same capacities, the header refuses a peer that
+does not, and a process that opens one kind twice under two geometries is
+refused rather than handed a table that is not the one it asked for.
+Capacities are validated when the table is opened, where a compile-time
+assert used to stand. Each kind still owes the deployment an index row of
+its own.
+
 ## Tables
 
 `KeySlot` (64 B + `member_words × 8`): the caller's 128-bit key, `counts =

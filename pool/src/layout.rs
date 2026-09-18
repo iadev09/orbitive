@@ -6,7 +6,7 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use crate::{POOL_KEY_CAPACITY, POOL_RESOURCE_LANE_CAPACITY};
+use crate::PoolSpec;
 
 pub(crate) const MAGIC: u32 = 0x50_4F_4F_4C; // "POOL"
 pub(crate) const VERSION: u16 = 1;
@@ -46,14 +46,14 @@ pub(crate) struct Header {
 }
 
 impl Header {
-    pub(crate) fn new(fleet_capacity: u16, key_stride: usize, epoch: u64) -> Self {
+    pub(crate) fn new(fleet_capacity: u16, geometry: &Geometry, epoch: u64) -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
             header_size: size_of::<Self>() as u16,
-            key_capacity: POOL_KEY_CAPACITY as u32,
-            lane_capacity: POOL_RESOURCE_LANE_CAPACITY as u32,
-            key_stride: key_stride as u32,
+            key_capacity: geometry.key_capacity as u32,
+            lane_capacity: geometry.lane_capacity as u32,
+            key_stride: geometry.key_stride as u32,
             resource_size: size_of::<ResourceSlot>() as u32,
             fleet_capacity,
             _reserved: [0; 6],
@@ -62,13 +62,16 @@ impl Header {
         }
     }
 
-    pub(crate) fn compatible(&self, fleet_capacity: u16, key_stride: usize) -> bool {
+    /// The spec a peer built its side with is part of the wire contract:
+    /// a segment opened under one kind answers only to that kind's
+    /// capacities.
+    pub(crate) fn compatible(&self, fleet_capacity: u16, geometry: &Geometry) -> bool {
         self.magic == MAGIC
             && self.version == VERSION
             && usize::from(self.header_size) == size_of::<Self>()
-            && self.key_capacity as usize == POOL_KEY_CAPACITY
-            && self.lane_capacity as usize == POOL_RESOURCE_LANE_CAPACITY
-            && self.key_stride as usize == key_stride
+            && self.key_capacity as usize == geometry.key_capacity
+            && self.lane_capacity as usize == geometry.lane_capacity
+            && self.key_stride as usize == geometry.key_stride
             && self.resource_size as usize == size_of::<ResourceSlot>()
             && self.fleet_capacity == fleet_capacity
     }
@@ -212,12 +215,11 @@ const _: () = assert!(size_of::<Header>() == 64);
 const _: () = assert!(size_of::<Doorbell>() == 64);
 const _: () = assert!(size_of::<KeySlot>() == 64);
 const _: () = assert!(size_of::<ResourceSlot>() == 128 + 16 * PENDING_RESERVATIONS);
-const _: () = assert!(POOL_KEY_CAPACITY.is_power_of_two());
-const _: () = assert!(POOL_RESOURCE_LANE_CAPACITY.is_power_of_two());
-const _: () = assert!(POOL_RESOURCE_LANE_CAPACITY <= 1 << SLOT_BITS);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Geometry {
+    pub(crate) key_capacity: usize,
+    pub(crate) lane_capacity: usize,
     pub(crate) fleet_capacity: usize,
     pub(crate) total_resources: usize,
     /// Words in a resource bitmap (key members).
@@ -236,11 +238,12 @@ pub(crate) struct Geometry {
 }
 
 impl Geometry {
-    pub(crate) fn new(fleet_capacity: u16) -> Self {
+    pub(crate) fn new(fleet_capacity: u16, spec: PoolSpec) -> Self {
+        let PoolSpec { key_capacity, lane_capacity, .. } = spec;
         let fleet_capacity = usize::from(fleet_capacity);
-        let total_resources = fleet_capacity * POOL_RESOURCE_LANE_CAPACITY;
+        let total_resources = fleet_capacity * lane_capacity;
         let member_words = total_resources.div_ceil(64);
-        let key_words = POOL_KEY_CAPACITY.div_ceil(64);
+        let key_words = key_capacity.div_ceil(64);
         let key_stride =
             (size_of::<KeySlot>() + member_words * size_of::<AtomicU64>()).next_multiple_of(64);
         let key_bitmap_bytes = fleet_capacity * key_words * size_of::<AtomicU64>();
@@ -248,11 +251,13 @@ impl Geometry {
         let pending_offset = doorbells_offset + fleet_capacity * size_of::<Doorbell>();
         let interest_offset = pending_offset + key_bitmap_bytes;
         let claims_offset = (interest_offset + key_bitmap_bytes).next_multiple_of(64);
-        let claims_bytes = fleet_capacity * POOL_KEY_CAPACITY * size_of::<AtomicU32>();
+        let claims_bytes = fleet_capacity * key_capacity * size_of::<AtomicU32>();
         let keys_offset = (claims_offset + claims_bytes).next_multiple_of(64);
-        let resources_offset = keys_offset + POOL_KEY_CAPACITY * key_stride;
+        let resources_offset = keys_offset + key_capacity * key_stride;
         let segment_size = resources_offset + total_resources * size_of::<ResourceSlot>();
         Self {
+            key_capacity,
+            lane_capacity,
             fleet_capacity,
             total_resources,
             member_words,
