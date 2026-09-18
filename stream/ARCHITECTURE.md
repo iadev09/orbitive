@@ -45,6 +45,29 @@ same one the arena and the cells rely on across processes. FIN and RESET
 are flags, so a full ring never blocks shutdown; a dropped `WriteHalf`
 without `finish` is a RESET, a dropped `ReadHalf` sets READER_GONE.
 
+### What the ring holds when nobody is reading it
+
+A socket's payload is transient. A ring is **residue**: what crossed stays
+in the segment until other traffic overwrites that slot, and the segment
+outlives every process that used it (which is why the workspace has a rule
+and a tool for clearing kinds). Any process that can map the segment can
+read the last bytes that crossed it, whether or not it was ever a party to
+them.
+
+The boundary is enforced rather than assumed: segments are
+`shm_open(..., O_CREAT|O_EXCL, 0o600)` named `/orbit-{fleet}-{kind}-{uid}`,
+and the init lock refuses a directory others can write to
+(`orbit_core::shm`). So: **same host, same uid.**
+
+That is a real boundary for a fleet whose processes are one service, and a
+weaker one than a socket where it is not — not because of access control,
+which is stricter here than a filesystem socket's, but because of the
+residue. A consumer carrying credentials over a stream is making a
+deployment decision and should be made to say so: relay the body and keep
+the credential-bearing headers out of the segment, or accept the residue in
+writing. The crate does not zero rings on release today; doing so is a
+memset per release and would need a measurement before it is offered.
+
 ## Death
 
 Orbit has no liveness. `node_dead(node, incarnation)` is the embedder's
