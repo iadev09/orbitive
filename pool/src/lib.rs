@@ -48,6 +48,8 @@ use layout::{
 };
 pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
 use table::Table;
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+pub use orbit_core::readiness::Readiness;
 pub use table::{segment_size, segment_size_for};
 
 /// Reserved Orbit SHM kind for the default pool segment. Another pool
@@ -375,6 +377,34 @@ impl Pool {
     /// The kind this pool's segment lives under.
     pub fn kind(&self) -> u8 {
         self.table.kind()
+    }
+
+    /// A descriptor that becomes readable when a key this node
+    /// [`Pool::watch`]es may have changed, for a runtime that parks on
+    /// descriptors rather than on wakers or on the key's word.
+    ///
+    /// Edge-triggered and coalescing: drain it, then re-try what you
+    /// wanted — `claim_create`, `reserve`, `acquire`. It composes, which
+    /// is the point: a worker waiting for its next request and for pool
+    /// capacity puts both descriptors in one poll set and gives that call
+    /// its deadline, instead of choosing which one to block on.
+    ///
+    /// One per table; a second caller is refused rather than handed a
+    /// descriptor whose signals the first would drain.
+    pub fn readiness(&self) -> Result<Readiness> {
+        self.table.take_readiness()
+    }
+
+    /// Ask to be signalled when `key` changes.
+    ///
+    /// Interest is taken by the driver when it delivers, exactly as a
+    /// waker is, so this is re-armed before each wait — take the
+    /// [`Pool::version`], try, watch, then wait, and a change between the
+    /// try and the wait is seen rather than missed.
+    pub fn watch(&self, key: Key) -> Result<()> {
+        let (lo, hi) = key.parts();
+        let key_index = self.table.key_index(lo, hi)?;
+        self.table.watch(key_index)
     }
 
     pub fn node(&self) -> NodeId {

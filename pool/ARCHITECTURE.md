@@ -85,6 +85,21 @@ the doorbell of every interested node, and the node's driver thread wakes
 the registered tasks and clears its interest. One driver per process,
 started on first use, joined on drop, skipped after fork.
 
+A third form, for a runtime that parks on descriptors: `Pool::readiness`
+hands out one `orbit_core::readiness` pair per table and the driver
+signals it at the end of a pass that drained anything — after the bits are
+taken, so a consumer that drains and looks again cannot miss that pass.
+`Pool::watch(key)` is how a descriptor consumer says which keys it wants,
+since interest here is per key rather than implied by holding a side;
+interest is taken when it is delivered, so it is re-armed before each
+wait, exactly as a waker is.
+
+The timeout such a consumer needs is its own `poll`, not an API here:
+descriptors compose, so a worker waiting for its next request and for
+capacity puts both in one call and gives *that* the deadline. A bounded
+wait on a single word (a timed futex) would force it to choose which one
+to block on, which is why there is none.
+
 ## Death
 
 `node_dead(node, incarnation)` closes every LIVE or DRAINING resource that

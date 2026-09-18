@@ -18,6 +18,8 @@ use orbit_core::{Fleet, OrbitEpoch};
 use crate::layout::{
     Doorbell, Geometry, Header, KEY_EMPTY, KEY_LIVE, KeySlot, RESOURCE_EMPTY, ResourceSlot,
 };
+use orbit_core::readiness::{Readiness, Signal};
+
 use crate::{Error, Incarnation, PoolSpec, Result, lock_unpoisoned};
 
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -77,6 +79,9 @@ pub(crate) struct Table {
     /// the shared key table (those also take the region's process lock).
     structural: Mutex<usize>,
     wakers: Box<[Mutex<Vec<Waker>>]>,
+    /// The signalling end of this process's readiness descriptor, once
+    /// somebody has asked for one.
+    readiness: std::sync::OnceLock<Signal>,
     driver: Mutex<Option<Driver>>,
 }
 
@@ -305,6 +310,7 @@ impl Table {
         let bit = 1_u64 << (key_index % 64);
         if !self.is_shared() {
             self.wake(key_index);
+            self.signal_readiness();
             return;
         }
         for node in 0..self.geometry.fleet_capacity {
@@ -324,6 +330,47 @@ impl Table {
         let taken = std::mem::take(&mut *lock_unpoisoned(&self.wakers[key_index]));
         for waker in taken {
             waker.wake();
+        }
+    }
+
+    /// Hand out this table's readiness descriptor, once. The driver is
+    /// what signals it, so asking for one starts it.
+    pub(crate) fn take_readiness(self: &Arc<Self>) -> Result<Readiness> {
+        let (readiness, signal) = orbit_core::readiness::pair()?;
+        self.readiness.set(signal).map_err(|_| {
+            Error::Malformed(
+                "this process already took the pool table's readiness descriptor".to_owned(),
+            )
+        })?;
+        if self.is_shared() {
+            let mut driver = lock_unpoisoned(&self.driver);
+            if driver.is_none() {
+                *driver = Some(self.start_driver()?);
+            }
+        }
+        Ok(readiness)
+    }
+
+    /// Mark this node interested in a key with no waker behind it: the
+    /// descriptor is what gets signalled. Interest is cleared when the
+    /// driver drains it, so this is re-armed before each wait.
+    pub(crate) fn watch(self: &Arc<Self>, key_index: usize) -> Result<()> {
+        if !self.is_shared() {
+            return Ok(());
+        }
+        self.interest_word(usize::from(self.node), key_index / 64)
+            .fetch_or(1 << (key_index % 64), Ordering::SeqCst);
+        let mut driver = lock_unpoisoned(&self.driver);
+        if driver.is_none() {
+            *driver = Some(self.start_driver()?);
+        }
+        Ok(())
+    }
+
+    fn signal_readiness(&self) {
+        if let Some(signal) = self.readiness.get() {
+            // A consumer that has gone away is not this table's problem.
+            let _ = signal.signal();
         }
     }
 
@@ -377,9 +424,11 @@ impl Table {
         doorbell.listening.fetch_add(1, Ordering::SeqCst);
         let mut seen = doorbell.generation.load(Ordering::SeqCst);
         while !stop.load(Ordering::Acquire) {
+            let mut drained = false;
             for word in 0..self.geometry.key_words {
                 let mut bits = self.pending_word(node, word).swap(0, Ordering::SeqCst);
                 if bits != 0 {
+                    drained = true;
                     // Interest is re-registered by whoever polls again.
                     self.interest_word(node, word)
                         .fetch_and(!bits, Ordering::SeqCst);
@@ -392,6 +441,12 @@ impl Table {
                         self.wake(key_index);
                     }
                 }
+            }
+            if drained {
+                // After the bits are taken, never before: a consumer that
+                // drains the descriptor and looks again cannot miss what
+                // this pass carried.
+                self.signal_readiness();
             }
             let now = doorbell.generation.load(Ordering::SeqCst);
             if now != seen {
@@ -622,6 +677,7 @@ pub(crate) fn open(
         wakers: (0..geometry.key_capacity)
             .map(|_| Mutex::new(Vec::new()))
             .collect(),
+        readiness: std::sync::OnceLock::new(),
         driver: Mutex::new(None),
     });
     tables.insert(key, Arc::downgrade(&table));
