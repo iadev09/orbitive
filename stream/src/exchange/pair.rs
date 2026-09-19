@@ -445,6 +445,13 @@ impl PendingStart<'_> {
     pub fn commit(self) -> Result<ChunkDescriptor> {
         self.producer.commit_start(self.publication)
     }
+
+    /// Commit only the initialized prefix of a larger reservation. Any whole
+    /// trailing slots that prefix does not need return to the arena first.
+    pub fn commit_len(mut self, payload_len: usize) -> Result<ChunkDescriptor> {
+        self.publication.truncate(payload_len)?;
+        self.producer.commit_start(self.publication)
+    }
 }
 
 impl Deref for PendingStart<'_> {
@@ -474,6 +481,13 @@ impl PendingData<'_> {
     }
 
     pub fn commit(self) -> Result<ChunkDescriptor> {
+        self.producer.commit_data(self.publication)
+    }
+
+    /// Commit only the initialized prefix of a larger reservation. This is
+    /// the direct-read path for producers that learn the byte count from IO.
+    pub fn commit_len(mut self, payload_len: usize) -> Result<ChunkDescriptor> {
+        self.publication.truncate(payload_len)?;
         self.producer.commit_data(self.publication)
     }
 }
@@ -904,6 +918,40 @@ mod tests {
             _ => panic!("expected retry data"),
         };
         assert_eq!(&*received, &[9; 64]);
+    }
+
+    #[test]
+    fn a_short_io_commit_returns_unused_trailing_slots() {
+        let exchanges = exchanges();
+        let (mut server, ticket) = exchanges.create().expect("server");
+        let mut client = exchanges.open_client(ticket).expect("client");
+        server.request().start(None).expect("start");
+        assert!(matches!(
+            client.request().try_next(),
+            Ok(FlowEvent::Start { metadata: None })
+        ));
+
+        let descriptor = {
+            let mut pending = server.request().reserve_data(256).expect("reserve IO capacity");
+            pending[..37].fill(5);
+            pending.commit_len(37).expect("commit bytes read")
+        };
+        assert_eq!(descriptor.payload_len(), 37);
+        assert_eq!(descriptor.slot_count(), 1);
+
+        let mut following = server.request().reserve_data(192).expect("trailing slots returned");
+        following.fill(9);
+        following.commit().expect("commit following chunk");
+        let first = match client.request().try_next().expect("short data") {
+            FlowEvent::Data(chunk) => chunk,
+            _ => panic!("expected short data"),
+        };
+        assert_eq!(&*first, &[5; 37]);
+        let second = match client.request().try_next().expect("following data") {
+            FlowEvent::Data(chunk) => chunk,
+            _ => panic!("expected following data"),
+        };
+        assert_eq!(&*second, &[9; 192]);
     }
 
     #[test]

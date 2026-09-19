@@ -669,6 +669,29 @@ impl Publication {
         )
     }
 
+    pub(crate) fn truncate(&mut self, payload_len: usize) -> Result<()> {
+        if payload_len == 0 || payload_len > self.payload_len {
+            return Err(Error::Malformed(format!(
+                "committed payload length {payload_len} is outside reserved capacity {}",
+                self.payload_len
+            )));
+        }
+        let count = self.arena.required_slots(payload_len)?;
+        if count < self.count {
+            for slot in &self.arena.metadata()[self.first + count..self.first + self.count] {
+                slot.state.store(SLOT_FREE, Ordering::Release);
+            }
+            self.count = count;
+            let header = self.arena.header();
+            header.credit_generation.fetch_add(1, Ordering::SeqCst);
+            if header.credit_waiters.load(Ordering::SeqCst) > 0 {
+                crate::wake_on(&header.credit_generation);
+            }
+        }
+        self.payload_len = payload_len;
+        Ok(())
+    }
+
     pub(crate) fn make_live(&self) {
         self.arena.metadata()[self.first].state.store(SLOT_LIVE, Ordering::Release);
     }
