@@ -44,3 +44,8 @@ required-features = ["tokio"]
 name = "phase2"
 harness = false
 required-features = ["tokio"]
+
+[[bench]]
+name = "localhost"
+harness = false
+required-features = ["tokio"]
