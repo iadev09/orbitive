@@ -2,6 +2,9 @@
 
 Bounded process-to-process flows in shared memory.
 
+The normative paired-exchange state, ownership, pool-binding and backpressure
+contract is documented in [PROTOCOL.md](PROTOCOL.md).
+
 The crate has two layers. `Streams` is the original private duplex byte ring:
 two endpoints, ordered bytes, independent directions and no message
 boundaries. `exchange` is the typed invocation layer: one paired exchange,
