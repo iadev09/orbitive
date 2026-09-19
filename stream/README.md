@@ -38,99 +38,12 @@ The session API is expected to move as well. A release does not yet carry a
 verdict — the absence of one should mean *dirty* and today means nothing —
 and there is no error for an owner that has gone away.
 
-### What is rejected today, and what would take the rejection back
+### What is closed, and what would open it
 
-Written down so that "we fixed it" is a claim someone can check rather than a
-feeling. Each of these is a door that is closed for a measured reason, and
-each says what would open it.
-
-**1. The async adapters, as they stand.** Moving the same bytes through
-`AsyncRead`/`AsyncWrite` parks three to five times as often as the blocking
-path does, and runs at about a third of its throughput — 2.00 parks per
-ring-ful against 9.38 on a bare-metal Xeon, 1.97 against 5.75 on a UTM guest.
-A blocking reader parks on the direction's own word and is woken by the
-writer; an async one goes through the doorbell to a driver thread, which wakes
-a task, which wakes a runtime worker. One hop is the design, three is the
-adapter.
-
-> *Reversed when* `tests/wakeups.rs` shows the async path within about twice
-> the blocking one. That test already fails if it gets worse, and the numbers
-> above are in its header with the date they were taken.
-
-**2. A relay where a socket would do.** Against a Unix socket a dial costs
-about 1.4 µs and one relayed request about 50 µs, so borrowing is roughly
-thirty-five times the price of opening your own. Against a TLS handshake at
-2033 µs the break-even is near fifty requests, which makes a borrow a
-cold-start and burst tool and not a steady-state one.
-
-> *Reversed when* `relay − local` on the host in question falls below the
-> caller's cost of dialling. This crate cannot know that cost — it belongs to
-> the origin, not to us — but `cargo bench -p orbit-pool --bench load` prints
-> both halves of the subtraction, so the caller only has to divide.
-
-**3. Not rejected, unresolved: what a borrow costs per byte.** One-way
-streaming through the transport runs at ~0.25 µs/KiB. A concurrent
-request-and-response borrow of the same size measured ~2 µs/KiB. The gap is
-not the rendezvous — amortised over a megabyte that is 0.035 µs/KiB — so it is
-the round trip, the concurrency, or something not yet looked at. **Nobody has
-isolated it**, and until someone does, any claim about what a relay costs for
-a real body is about the shape it was measured in rather than about the ring.
-
-> *Settled by* a measurement that holds one thing at a time: the same bytes,
-> one way and then as a round trip, at one caller and then at eight.
-
-
-
-```rust
-use std::sync::Arc;
-
-use orbitive::stream::{Incarnation, Streams, Ticket};
-use orbitive::Fleet;
-
-let fleet = Arc::new(Fleet::join("example", 1)?);
-// The incarnation is whatever tells this life of the process apart from
-// the next one under the same node id: a start stamp, a supervisor's
-// generation. Orbit does not mint it, and it is one value per process
-// life, never one per request. `1` here is a stand-in.
-let streams = Streams::new(fleet, Incarnation::new(1))?;
-
-// One end creates the stream and hands the ticket to the other end,
-// through an event, an invocation, a cache entry: any channel it likes.
-let (mut a, ticket) = streams.create()?;
-let ticket_text = ticket.to_string();
-
-// The other end. This example opens it from the same handle in the same
-// process to stay short; in another process, B joins the same fleet,
-// makes its own `Streams`, and opens the ticket it was handed. Nothing of
-// A's, no `Arc`, no handle, crosses over: only the ticket's text.
-let b = streams.open(ticket_text.parse::<Ticket>()?)?;
-
-// Write then read on one thread works because five bytes fit the ring.
-// A body larger than the ring needs the reader running at the same time:
-// the writer parks when the ring is full and only the reader frees it.
-a.blocking_write_all(b"hello")?;
-a.finish()?;                                  // FIN: nothing more this way
-assert_eq!(b.blocking_read_chunk(16)?.as_ref(), b"hello");
-assert!(b.blocking_read_chunk(16)?.is_empty()); // clean end of stream
-
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-The two-process shape, with the peer on Tokio:
-
-```rust,ignore
-// Process A (node 0): create, hand the ticket over, stream.
-let (a, ticket) = streams.create()?;
-streams.offer(ticket, NodeId::new(1))?;      // or publish `ticket.to_string()` anywhere
-let (mut a_read, mut a_write) = a.split();
-tokio::spawn(async move { a_write.write_all(&body).await?; a_write.shutdown().await });
-a_read.read_to_end(&mut reply).await?;       // the reader runs while the writer waits
-
-// Process B (node 1): its own fleet handle, its own `Streams`.
-let streams = Streams::new(fleet, supervisor_incarnation)?;
-let ticket = streams.blocking_take_offer()?;  // or parse the text it was sent
-let b = streams.open(ticket)?;
-```
+Tracked in [`ARCHITECTURE.md`](ARCHITECTURE.md) under *What waking costs*,
+beside the mechanism the cost belongs to: which doors are shut, on which
+measurement, and what would have to change for each to open. `tests/wakeups.rs`
+watches the first of them and fails if it gets worse.
 
 ## What a stream is
 

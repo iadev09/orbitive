@@ -177,6 +177,94 @@ drops, before the mapping goes away; a
 forked child that inherited the table skips the join because the thread is
 not there. Create tables after fork, as with ring readiness fds.
 
+## What waking costs, and what is closed because of it
+
+The section above is how a wakeup reaches a caller. This is what each hop
+costs, and which doors those costs shut. Tracked here rather than in the
+README because the cost belongs beside the mechanism, and because it is meant
+to change: each entry says what would take it back.
+
+**The floor is the kernel's, not ours.** `cargo bench -p orbit-core --bench
+wake` bounces a word between two threads through `wait_word`/`wake_word` and
+nothing else. On one M3 Max, macOS native and two UTM guests, plus a
+bare-metal Xeon (2026-09-19):
+
+```text
+                              per wake   parks/round trip
+FreeBSD 15 arm64 guest          1.22 µs        1.86
+Linux 6.12 arm64 guest         22.53 µs        1.96
+  same, both threads pinned     3.63 µs        1.30
+macOS 15.x native               2.71 µs         n/a
+Linux 4.18 x86_64 bare metal    1.03 µs        0.59
+```
+
+Twenty-two microseconds on the Linux guest against one on bare metal, on the
+same code: `systemd-detect-virt` says `apple`, the guest has no cpuidle
+driver, and waking a thread on another vCPU needs the host to reschedule that
+vCPU. **Take this bench first on a new host.** A park count read without it
+can be almost entirely the machine — on that guest 37 of a borrow's 39 µs
+were, and a design conclusion was nearly drawn from it.
+
+Which is why what follows asserts **parks**, not time. Time is the machine's;
+how many times a transfer parks is this crate's.
+
+### Closed: the async adapters, as they stand
+
+Moving the same bytes through `AsyncRead`/`AsyncWrite` parks three to five
+times as often as the blocking path, and runs at about a third of its
+throughput:
+
+```text
+                     parks per 64 KiB ring-ful     one-way bytes
+blocking                     2.00  /  1.97          3.8 GB/s
+async adapters               9.38  /  5.75          1.4 GB/s
+                       (bare metal / guest)
+```
+
+The mechanism is in the section above and the arithmetic follows from it: a
+blocking reader parks on the direction's own `changes` word and is woken by
+the writer — one hop. An async one goes through the doorbell to the driver
+thread, which wakes the task, whose runtime wakes a worker — three. The
+adapters are not doing anything wrong; they are paying for the indirection
+that lets a task wait without owning a thread.
+
+> **Opens when** `tests/wakeups.rs` shows the async path within about twice
+> the blocking one. That test asserts the bounds above, prints both numbers on
+> every run, and fails if either gets worse. Its header carries the figures and
+> the date; the response to a change is to record the new ones and tighten,
+> not to raise a bound until it passes.
+
+### Closed: a relay where a socket would do
+
+Against a Unix socket a dial costs ~1.4 µs and one relayed request ~50 µs, so
+borrowing is about thirty-five times the price of opening your own. Against a
+TLS handshake at ~2033 µs the break-even is near fifty requests, which makes a
+borrow a cold-start and burst tool rather than a steady-state one. Three
+quarters of that 50 µs is the rendezvous — `reserve`, `open_session`,
+`accept_session` — and one quarter is the bytes.
+
+> **Opens when** `relay − local` on the host in question falls below the
+> caller's cost of dialling. This crate cannot know that cost; it belongs to
+> the origin. `cargo bench -p orbit-pool --bench load` prints both halves of
+> the subtraction, so a caller supplies only the number that is theirs.
+
+### Not closed, unresolved: what a borrow costs per byte
+
+One-way streaming through the transport runs at ~0.25 µs/KiB, flat across
+chunk sizes. A concurrent request-and-response borrow of the same size
+measured ~2 µs/KiB. The rendezvous does not account for the gap — amortised
+over a megabyte it is 0.035 µs/KiB — so it is the round trip, the eight
+concurrent callers, or something not yet looked at.
+
+**Nobody has isolated it.** Until someone does, any figure for what a relay
+costs on a real body describes the shape it was measured in rather than the
+ring. Recorded as an open question rather than turned into either claim it
+could support.
+
+> **Settled by** a measurement that holds one thing at a time: the same bytes
+> one way and then as a round trip, at one caller and then at eight.
+
+
 ## Specs: one fleet, several tables
 
 A `StreamSpec` names the segment a `Streams` table opens — its kind, its
