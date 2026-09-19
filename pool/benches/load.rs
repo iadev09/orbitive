@@ -158,6 +158,11 @@ fn main() {
         .filter(|arg| !arg.starts_with("--"));
     let ops: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
     let tasks: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(8);
+    // Third argument: how many bytes one exchange carries. The ring is 64 KiB
+    // a direction by default, so a payload past that makes the writer wait for
+    // the reader to drain -- which is the transition worth sweeping, because a
+    // relayed HTTP body is on the far side of it and a 128-byte probe is not.
+    let payload: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(128);
     let capacity: u32 = 4;
 
     let name: &'static str = Box::leak(format!("ld{:x}", std::process::id()).into_boxed_str());
@@ -177,7 +182,7 @@ fn main() {
         .unwrap();
 
     println!(
-        "orbit-pool load: ops={ops} tasks={tasks} capacity={capacity} (two nodes in one process)"
+        "orbit-pool load: ops={ops} tasks={tasks} payload={payload}B capacity={capacity} (two nodes in one process)"
     );
 
     runtime.block_on(async {
@@ -232,6 +237,7 @@ fn main() {
             let owner = owner.clone();
             let owner_streams = owner_streams.clone();
             let served = Arc::clone(&served);
+            let bytes = payload;
             tokio::spawn(async move {
                 loop {
                     let ticket = poll_fn(|cx| owner_streams.poll_take_offer(cx))
@@ -246,11 +252,11 @@ fn main() {
                     };
                     let served = Arc::clone(&served);
                     tokio::spawn(async move {
+                        let mut payload = vec![0_u8; bytes];
                         // Every exchange on this session, not only the first:
                         // one serving task then covers both the borrow-per-
                         // request shape and the held-session one, and the
                         // difference between them is the rendezvous.
-                        let mut payload = [0_u8; 128];
                         while read.read_exact(&mut payload).await.is_ok() {
                             if write.write_all(&payload).await.is_err() {
                                 break;
@@ -265,6 +271,7 @@ fn main() {
         };
         let pool = caller.clone();
         let streams = caller_streams.clone();
+        let bytes = payload;
         run("remote reuse", ops, tasks, move |_| {
             let pool = pool.clone();
             let streams = streams.clone();
@@ -272,9 +279,9 @@ fn main() {
                 let start = Instant::now();
                 let lease = reserve_waiting(&pool, id).await;
                 let (mut read, mut write) = pool.open_session(lease, &streams).unwrap();
-                write.write_all(&[7_u8; 128]).await.unwrap();
+                write.write_all(&vec![7_u8; bytes]).await.unwrap();
                 write.shutdown().await.unwrap();
-                let mut reply = [0_u8; 128];
+                let mut reply = vec![0_u8; bytes];
                 read.read_exact(&mut reply).await.unwrap();
                 start.elapsed()
             }
@@ -292,6 +299,7 @@ fn main() {
         const EXCHANGES: usize = 8;
         let pool = caller.clone();
         let streams = caller_streams.clone();
+        let bytes = payload;
         run("remote reuse x8", ops / EXCHANGES, tasks, move |_| {
             let pool = pool.clone();
             let streams = streams.clone();
@@ -299,9 +307,10 @@ fn main() {
                 let start = Instant::now();
                 let lease = reserve_waiting(&pool, id).await;
                 let (mut read, mut write) = pool.open_session(lease, &streams).unwrap();
-                let mut reply = [0_u8; 128];
+                let mut reply = vec![0_u8; bytes];
+                let out = vec![7_u8; bytes];
                 for _ in 0..EXCHANGES {
-                    write.write_all(&[7_u8; 128]).await.unwrap();
+                    write.write_all(&out).await.unwrap();
                     read.read_exact(&mut reply).await.unwrap();
                 }
                 write.shutdown().await.unwrap();
