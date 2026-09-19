@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use orbit_core::{Fleet, NodeId};
 
@@ -172,6 +173,32 @@ impl Exchanges {
 
     pub fn take_offer(&self) -> Option<ExchangeTicket> {
         self.control.take_offer().map(ExchangeTicket)
+    }
+
+    /// Park until an exchange is offered to this node.
+    pub fn blocking_take_offer(&self) -> Result<ExchangeTicket> {
+        self.control.blocking_take_offer().map(ExchangeTicket)
+    }
+
+    /// Wait at most `timeout` for an offered exchange.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    pub fn take_offer_timeout(&self, timeout: Duration) -> Result<Option<ExchangeTicket>> {
+        self.control
+            .take_offer_timeout(timeout)
+            .map(|ticket| ticket.map(ExchangeTicket))
+    }
+
+    /// Task readiness for the next offered exchange.
+    pub fn poll_take_offer(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<ExchangeTicket>> {
+        match self.control.poll_take_offer(cx) {
+            std::task::Poll::Ready(result) => {
+                std::task::Poll::Ready(result.map(ExchangeTicket))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 
     pub fn control(&self) -> &Streams {
