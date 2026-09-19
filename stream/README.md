@@ -38,12 +38,57 @@ The session API is expected to move as well. A release does not yet carry a
 verdict — the absence of one should mean *dirty* and today means nothing —
 and there is no error for an owner that has gone away.
 
-### What is closed, and what would open it
 
-Tracked in [`ARCHITECTURE.md`](ARCHITECTURE.md) under *What waking costs*,
-beside the mechanism the cost belongs to: which doors are shut, on which
-measurement, and what would have to change for each to open. `tests/wakeups.rs`
-watches the first of them and fails if it gets worse.
+```rust
+use std::sync::Arc;
+
+use orbitive::stream::{Incarnation, Streams, Ticket};
+use orbitive::Fleet;
+
+let fleet = Arc::new(Fleet::join("example", 1)?);
+// The incarnation is whatever tells this life of the process apart from
+// the next one under the same node id: a start stamp, a supervisor's
+// generation. Orbit does not mint it, and it is one value per process
+// life, never one per request. `1` here is a stand-in.
+let streams = Streams::new(fleet, Incarnation::new(1))?;
+
+// One end creates the stream and hands the ticket to the other end,
+// through an event, an invocation, a cache entry: any channel it likes.
+let (mut a, ticket) = streams.create()?;
+let ticket_text = ticket.to_string();
+
+// The other end. This example opens it from the same handle in the same
+// process to stay short; in another process, B joins the same fleet,
+// makes its own `Streams`, and opens the ticket it was handed. Nothing of
+// A's, no `Arc`, no handle, crosses over: only the ticket's text.
+let b = streams.open(ticket_text.parse::<Ticket>()?)?;
+
+// Write then read on one thread works because five bytes fit the ring.
+// A body larger than the ring needs the reader running at the same time:
+// the writer parks when the ring is full and only the reader frees it.
+a.blocking_write_all(b"hello")?;
+a.finish()?;                                  // FIN: nothing more this way
+assert_eq!(b.blocking_read_chunk(16)?.as_ref(), b"hello");
+assert!(b.blocking_read_chunk(16)?.is_empty()); // clean end of stream
+
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The two-process shape, with the peer on Tokio:
+
+```rust,ignore
+// Process A (node 0): create, hand the ticket over, stream.
+let (a, ticket) = streams.create()?;
+streams.offer(ticket, NodeId::new(1))?;      // or publish `ticket.to_string()` anywhere
+let (mut a_read, mut a_write) = a.split();
+tokio::spawn(async move { a_write.write_all(&body).await?; a_write.shutdown().await });
+a_read.read_to_end(&mut reply).await?;       // the reader runs while the writer waits
+
+// Process B (node 1): its own fleet handle, its own `Streams`.
+let streams = Streams::new(fleet, supervisor_incarnation)?;
+let ticket = streams.blocking_take_offer()?;  // or parse the text it was sent
+let b = streams.open(ticket)?;
+```
 
 ## What a stream is
 
