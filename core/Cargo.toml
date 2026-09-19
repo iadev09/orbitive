@@ -21,4 +21,9 @@ libc.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 nix.workspace = true
+libc.workspace = true
 tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
+
+[[bench]]
+name = "wake"
+harness = false
