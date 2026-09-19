@@ -32,6 +32,15 @@ payload length. A 777-byte chunk in a 256-byte-slot arena therefore occupies
 four slots and produces one descriptor. A later chunk gets another extent
 and another descriptor; chunks are never pointer chains.
 
+`start(Some(bytes))` and `data(bytes)` copy existing bytes into an extent.
+When the application is producing or encoding the bytes itself,
+`reserve_start(len)` and `reserve_data(len)` return the writable extent
+directly. Filling that guard is still private producer work: `commit()` makes
+the complete extent immutable and publishes exactly one descriptor. Dropping
+an uncommitted guard publishes no event and returns all of its slots. If the
+control ring cannot accept the descriptor, the failed commit returns those
+slots too, so readiness can be awaited and the whole chunk retried.
+
 The two payload arenas are fleet-wide rather than one SHM object per
 exchange. Separating them means a held upload cannot spend response credit.
 Dropping a received `PayloadChunk` returns its complete extent. A producer
@@ -44,8 +53,9 @@ two state machines are independent. The transport enforces ordering,
 ownership, credit and terminal rules only. The handler decides what an event
 means and whether a reset in one flow should affect its paired flow.
 
-`orbit-pool`'s `open_exchange_session` and `accept_exchange_session` put the
-lease in request-start metadata and validate it before W2 sees request data.
+`orbit-pool`'s `open_exchange_session` writes the lease and application
+metadata directly into a reserved request-start extent.
+`accept_exchange_session` validates that lease before W2 sees request data.
 This connects a fleet-owned resource to the exchange without teaching the
 transport what that resource is.
 
