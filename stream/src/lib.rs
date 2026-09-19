@@ -741,6 +741,50 @@ impl Handle {
         Ok(len)
     }
 
+    /// Publish `buf` as one indivisible write, or publish nothing.
+    fn try_write_exact(&self, buf: &[u8]) -> Result<()> {
+        let slot = self.slot()?;
+        let direction = Self::direction(slot, self.side.write_direction());
+        let flags = direction.flags();
+        if flags & FLAG_RESET != 0 {
+            return Err(Error::Reset);
+        }
+        if flags & FLAG_FIN != 0 {
+            return Err(Error::Closed);
+        }
+        if flags & FLAG_READER_GONE != 0 {
+            return Err(Error::PeerGone);
+        }
+        let buffer_bytes = self.table.geometry().buffer_bytes;
+        if buf.len() > buffer_bytes {
+            return Err(Error::Malformed(format!(
+                "atomic stream write is {} bytes; ring capacity is {buffer_bytes}",
+                buf.len()
+            )));
+        }
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let head = direction.head.load(Ordering::Relaxed);
+        let tail = direction.tail.load(Ordering::Acquire);
+        if buffer_bytes - ((head - tail) as usize) < buf.len() {
+            return Err(Error::WouldBlock);
+        }
+        let base = self.table.buffer(self.index, self.side.write_direction());
+        let start = (head as usize) & (buffer_bytes - 1);
+        let first = buf.len().min(buffer_bytes - start);
+        // SAFETY: the complete frame fits in free ring space owned by this writer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), base.add(start), first);
+            std::ptr::copy_nonoverlapping(buf.as_ptr().add(first), base, buf.len() - first);
+        }
+        direction.head.store(head + buf.len() as u64, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let drained = direction.tail.load(Ordering::SeqCst) >= head;
+        self.table.notify(self.index, slot, direction, drained);
+        Ok(())
+    }
+
     /// One attempt at the direction this side reads from. `Ok(0)` with a
     /// non-empty buffer is clean end of stream.
     fn try_read(&self, buf: &mut [u8]) -> Result<usize> {
@@ -783,6 +827,52 @@ impl Handle {
         let was_full = head_now - tail >= buffer_bytes as u64;
         self.table.notify(self.index, slot, direction, was_full);
         Ok(len)
+    }
+
+    /// Consume exactly one complete frame, or consume nothing.
+    fn try_read_exact(&self, buf: &mut [u8]) -> Result<()> {
+        let slot = self.slot()?;
+        let direction = Self::direction(slot, self.side.read_direction());
+        let flags = direction.flags();
+        if flags & FLAG_RESET != 0 {
+            return Err(Error::Reset);
+        }
+        let buffer_bytes = self.table.geometry().buffer_bytes;
+        if buf.len() > buffer_bytes {
+            return Err(Error::Malformed(format!(
+                "atomic stream read is {} bytes; ring capacity is {buffer_bytes}",
+                buf.len()
+            )));
+        }
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let head = direction.head.load(Ordering::Acquire);
+        let tail = direction.tail.load(Ordering::Relaxed);
+        let available = (head - tail) as usize;
+        if available < buf.len() {
+            if flags & FLAG_FIN != 0 {
+                return Err(Error::Malformed(format!(
+                    "stream ended with {available} bytes of a {} byte frame",
+                    buf.len()
+                )));
+            }
+            return Err(Error::WouldBlock);
+        }
+        let base = self.table.buffer(self.index, self.side.read_direction());
+        let start = (tail as usize) & (buffer_bytes - 1);
+        let first = buf.len().min(buffer_bytes - start);
+        // SAFETY: the complete frame is within the writer-published range.
+        unsafe {
+            std::ptr::copy_nonoverlapping(base.add(start), buf.as_mut_ptr(), first);
+            std::ptr::copy_nonoverlapping(base, buf.as_mut_ptr().add(first), buf.len() - first);
+        }
+        direction.tail.store(tail + buf.len() as u64, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let head_now = direction.head.load(Ordering::SeqCst);
+        let was_full = head_now - tail >= buffer_bytes as u64;
+        self.table.notify(self.index, slot, direction, was_full);
+        Ok(())
     }
 
     fn set_flag(&self, direction_index: usize, flag: u8) {
@@ -972,6 +1062,10 @@ impl Endpoint {
         self.read.try_read(buf)
     }
 
+    pub fn try_read_exact(&self, buf: &mut [u8]) -> Result<()> {
+        self.read.try_read_exact(buf)
+    }
+
     pub fn blocking_read(&self, buf: &mut [u8]) -> Result<usize> {
         self.read.blocking_read(buf)
     }
@@ -982,6 +1076,10 @@ impl Endpoint {
 
     pub fn try_write(&self, buf: &[u8]) -> Result<usize> {
         self.write.try_write(buf)
+    }
+
+    pub fn try_write_exact(&self, buf: &[u8]) -> Result<()> {
+        self.write.try_write_exact(buf)
     }
 
     pub fn blocking_write(&self, buf: &[u8]) -> Result<usize> {
@@ -1016,6 +1114,12 @@ impl ReadHalf {
     /// [`Error::WouldBlock`] means nothing yet.
     pub fn try_read(&self, buf: &mut [u8]) -> Result<usize> {
         self.handle.try_read(buf)
+    }
+
+    /// Read the complete buffer atomically. When it is not all available,
+    /// returns [`Error::WouldBlock`] without consuming a prefix.
+    pub fn try_read_exact(&self, buf: &mut [u8]) -> Result<()> {
+        self.handle.try_read_exact(buf)
     }
 
     /// Park until something can be read, then read it. `Ok(0)` is clean
@@ -1088,6 +1192,12 @@ impl WriteHalf {
     /// Write what fits now; [`Error::WouldBlock`] when the ring is full.
     pub fn try_write(&self, buf: &[u8]) -> Result<usize> {
         self.handle.try_write(buf)
+    }
+
+    /// Write the complete buffer atomically. When it does not all fit,
+    /// returns [`Error::WouldBlock`] without publishing a prefix.
+    pub fn try_write_exact(&self, buf: &[u8]) -> Result<()> {
+        self.handle.try_write_exact(buf)
     }
 
     /// Park until something fits, then write it. Blocks the thread.
@@ -1362,6 +1472,27 @@ mod tests {
             got += b.blocking_read(&mut wrapped[got..]).unwrap();
         }
         assert_eq!(&wrapped[..got], &tail[..got]);
+    }
+
+    #[test]
+    fn exact_frames_never_publish_or_consume_a_prefix() {
+        let streams = streams("stream-exact-frame");
+        let (a, ticket) = streams.create().unwrap();
+        let b = streams.open(ticket).unwrap();
+
+        let filler = vec![7_u8; STREAM_BUFFER_BYTES - 32];
+        a.try_write_exact(&filler).unwrap();
+        assert!(matches!(a.try_write_exact(&[9_u8; 64]), Err(Error::WouldBlock)));
+        let mut consumed = vec![0_u8; filler.len()];
+        b.try_read_exact(&mut consumed).unwrap();
+        assert_eq!(consumed, filler);
+        assert!(matches!(b.try_read(&mut [0_u8; 1]), Err(Error::WouldBlock)));
+
+        a.try_write_exact(&[3_u8; 32]).unwrap();
+        assert!(matches!(b.try_read_exact(&mut [0_u8; 64]), Err(Error::WouldBlock)));
+        let mut frame = [0_u8; 32];
+        b.try_read_exact(&mut frame).unwrap();
+        assert_eq!(frame, [3_u8; 32]);
     }
 
     #[test]
