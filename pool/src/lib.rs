@@ -27,32 +27,31 @@
 //! the shared segment a [`PoolSpec`] names — kind [`POOL_KIND`] by
 //! default, and one fleet may hold several independent pools.
 
-use std::fmt;
-use std::io;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use std::{fmt, io};
 
 use orbit_core::{Fleet, NetId64, NodeId, OrbitEpoch};
 
 mod layout;
+mod policy;
 #[cfg(feature = "stream")]
 mod session;
-mod policy;
 mod table;
 
 pub use layout::PENDING_RESERVATIONS;
 use layout::{
     GENERATION_MASK, RESOURCE_DRAINING, RESOURCE_LIVE, ResourceSlot, SLOT_BITS, SLOT_MASK,
-    pack_counts, unpack_counts,
+    pack_counts, unpack_counts
 };
-pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
-#[cfg(feature = "stream")]
-pub use session::ExchangeSessionStart;
-use table::Table;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use orbit_core::readiness::Readiness;
+pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
+#[cfg(feature = "stream")]
+pub use session::{ExchangeSessionPlan, ExchangeSessionStart};
+use table::Table;
 pub use table::{segment_size, segment_size_for};
 
 /// Reserved Orbit SHM kind for the default pool segment. Another pool
@@ -89,14 +88,17 @@ pub struct PoolSpec {
     pub key_capacity: usize,
     /// Resources one fleet node can register at once. A power of two, at
     /// most 65 536.
-    pub lane_capacity: usize,
+    pub lane_capacity: usize
 }
 
 impl PoolSpec {
-    pub const DEFAULT: Self =
-        Self::new(POOL_KIND, POOL_KEY_CAPACITY, POOL_RESOURCE_LANE_CAPACITY);
+    pub const DEFAULT: Self = Self::new(POOL_KIND, POOL_KEY_CAPACITY, POOL_RESOURCE_LANE_CAPACITY);
 
-    pub const fn new(kind: u8, key_capacity: usize, lane_capacity: usize) -> Self {
+    pub const fn new(
+        kind: u8,
+        key_capacity: usize,
+        lane_capacity: usize
+    ) -> Self {
         Self { kind, key_capacity, lane_capacity }
     }
 
@@ -155,39 +157,40 @@ pub enum Error {
     /// the limit the caller gave.
     CreationBudget {
         key: Key,
-        max_live: u32,
+        max_live: u32
     },
     /// Every key slot is taken.
     KeyFull {
-        capacity: usize,
+        capacity: usize
     },
     /// Every resource slot in this process's lane is taken.
     Full {
-        capacity: usize,
+        capacity: usize
     },
     Malformed(String),
-    Io(io::Error),
+    Io(io::Error)
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         match self {
             Self::Stale(id) => write!(f, "resource {id} has ended"),
             Self::Busy(id) => write!(f, "resource {id} has no capacity left"),
             Self::Draining(id) => write!(f, "resource {id} is draining"),
             Self::NotOwner(id) => write!(f, "resource {id} belongs to another node"),
-            Self::NotReserved(lease) => write!(
-                f,
-                "lease {} on {} is not an unaccepted reservation",
-                lease.fence, lease.id
-            ),
+            Self::NotReserved(lease) => {
+                write!(f, "lease {} on {} is not an unaccepted reservation", lease.fence, lease.id)
+            }
             Self::CreationBudget { key, max_live } => {
                 write!(f, "creation budget for {key} is spent: max_live={max_live}")
             }
             Self::KeyFull { capacity } => write!(f, "pool key table is full: capacity={capacity}"),
             Self::Full { capacity } => write!(f, "pool lane is full: capacity={capacity}"),
             Self::Malformed(text) => write!(f, "not a pool resource id: {text:?}"),
-            Self::Io(error) => write!(f, "Orbit pool io error: {error}"),
+            Self::Io(error) => write!(f, "Orbit pool io error: {error}")
         }
     }
 }
@@ -196,7 +199,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            _ => None,
+            _ => None
         }
     }
 }
@@ -233,7 +236,10 @@ impl Key {
 }
 
 impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         write!(f, "key:{:032x}", self.0)
     }
 }
@@ -285,17 +291,25 @@ impl ResourceId {
         (self.0.counter() >> SLOT_BITS) as u32
     }
 
-    fn make(kind: u8, node: u16, slot: u32, generation: u32) -> Self {
+    fn make(
+        kind: u8,
+        node: u16,
+        slot: u32,
+        generation: u32
+    ) -> Self {
         Self(NetId64::make(
             kind,
             node,
-            ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK),
+            ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK)
         ))
     }
 }
 
 impl fmt::Display for ResourceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -304,9 +318,7 @@ impl FromStr for ResourceId {
     type Err = Error;
 
     fn from_str(text: &str) -> Result<Self> {
-        text.parse::<NetId64>()
-            .map(Self)
-            .map_err(|_| Error::Malformed(text.to_owned()))
+        text.parse::<NetId64>().map(Self).map_err(|_| Error::Malformed(text.to_owned()))
     }
 }
 
@@ -315,7 +327,7 @@ impl FromStr for ResourceId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
     Live,
-    Draining,
+    Draining
 }
 
 /// One resource usable for a key, as the fleet sees it right now.
@@ -335,7 +347,7 @@ pub struct Candidate {
     pub reserved: u32,
     /// Units the owner is executing.
     pub active: u32,
-    pub last_reserve_ms: u64,
+    pub last_reserve_ms: u64
 }
 
 impl Candidate {
@@ -353,19 +365,22 @@ pub struct Lease {
     /// has a larger fence, so a stale holder can be told from the current.
     pub fence: u64,
     pub holder: NodeId,
-    pub holder_incarnation: Incarnation,
+    pub holder_incarnation: Incarnation
 }
 
 /// The fleet's pool table. Cheap to clone; every clone in a process is
 /// the same table, driver and wakers.
 #[derive(Clone)]
 pub struct Pool {
-    table: Arc<Table>,
+    table: Arc<Table>
 }
 
 impl Pool {
     /// Open the fleet's default pool table.
-    pub fn new(fleet: Arc<Fleet>, incarnation: Incarnation) -> Result<Self> {
+    pub fn new(
+        fleet: Arc<Fleet>,
+        incarnation: Incarnation
+    ) -> Result<Self> {
         Self::with_spec(fleet, incarnation, PoolSpec::DEFAULT)
     }
 
@@ -376,12 +391,10 @@ impl Pool {
     pub fn with_spec(
         fleet: Arc<Fleet>,
         incarnation: Incarnation,
-        spec: PoolSpec,
+        spec: PoolSpec
     ) -> Result<Self> {
         spec.validate()?;
-        Ok(Self {
-            table: table::open(&fleet, incarnation, spec)?,
-        })
+        Ok(Self { table: table::open(&fleet, incarnation, spec)? })
     }
 
     /// The kind this pool's segment lives under.
@@ -411,7 +424,10 @@ impl Pool {
     /// waker is, so this is re-armed before each wait — take the
     /// [`Pool::version`], try, watch, then wait, and a change between the
     /// try and the wait is seen rather than missed.
-    pub fn watch(&self, key: Key) -> Result<()> {
+    pub fn watch(
+        &self,
+        key: Key
+    ) -> Result<()> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
         self.table.watch(key_index)
@@ -431,7 +447,11 @@ impl Pool {
 
     /// Make a resource this process owns visible under `key` with
     /// `capacity` concurrent leases (1 for an exclusive resource).
-    pub fn register(&self, key: Key, capacity: u32) -> Result<ResourceId> {
+    pub fn register(
+        &self,
+        key: Key,
+        capacity: u32
+    ) -> Result<ResourceId> {
         if capacity == 0 {
             return Err(Error::Malformed("capacity must be at least one".to_owned()));
         }
@@ -445,32 +465,38 @@ impl Pool {
             |counts| {
                 let (live, creating) = unpack_counts(counts);
                 Some(pack_counts(live + 1, creating))
-            },
+            }
         );
         self.table.key_changed(key_index);
         Ok(ResourceId::make(
             self.table.kind(),
             self.table.node(),
             (index % self.table.geometry().lane_capacity) as u32,
-            generation,
+            generation
         ))
     }
 
     /// Take the resource away. Leases out on it become stale.
-    pub fn unregister(&self, id: ResourceId) -> Result<()> {
+    pub fn unregister(
+        &self,
+        id: ResourceId
+    ) -> Result<()> {
         let (index, slot) = self.owned(id)?;
         self.table.close_resource(index, slot);
         Ok(())
     }
 
     /// No new leases; the ones out finish at their own pace.
-    pub fn drain(&self, id: ResourceId) -> Result<()> {
+    pub fn drain(
+        &self,
+        id: ResourceId
+    ) -> Result<()> {
         let (_, slot) = self.owned(id)?;
         let _ = slot.state.compare_exchange(
             RESOURCE_LIVE,
             RESOURCE_DRAINING,
             Ordering::SeqCst,
-            Ordering::SeqCst,
+            Ordering::SeqCst
         );
         Ok(())
     }
@@ -480,7 +506,12 @@ impl Pool {
     /// owner is aged out, so its unit returns and a late accept of it is
     /// refused. `grace` bounds how long an abandoned reservation keeps a
     /// unit; it says nothing about running work.
-    pub fn reconcile(&self, id: ResourceId, active: u32, grace: std::time::Duration) -> Result<()> {
+    pub fn reconcile(
+        &self,
+        id: ResourceId,
+        active: u32,
+        grace: std::time::Duration
+    ) -> Result<()> {
         let (_, slot) = self.owned(id)?;
         let now = OrbitEpoch::now().as_unix_ms();
         let mut aged = 0_u32;
@@ -500,23 +531,23 @@ impl Pool {
             }
         }
         let mut freed = false;
-        let _ = slot
-            .units
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                let (reserved, was_active) = unpack_counts(units);
-                let reserved = reserved.saturating_sub(aged);
-                freed = reserved + active < unpack_counts(units).0 + was_active;
-                Some(pack_counts(reserved, active))
-            });
+        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+            let (reserved, was_active) = unpack_counts(units);
+            let reserved = reserved.saturating_sub(aged);
+            freed = reserved + active < unpack_counts(units).0 + was_active;
+            Some(pack_counts(reserved, active))
+        });
         if freed {
-            self.table
-                .key_changed(slot.key_index.load(Ordering::Acquire) as usize);
+            self.table.key_changed(slot.key_index.load(Ordering::Acquire) as usize);
         }
         Ok(())
     }
 
     /// Every resource registered under `key`, in table order.
-    pub fn candidates(&self, key: Key) -> Vec<Candidate> {
+    pub fn candidates(
+        &self,
+        key: Key
+    ) -> Vec<Candidate> {
         let (lo, hi) = key.parts();
         let Ok(key_index) = self.table.key_index(lo, hi) else {
             return Vec::new();
@@ -536,12 +567,16 @@ impl Pool {
         found
     }
 
-    fn candidate_at(&self, index: usize, key: (u64, u64)) -> Option<Candidate> {
+    fn candidate_at(
+        &self,
+        index: usize,
+        key: (u64, u64)
+    ) -> Option<Candidate> {
         let slot = self.table.resources().get(index)?;
         let state = match slot.state.load(Ordering::Acquire) {
             RESOURCE_LIVE => State::Live,
             RESOURCE_DRAINING => State::Draining,
-            _ => return None,
+            _ => return None
         };
         if slot.key_lo.load(Ordering::Relaxed) != key.0
             || slot.key_hi.load(Ordering::Relaxed) != key.1
@@ -554,7 +589,7 @@ impl Pool {
                 self.table.kind(),
                 owner,
                 (index % self.table.geometry().lane_capacity) as u32,
-                slot.generation.load(Ordering::Relaxed),
+                slot.generation.load(Ordering::Relaxed)
             ),
             owner: NodeId::new(owner),
             owner_incarnation: Incarnation::new(slot.owner_incarnation.load(Ordering::Relaxed)),
@@ -563,18 +598,21 @@ impl Pool {
             capacity: slot.capacity.load(Ordering::Relaxed),
             reserved: unpack_counts(slot.units.load(Ordering::SeqCst)).0,
             active: unpack_counts(slot.units.load(Ordering::SeqCst)).1,
-            last_reserve_ms: slot.last_reserve_ms.load(Ordering::Relaxed),
+            last_reserve_ms: slot.last_reserve_ms.load(Ordering::Relaxed)
         })
     }
 
     /// One unit of the resource's capacity, or [`Error::Busy`]. One
     /// compare-and-swap; a snapshot that showed room is not a lease.
-    pub fn reserve(&self, id: ResourceId) -> Result<Lease> {
+    pub fn reserve(
+        &self,
+        id: ResourceId
+    ) -> Result<Lease> {
         let (_, slot) = self.locate(id)?;
         match slot.state.load(Ordering::Acquire) {
             RESOURCE_LIVE => {}
             RESOURCE_DRAINING => return Err(Error::Draining(id)),
-            _ => return Err(Error::Stale(id)),
+            _ => return Err(Error::Stale(id))
         }
         let capacity = slot.capacity.load(Ordering::Relaxed);
         slot.units
@@ -586,12 +624,10 @@ impl Pool {
         // The slot may have ended between the state check and the count;
         // give the unit back rather than hold a lease on the next tenant.
         if !slot.is(id.generation()) {
-            let _ = slot
-                .units
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                    let (reserved, active) = unpack_counts(units);
-                    Some(pack_counts(reserved.saturating_sub(1), active))
-                });
+            let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+                let (reserved, active) = unpack_counts(units);
+                Some(pack_counts(reserved.saturating_sub(1), active))
+            });
             return Err(Error::Stale(id));
         }
         let fence = slot.fence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -614,21 +650,14 @@ impl Pool {
         }
         if !placed {
             // The owner is behind; give the unit back and say busy.
-            let _ = slot
-                .units
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                    let (reserved, active) = unpack_counts(units);
-                    Some(pack_counts(reserved.saturating_sub(1), active))
-                });
+            let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+                let (reserved, active) = unpack_counts(units);
+                Some(pack_counts(reserved.saturating_sub(1), active))
+            });
             return Err(Error::Busy(id));
         }
         slot.last_reserve_ms.store(now, Ordering::Release);
-        Ok(Lease {
-            id,
-            fence,
-            holder: self.node(),
-            holder_incarnation: self.incarnation(),
-        })
+        Ok(Lease { id, fence, holder: self.node(), holder_incarnation: self.incarnation() })
     }
 
     /// The owner takes a lease a caller brought it: the unit moves from
@@ -637,7 +666,10 @@ impl Pool {
     /// while the resource is live in the lease's generation. A reservation
     /// that never made it here is not the caller's to undo; the owner's
     /// [`Pool::reconcile`] ages it out.
-    pub fn accept(&self, lease: Lease) -> Result<Execution> {
+    pub fn accept(
+        &self,
+        lease: Lease
+    ) -> Result<Execution> {
         let (_, slot) = self.owned(lease.id)?;
         if slot.state.load(Ordering::Acquire) != RESOURCE_LIVE {
             return Err(Error::Draining(lease.id));
@@ -653,25 +685,21 @@ impl Pool {
         if !taken {
             return Err(Error::NotReserved(lease));
         }
-        let _ = slot
-            .units
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                let (reserved, active) = unpack_counts(units);
-                Some(pack_counts(reserved.saturating_sub(1), active + 1))
-            });
-        Ok(Execution {
-            table: Arc::clone(&self.table),
-            lease,
-        })
+        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+            let (reserved, active) = unpack_counts(units);
+            Some(pack_counts(reserved.saturating_sub(1), active + 1))
+        });
+        Ok(Execution { table: Arc::clone(&self.table), lease })
     }
 
     /// Whether `lease` is the current state of its resource: the resource
     /// is live in that generation and the fence has not been passed by a
     /// later lease's release.
-    pub fn is_current(&self, lease: Lease) -> bool {
-        self.locate(lease.id)
-            .map(|(_, slot)| slot.is(lease.id.generation()))
-            .unwrap_or(false)
+    pub fn is_current(
+        &self,
+        lease: Lease
+    ) -> bool {
+        self.locate(lease.id).map(|(_, slot)| slot.is(lease.id.generation())).unwrap_or(false)
     }
 
     /// One decision for `key`: snapshot the candidates, ask `policy`, then
@@ -679,7 +707,12 @@ impl Pool {
     /// lost race, retried with a fresh snapshot up to `limits.attempts`
     /// times; after that the answer is [`Plan::Wait`]. Nothing is executed
     /// and nothing is transported here.
-    pub fn acquire(&self, key: Key, limits: &Limits, policy: &dyn Policy) -> Result<Plan> {
+    pub fn acquire(
+        &self,
+        key: Key,
+        limits: &Limits,
+        policy: &dyn Policy
+    ) -> Result<Plan> {
         for _ in 0..limits.attempts.max(1) {
             let candidates = self.candidates(key);
             let budget = self.budget(key);
@@ -690,15 +723,15 @@ impl Pool {
                     }
                     Ok(lease) => return Ok(Plan::RemoteReuse(lease)),
                     Err(Error::Busy(_) | Error::Stale(_) | Error::Draining(_)) => continue,
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(error)
                 },
                 Decision::Create => match self.claim_create(key, limits.max_live) {
                     Ok(permit) => return Ok(Plan::Create(permit)),
                     Err(Error::CreationBudget { .. }) => continue,
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(error)
                 },
                 Decision::Wait => return Ok(Plan::Wait(self.version(key)?)),
-                Decision::Reject(reason) => return Ok(Plan::Reject(reason)),
+                Decision::Reject(reason) => return Ok(Plan::Reject(reason))
             }
         }
         Ok(Plan::Wait(self.version(key)?))
@@ -707,7 +740,11 @@ impl Pool {
     /// Claim one unit of the key's creation budget: live resources plus
     /// claims in progress stay under `max_live`. Drop the permit when the
     /// resource is registered (or the attempt failed).
-    pub fn claim_create(&self, key: Key, max_live: u32) -> Result<CreationPermit> {
+    pub fn claim_create(
+        &self,
+        key: Key,
+        max_live: u32
+    ) -> Result<CreationPermit> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
         self.table
@@ -718,22 +755,20 @@ impl Pool {
                 (live + creating < max_live).then(|| pack_counts(live, creating + 1))
             })
             .map_err(|_| Error::CreationBudget { key, max_live })?;
-        self.table
-            .claims(usize::from(self.table.node()), key_index)
-            .fetch_add(1, Ordering::SeqCst);
-        Ok(CreationPermit {
-            table: Arc::clone(&self.table),
-            key_index,
-        })
+        self.table.claims(usize::from(self.table.node()), key_index).fetch_add(1, Ordering::SeqCst);
+        Ok(CreationPermit { table: Arc::clone(&self.table), key_index })
     }
 
     /// The key's live and in-progress counts, for the caller's growth
     /// decisions.
-    pub fn budget(&self, key: Key) -> (u32, u32) {
+    pub fn budget(
+        &self,
+        key: Key
+    ) -> (u32, u32) {
         let (lo, hi) = key.parts();
         match self.table.key_index(lo, hi) {
             Ok(key_index) => unpack_counts(self.table.key(key_index).counts.load(Ordering::SeqCst)),
-            Err(_) => (0, 0),
+            Err(_) => (0, 0)
         }
     }
 
@@ -749,7 +784,7 @@ impl Pool {
         &self,
         key: Key,
         since: u32,
-        timeout: Duration,
+        timeout: Duration
     ) -> Result<Option<u32>> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
@@ -781,7 +816,10 @@ impl Pool {
     }
 
     /// The key's change count; what [`Pool::wait_capacity`] waits past.
-    pub fn version(&self, key: Key) -> Result<u32> {
+    pub fn version(
+        &self,
+        key: Key
+    ) -> Result<u32> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
         Ok(self.table.key(key_index).changes.load(Ordering::SeqCst))
@@ -790,7 +828,11 @@ impl Pool {
     /// Park the thread until the key has changed since `since`: a release,
     /// an unregister, a closed resource, a dropped claim. Coalescing: any
     /// number of changes wake once. Returns the count now.
-    pub fn wait_capacity(&self, key: Key, since: u32) -> Result<u32> {
+    pub fn wait_capacity(
+        &self,
+        key: Key,
+        since: u32
+    ) -> Result<u32> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
         let slot = self.table.key(key_index);
@@ -817,12 +859,12 @@ impl Pool {
         &self,
         key: Key,
         since: u32,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>
     ) -> std::task::Poll<Result<u32>> {
         let (lo, hi) = key.parts();
         let key_index = match self.table.key_index(lo, hi) {
             Ok(index) => index,
-            Err(error) => return std::task::Poll::Ready(Err(error)),
+            Err(error) => return std::task::Poll::Ready(Err(error))
         };
         let changes = &self.table.key(key_index).changes;
         let now = changes.load(Ordering::SeqCst);
@@ -833,11 +875,7 @@ impl Pool {
             return std::task::Poll::Ready(Err(error));
         }
         let now = changes.load(Ordering::SeqCst);
-        if now != since {
-            std::task::Poll::Ready(Ok(now))
-        } else {
-            std::task::Poll::Pending
-        }
+        if now != since { std::task::Poll::Ready(Ok(now)) } else { std::task::Poll::Pending }
     }
 
     /// Every process generation that still owns a resource here.
@@ -858,14 +896,12 @@ impl Pool {
         let mut seen: Vec<(NodeId, Incarnation)> = Vec::new();
         for slot in self.table.resources() {
             let state = slot.state.load(Ordering::Acquire);
-            if state != crate::layout::RESOURCE_LIVE
-                && state != crate::layout::RESOURCE_DRAINING
-            {
+            if state != crate::layout::RESOURCE_LIVE && state != crate::layout::RESOURCE_DRAINING {
                 continue;
             }
             let owner = (
                 NodeId::new(slot.owner_node.load(Ordering::Acquire)),
-                Incarnation::new(slot.owner_incarnation.load(Ordering::Acquire)),
+                Incarnation::new(slot.owner_incarnation.load(Ordering::Acquire))
             );
             if !seen.contains(&owner) {
                 seen.push(owner);
@@ -879,7 +915,11 @@ impl Pool {
     /// resource that incarnation of `node` owned is closed and the
     /// creation claims it held are returned. Leases it held on others'
     /// resources are those owners' to reconcile.
-    pub fn node_dead(&self, node: NodeId, incarnation: Incarnation) {
+    pub fn node_dead(
+        &self,
+        node: NodeId,
+        incarnation: Incarnation
+    ) {
         self.table.node_dead(node.get(), incarnation.get());
     }
 
@@ -893,7 +933,10 @@ impl Pool {
         self.table.unlink()
     }
 
-    fn locate(&self, id: ResourceId) -> Result<(usize, &ResourceSlot)> {
+    fn locate(
+        &self,
+        id: ResourceId
+    ) -> Result<(usize, &ResourceSlot)> {
         let geometry = self.table.geometry();
         if id.kind() != self.table.kind()
             || usize::from(id.node()) >= geometry.fleet_capacity
@@ -907,7 +950,10 @@ impl Pool {
         Ok((index, &self.table.resources()[index]))
     }
 
-    fn owned(&self, id: ResourceId) -> Result<(usize, &ResourceSlot)> {
+    fn owned(
+        &self,
+        id: ResourceId
+    ) -> Result<(usize, &ResourceSlot)> {
         let (index, slot) = self.locate(id)?;
         if !slot.is(id.generation()) {
             return Err(Error::Stale(id));
@@ -936,7 +982,7 @@ pub enum Plan {
     Create(CreationPermit),
     /// Nothing usable now; wait past this key version and ask again.
     Wait(u32),
-    Reject(Reason),
+    Reject(Reason)
 }
 
 /// The owner's guard over one accepted lease. Dropping it, or
@@ -945,7 +991,7 @@ pub enum Plan {
 /// nothing until the owner's work has actually ended.
 pub struct Execution {
     table: Arc<Table>,
-    lease: Lease,
+    lease: Lease
 }
 
 impl Execution {
@@ -966,14 +1012,11 @@ impl Drop for Execution {
         if slot.generation.load(Ordering::Acquire) != self.lease.id.generation() {
             return;
         }
-        let _ = slot
-            .units
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                let (reserved, active) = unpack_counts(units);
-                Some(pack_counts(reserved, active.saturating_sub(1)))
-            });
-        self.table
-            .key_changed(slot.key_index.load(Ordering::Acquire) as usize);
+        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+            let (reserved, active) = unpack_counts(units);
+            Some(pack_counts(reserved, active.saturating_sub(1)))
+        });
+        self.table.key_changed(slot.key_index.load(Ordering::Acquire) as usize);
     }
 }
 
@@ -982,7 +1025,7 @@ impl Drop for Execution {
 /// registered meanwhile.
 pub struct CreationPermit {
     table: Arc<Table>,
-    key_index: usize,
+    key_index: usize
 }
 
 impl CreationPermit {
@@ -991,10 +1034,11 @@ impl CreationPermit {
 }
 
 impl fmt::Debug for CreationPermit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CreationPermit")
-            .field("key_index", &self.key_index)
-            .finish_non_exhaustive()
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
+        f.debug_struct("CreationPermit").field("key_index", &self.key_index).finish_non_exhaustive()
     }
 }
 
@@ -1006,14 +1050,13 @@ impl Drop for CreationPermit {
             |counts| {
                 let (live, creating) = unpack_counts(counts);
                 Some(pack_counts(live, creating.saturating_sub(1)))
-            },
+            }
         );
-        let _ = self
-            .table
-            .claims(usize::from(self.table.node()), self.key_index)
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
-                held.checked_sub(1)
-            });
+        let _ = self.table.claims(usize::from(self.table.node()), self.key_index).try_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |held| held.checked_sub(1)
+        );
         self.table.key_changed(self.key_index);
     }
 }
@@ -1035,17 +1078,30 @@ pub(crate) fn waits_supported() -> bool {
 /// Park until the word moves or `timeout` passes. `false` is the
 /// timeout and nothing else.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-pub(crate) fn wait_on_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> Result<bool> {
+pub(crate) fn wait_on_timeout(
+    word: &AtomicU32,
+    expected: u32,
+    timeout: Duration
+) -> Result<bool> {
     orbit_core::sync::wait_word_timeout(word, expected, timeout).map_err(Error::Io)
 }
 
-pub(crate) fn wait_on(word: &AtomicU32, expected: u32) -> Result<()> {
+pub(crate) fn wait_on(
+    word: &AtomicU32,
+    expected: u32
+) -> Result<()> {
     orbit_core::sync::wait_word(word, expected).map_err(Error::Io)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
-pub(crate) fn wait_on(_word: &AtomicU32, _expected: u32) -> Result<()> {
-    Err(Error::Io(std::io::Error::new(std::io::ErrorKind::Unsupported, "orbit-pool needs a platform that can wait on a shared word")))
+pub(crate) fn wait_on(
+    _word: &AtomicU32,
+    _expected: u32
+) -> Result<()> {
+    Err(Error::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "orbit-pool needs a platform that can wait on a shared word"
+    )))
 }
 
 pub(crate) fn wake_on(word: &AtomicU32) {
@@ -1068,7 +1124,7 @@ mod tests {
 
     use super::{
         Error, Incarnation, Key, Limits, LocalFirst, LocalOnly, POOL_RESOURCE_LANE_CAPACITY, Plan,
-        Pool, State,
+        Pool, State
     };
 
     fn pool(name: &'static str) -> Pool {
@@ -1152,9 +1208,8 @@ mod tests {
     fn an_owner_far_behind_makes_the_resource_refuse_reservations() {
         let pool = pool("pool-pending");
         let id = pool.register(KEY, u32::MAX).unwrap();
-        let leases = (0..super::PENDING_RESERVATIONS)
-            .map(|_| pool.reserve(id).unwrap())
-            .collect::<Vec<_>>();
+        let leases =
+            (0..super::PENDING_RESERVATIONS).map(|_| pool.reserve(id).unwrap()).collect::<Vec<_>>();
         assert!(matches!(pool.reserve(id), Err(Error::Busy(_))));
         let running = pool.accept(leases[0]).unwrap();
         assert!(pool.reserve(id).is_ok());
@@ -1165,9 +1220,7 @@ mod tests {
     fn capacity_counts_and_drain_refuses_new_leases() {
         let pool = pool("pool-capacity");
         let id = pool.register(KEY, 3).unwrap();
-        let leases = (0..3)
-            .map(|_| pool.reserve(id).unwrap())
-            .collect::<Vec<_>>();
+        let leases = (0..3).map(|_| pool.reserve(id).unwrap()).collect::<Vec<_>>();
         assert!(matches!(pool.reserve(id), Err(Error::Busy(_))));
         let running = pool.accept(leases[0]).unwrap();
         pool.drain(id).unwrap();
@@ -1224,10 +1277,7 @@ mod tests {
                 std::thread::spawn(move || pool.claim_create(KEY, 3).ok())
             })
             .collect::<Vec<_>>();
-        let held = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>();
+        let held = threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
         assert_eq!(held.iter().filter(|claim| claim.is_some()).count(), 3);
     }
 
@@ -1288,10 +1338,7 @@ mod tests {
     #[test]
     fn acquire_walks_reuse_create_and_wait() {
         let pool = pool("pool-acquire");
-        let limits = Limits {
-            max_live: 2,
-            attempts: 2,
-        };
+        let limits = Limits { max_live: 2, attempts: 2 };
         // Nothing yet: create, within the budget.
         let Plan::Create(permit) = pool.acquire(KEY, &limits, &LocalFirst).unwrap() else {
             panic!("expected Create");
@@ -1304,26 +1351,14 @@ mod tests {
         };
         let execution = pool.accept(lease).unwrap();
         // Busy, budget for one more: create.
-        assert!(matches!(
-            pool.acquire(KEY, &limits, &LocalFirst).unwrap(),
-            Plan::Create(_)
-        ));
+        assert!(matches!(pool.acquire(KEY, &limits, &LocalFirst).unwrap(), Plan::Create(_)));
         // Budget spent while the permit above dropped? It did drop: claim
         // it for real, then the only answer left is Wait.
         let _held = pool.claim_create(KEY, 2).unwrap();
-        assert!(matches!(
-            pool.acquire(KEY, &limits, &LocalFirst).unwrap(),
-            Plan::Wait(_)
-        ));
-        assert!(matches!(
-            pool.acquire(KEY, &limits, &LocalOnly).unwrap(),
-            Plan::Wait(_)
-        ));
+        assert!(matches!(pool.acquire(KEY, &limits, &LocalFirst).unwrap(), Plan::Wait(_)));
+        assert!(matches!(pool.acquire(KEY, &limits, &LocalOnly).unwrap(), Plan::Wait(_)));
         execution.complete();
-        assert!(matches!(
-            pool.acquire(KEY, &limits, &LocalOnly).unwrap(),
-            Plan::LocalReuse(_)
-        ));
+        assert!(matches!(pool.acquire(KEY, &limits, &LocalOnly).unwrap(), Plan::LocalReuse(_)));
         let _ = id;
     }
 }

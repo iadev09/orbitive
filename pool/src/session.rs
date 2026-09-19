@@ -20,7 +20,10 @@ use orbit_stream::exchange::{
 };
 use orbit_stream::{ReadHalf, Streams, Ticket, WriteHalf};
 
-use crate::{Error, Execution, Incarnation, Lease, Pool, ResourceId, Result};
+use crate::{
+    CreationPermit, Error, Execution, Incarnation, Lease, Limits, Plan, Policy, Pool, Reason,
+    ResourceId, Result
+};
 
 /// Bytes the lease takes on the wire, ahead of the consumer's own first
 /// byte. A stream whose ring cannot hold this much cannot carry a
@@ -35,6 +38,26 @@ const VERSION: u8 = 1;
 /// returns their slots to the payload arena.
 pub struct ExchangeSessionStart {
     payload: PayloadChunk
+}
+
+/// One ownership decision with the generic exchange rendezvous already
+/// applied. This is an optional composition helper: callers with a more
+/// specialized policy may continue using [`Pool::acquire`], [`Pool::accept`]
+/// and [`Pool::open_exchange_session`] independently.
+pub enum ExchangeSessionPlan {
+    /// The selected resource belongs to this process and its exact lease has
+    /// already been accepted. Use the local object directly.
+    Local(Execution),
+    /// The selected resource belongs to another process. Side A is open and
+    /// its lease plus application metadata have been offered to that owner.
+    Remote(ExchangeEndpoint),
+    /// No reusable resource won; create and register one while this budget
+    /// guard is held.
+    Create(CreationPermit),
+    /// Capacity may become available after this key version.
+    Wait(u32),
+    /// The caller's policy deliberately refused the acquisition.
+    Reject(Reason)
 }
 
 impl ExchangeSessionStart {
@@ -76,6 +99,28 @@ fn decode(frame: &[u8; SESSION_FRAME]) -> Result<Lease> {
 }
 
 impl Pool {
+    /// Apply one pool ownership decision and compose only the generic session
+    /// mechanics. Protocol meaning stays with the caller: `metadata` is opaque,
+    /// and `exchanges` may use either shared or directional payload arenas.
+    pub fn acquire_exchange_session(
+        &self,
+        key: crate::Key,
+        limits: &Limits,
+        policy: &dyn Policy,
+        exchanges: &Exchanges,
+        metadata: &[u8]
+    ) -> Result<ExchangeSessionPlan> {
+        match self.acquire(key, limits, policy)? {
+            Plan::LocalReuse(lease) => self.accept(lease).map(ExchangeSessionPlan::Local),
+            Plan::RemoteReuse(lease) => self
+                .open_exchange_session(lease, exchanges, metadata)
+                .map(ExchangeSessionPlan::Remote),
+            Plan::Create(permit) => Ok(ExchangeSessionPlan::Create(permit)),
+            Plan::Wait(version) => Ok(ExchangeSessionPlan::Wait(version)),
+            Plan::Reject(reason) => Ok(ExchangeSessionPlan::Reject(reason))
+        }
+    }
+
     /// Reach the owner of `lease` over `streams`: a stream of this node's
     /// own, the lease in its first frame, and the offer that tells the
     /// owner to take it. The halves that come back carry the consumer's
@@ -203,6 +248,23 @@ impl Pool {
         let execution = self.accept(lease)?;
         Ok((execution, client, ExchangeSessionStart { payload }))
     }
+
+    /// Poll for the next offered exchange and validate its exact pool lease
+    /// before returning anything to a protocol handler. Runtime services may
+    /// use this directly without duplicating the take/open/accept sequence.
+    pub fn poll_accept_exchange_session(
+        &self,
+        exchanges: &Exchanges,
+        cx: &mut std::task::Context<'_>
+    ) -> std::task::Poll<Result<(Execution, ExchangeEndpoint, ExchangeSessionStart)>> {
+        match exchanges.poll_take_offer(cx) {
+            std::task::Poll::Ready(Ok(ticket)) => {
+                std::task::Poll::Ready(self.accept_exchange_session(exchanges, ticket))
+            }
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(Error::from(error))),
+            std::task::Poll::Pending => std::task::Poll::Pending
+        }
+    }
 }
 
 impl From<orbit_stream::Error> for Error {
@@ -281,5 +343,42 @@ mod tests {
         assert_eq!(&*body, b"body");
         drop((start, body, execution));
         assert!(pool.reserve(resource).is_ok());
+    }
+
+    #[test]
+    fn acquisition_helper_accepts_a_local_resource_without_an_exchange_hop() {
+        use std::sync::Arc;
+
+        use orbit_core::Fleet;
+        use orbit_stream::exchange::{ExchangeSpec, PayloadArenaSpec};
+        use orbit_stream::{Incarnation as StreamIncarnation, StreamSpec};
+
+        let fleet = Arc::new(Fleet::join("pool-local-session-plan", 1).expect("fleet"));
+        let pool = Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
+        pool.reset_all();
+        let key = crate::Key::new(10);
+        let resource = pool.register(key, 1).expect("resource");
+        let exchanges = Exchanges::open(
+            fleet,
+            StreamIncarnation::new(1),
+            ExchangeSpec::new(StreamSpec::new(212, 4, 512), PayloadArenaSpec::new(213, 8, 64))
+        )
+        .expect("exchanges");
+        exchanges.reset_all();
+
+        let plan = pool
+            .acquire_exchange_session(
+                key,
+                &Limits { max_live: 1, attempts: 1 },
+                &crate::LocalFirst,
+                &exchanges,
+                b"unused locally"
+            )
+            .expect("acquisition");
+        let ExchangeSessionPlan::Local(execution) = plan else {
+            panic!("a local candidate must stay on the local fast path")
+        };
+        assert_eq!(execution.lease().id, resource);
+        assert!(exchanges.take_offer().is_none());
     }
 }
