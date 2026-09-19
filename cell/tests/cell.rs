@@ -170,3 +170,47 @@ fn text_readers_never_see_a_torn_write() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     thread.join().expect("writer");
 }
+
+#[test]
+fn racing_callers_divide_a_limit_without_ever_passing_it() {
+    // What `fetch_add` plus a test cannot do. Eight threads take from one
+    // cell until nothing is left; between them they must take the limit
+    // exactly, and the cell must never hold more than it. `fetch_add` here
+    // would overshoot by up to seven, because each caller's add lands
+    // before it can learn it went too far.
+    const LIMIT: i64 = 200_000;
+    const THREADS: usize = 8;
+
+    let cells = Arc::new(Cells::new(Arc::new(Fleet::join("cell-claim", 1).expect("fleet"))).expect("cells"));
+    let counter = Arc::new(cells.allocate(0_i64).expect("allocate"));
+
+    let takers: Vec<_> = (0..THREADS)
+        .map(|n| {
+            let counter = Arc::clone(&counter);
+            // Uneven chunks on purpose: the last taker of each size has to
+            // get a remainder rather than be refused.
+            let chunk = [1_i64, 3, 7, 16][n % 4];
+            std::thread::spawn(move || {
+                let mut mine = 0_i64;
+                while let Ok(orbit_cell::Claim::Took { taken, after }) =
+                    counter.add_until(chunk, LIMIT)
+                {
+                    assert!(after <= LIMIT, "the cell passed the limit: {after}");
+                    assert!(taken > 0 && taken <= chunk, "took {taken} of {chunk}");
+                    mine += taken;
+                }
+                mine
+            })
+        })
+        .collect();
+
+    let shares: Vec<i64> = takers.into_iter().map(|t| t.join().expect("join")).collect();
+
+    assert_eq!(shares.iter().sum::<i64>(), LIMIT, "the shares must add up to the limit");
+    assert_eq!(counter.load().expect("load"), LIMIT, "the cell must hold exactly the limit");
+    assert_eq!(
+        counter.add_until(1, LIMIT).expect("claim"),
+        orbit_cell::Claim::Exhausted,
+        "a claim on a finished limit takes nothing"
+    );
+}

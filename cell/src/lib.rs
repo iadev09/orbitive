@@ -449,6 +449,21 @@ impl Cells {
     }
 }
 
+/// What [`Orbital::add_until`] did. A bounded add either takes some of what
+/// is left or finds nothing left; there is no third answer, and no value
+/// past the limit is ever written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Claim {
+    /// `taken` can be less than asked for: the last caller gets the
+    /// remainder rather than being refused, so no unit goes unclaimed.
+    Took {
+        taken: i64,
+        after: i64,
+    },
+    /// The limit was already reached. Nothing was added, nothing is left.
+    Exhausted,
+}
+
 /// One cell, typed. Cheap to clone; every clone is the same place.
 #[derive(Clone)]
 pub struct Orbital<T: CellType> {
@@ -552,6 +567,64 @@ impl Orbital<i64> {
 
     pub fn fetch_sub(&self, by: i64) -> Result<i64> {
         self.fetch_add(by.checked_neg().ok_or(Error::Overflow)?)
+    }
+
+    /// Add up to `by` while the value stays at or under `limit`, in one
+    /// compare-and-swap, and say what was taken.
+    ///
+    /// This is the operation a fleet needs to divide a fixed amount of work
+    /// between processes that cannot see each other. `fetch_add` followed by
+    /// a test cannot do it: the add lands before the caller learns it went
+    /// too far, so N callers overshoot by up to N-1 between them. Here the
+    /// bound is decided inside the swap, so the value **never** passes
+    /// `limit` however many callers race, and the one that finds less than
+    /// `by` left takes the remainder instead of being turned away.
+    ///
+    /// Taking more than one at a time is how the cost comes down: the
+    /// contended word is touched once per claim rather than once per unit.
+    /// `limit` is the ceiling for the total, never for a single call.
+    ///
+    /// Overflow needs no separate guard: a result that cannot pass `limit`
+    /// cannot pass `i64::MAX` either.
+    ///
+    /// **A claim is not a lease.** What this hands back is gone from the
+    /// total the moment the swap lands, and nothing gives it back: a caller
+    /// that takes a hundred, does forty and then dies leaves sixty that
+    /// nobody will ever do, while the count says all hundred were taken. So
+    /// `by` is not only a speed dial, it is the exposure — the most one
+    /// death can lose. It is the same trade a database sequence makes with
+    /// its cache size, and it leaves the same kind of gap. Work that must
+    /// not be lost wants a lease whose owner notices a death, which is
+    /// `orbit-pool`, not a counter.
+    pub fn add_until(&self, by: i64, limit: i64) -> Result<Claim> {
+        if by <= 0 {
+            return Err(Error::Overflow);
+        }
+        let slot = self.slot()?;
+        loop {
+            let current = slot.value.load(Ordering::Acquire) as i64;
+            if current >= limit {
+                return Ok(Claim::Exhausted);
+            }
+            let taken = by.min(limit - current);
+            let after = current + taken;
+            if slot
+                .value
+                .compare_exchange(
+                    current as u64,
+                    after as u64,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                slot.changed();
+                return Ok(Claim::Took { taken, after });
+            }
+            // Lost the race; somebody else moved the value. Read it again
+            // rather than retry blind: what is left may now be less, or
+            // nothing.
+        }
     }
 }
 
