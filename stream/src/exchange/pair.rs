@@ -9,8 +9,8 @@ use orbit_core::{Fleet, NodeId};
 use super::arena::Publication;
 use super::protocol::CONTROL_FRAME_BYTES;
 use super::{
-    ChunkDescriptor, ControlEvent, ExchangeId, Flow, PayloadArena, PayloadArenaSpec, PayloadChunk,
-    ResetCode
+    ChunkDescriptor, ChunkPlan, ControlEvent, ExchangeId, Flow, PayloadArena, PayloadArenaSpec,
+    PayloadChunk, ResetCode
 };
 use crate::{Error, Incarnation, ReadHalf, Result, Side, StreamSpec, Streams, Ticket, WriteHalf};
 
@@ -724,6 +724,13 @@ impl Sender {
         self.0.flow
     }
 
+    /// Plan a known payload for this direction's actual arena geometry.
+    pub fn plan_chunks(
+        &self,
+        data_bytes: usize
+    ) -> Result<ChunkPlan> {
+        self.0.arena.plan_chunks(data_bytes)
+    }
     pub fn start(
         &mut self,
         metadata: Option<&[u8]>

@@ -37,6 +37,16 @@ payload length. A 777-byte chunk in a 256-byte-slot arena therefore occupies
 four slots and produces one descriptor. A later chunk gets another extent
 and another descriptor; chunks are never pointer chains.
 
+Known payloads use one request/response-agnostic planner instead of repeating
+slot arithmetic in every adapter. `ChunkPlan::new(data_bytes, slot_bytes)`
+uses the same-host SHM benchmark-backed 64 KiB default and reports chunk count,
+full-chunk bytes/slots and the exact final chunk. `PayloadArenaSpec::plan_chunks`
+and `Sender::plan_chunks` apply the same rule while also clamping a chunk to
+one producer lane. A slot larger than 64 KiB becomes one chunk unit; a final
+short chunk keeps its exact byte length. External network bandwidth is not an
+input: slower consumption already propagates through arena credit and
+backpressure.
+
 `start(Some(bytes))` and `data(bytes)` copy existing bytes into an extent.
 When the application is producing or encoding the bytes itself,
 `reserve_start(len)` and `reserve_data(len)` return the writable extent

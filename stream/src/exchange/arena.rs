@@ -9,7 +9,7 @@ use orbit_core::Fleet;
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
-use super::ChunkDescriptor;
+use super::{ChunkDescriptor, ChunkPlan, DEFAULT_CHUNK_BYTES};
 use crate::wake::{Doorstep, Driver};
 use crate::{Error, Incarnation, Result, lock_unpoisoned};
 
@@ -50,6 +50,17 @@ impl PayloadArenaSpec {
         payload_len: usize
     ) -> usize {
         payload_len.div_ceil(self.slot_size)
+    }
+
+    /// Plan a known payload with the benchmark-backed default chunk target,
+    /// clamped so one chunk always fits in this node lane.
+    pub const fn plan_chunks(
+        self,
+        data_bytes: usize
+    ) -> Option<ChunkPlan> {
+        let lane_bytes = self.lane_bytes();
+        let limit = if DEFAULT_CHUNK_BYTES < lane_bytes { DEFAULT_CHUNK_BYTES } else { lane_bytes };
+        ChunkPlan::for_limit(data_bytes, self.slot_size, limit)
     }
 
     fn validate(self) -> Result<()> {
@@ -525,6 +536,16 @@ impl PayloadArena {
         self.arena.geometry.slots_per_node
     }
 
+    pub fn plan_chunks(
+        &self,
+        data_bytes: usize
+    ) -> Result<ChunkPlan> {
+        PayloadArenaSpec::new(self.kind(), self.slots_per_node(), self.slot_size())
+            .plan_chunks(data_bytes)
+            .ok_or_else(|| {
+                Error::Malformed("payload arena cannot plan zero-sized geometry".to_owned())
+            })
+    }
     /// Park this thread until a run large enough for `payload_len` may be
     /// available. Allocation still decides the race after the wake.
     pub fn wait_available(
