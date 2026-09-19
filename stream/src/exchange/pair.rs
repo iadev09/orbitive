@@ -873,6 +873,40 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_control_commit_returns_its_payload_credit() {
+        let exchanges = Exchanges::open(
+            Arc::new(Fleet::join("exchange-failed-commit-test", 2).expect("fleet")),
+            Incarnation::new(1),
+            ExchangeSpec::new(
+                StreamSpec::new(236, 8, CONTROL_FRAME_BYTES),
+                PayloadArenaSpec::new(237, 1, 64),
+                PayloadArenaSpec::new(238, 1, 64),
+            ),
+        )
+        .expect("exchanges");
+        let (mut server, ticket) = exchanges.create().expect("server");
+        let mut client = exchanges.open_client(ticket).expect("client");
+
+        server.request().start(None).expect("start fills control ring");
+        let mut pending = server.request().reserve_data(64).expect("reserve only payload slot");
+        pending.fill(7);
+        assert!(matches!(pending.commit(), Err(Error::WouldBlock)));
+
+        assert!(matches!(
+            client.request().try_next(),
+            Ok(FlowEvent::Start { metadata: None })
+        ));
+        let mut retry = server.request().reserve_data(64).expect("failed commit returned credit");
+        retry.fill(9);
+        retry.commit().expect("retry commit");
+        let received = match client.request().try_next().expect("retry data") {
+            FlowEvent::Data(chunk) => chunk,
+            _ => panic!("expected retry data"),
+        };
+        assert_eq!(&*received, &[9; 64]);
+    }
+
+    #[test]
     fn reset_is_terminal_for_only_its_own_flow() {
         let exchanges = exchanges();
         let (server, ticket) = exchanges.create().expect("server");
