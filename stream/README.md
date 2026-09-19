@@ -38,6 +38,48 @@ The session API is expected to move as well. A release does not yet carry a
 verdict — the absence of one should mean *dirty* and today means nothing —
 and there is no error for an owner that has gone away.
 
+### What is rejected today, and what would take the rejection back
+
+Written down so that "we fixed it" is a claim someone can check rather than a
+feeling. Each of these is a door that is closed for a measured reason, and
+each says what would open it.
+
+**1. The async adapters, as they stand.** Moving the same bytes through
+`AsyncRead`/`AsyncWrite` parks three to five times as often as the blocking
+path does, and runs at about a third of its throughput — 2.00 parks per
+ring-ful against 9.38 on a bare-metal Xeon, 1.97 against 5.75 on a UTM guest.
+A blocking reader parks on the direction's own word and is woken by the
+writer; an async one goes through the doorbell to a driver thread, which wakes
+a task, which wakes a runtime worker. One hop is the design, three is the
+adapter.
+
+> *Reversed when* `tests/wakeups.rs` shows the async path within about twice
+> the blocking one. That test already fails if it gets worse, and the numbers
+> above are in its header with the date they were taken.
+
+**2. A relay where a socket would do.** Against a Unix socket a dial costs
+about 1.4 µs and one relayed request about 50 µs, so borrowing is roughly
+thirty-five times the price of opening your own. Against a TLS handshake at
+2033 µs the break-even is near fifty requests, which makes a borrow a
+cold-start and burst tool and not a steady-state one.
+
+> *Reversed when* `relay − local` on the host in question falls below the
+> caller's cost of dialling. This crate cannot know that cost — it belongs to
+> the origin, not to us — but `cargo bench -p orbit-pool --bench load` prints
+> both halves of the subtraction, so the caller only has to divide.
+
+**3. Not rejected, unresolved: what a borrow costs per byte.** One-way
+streaming through the transport runs at ~0.25 µs/KiB. A concurrent
+request-and-response borrow of the same size measured ~2 µs/KiB. The gap is
+not the rendezvous — amortised over a megabyte that is 0.035 µs/KiB — so it is
+the round trip, the concurrency, or something not yet looked at. **Nobody has
+isolated it**, and until someone does, any claim about what a relay costs for
+a real body is about the shape it was measured in rather than about the ring.
+
+> *Settled by* a measurement that holds one thing at a time: the same bytes,
+> one way and then as a round trip, at one caller and then at eight.
+
+
 
 ```rust
 use std::sync::Arc;
