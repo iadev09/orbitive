@@ -6,6 +6,7 @@ authors.workspace = true
 description = "Fleet-shared typed atomic cells over Orbit shared memory, addressed by id rather than by name."
 license.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/orbit-cell"
 keywords = ["cell", "shm", "fleet", "orbit", "atomic"]
 categories = ["concurrency"]
 exclude.workspace = true

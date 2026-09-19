@@ -1,6 +1,9 @@
 [package]
 name = "orbit-stream"
-version.workspace = true
+# Alpha on its own track: the crate works, but what it is for is still
+# being decided, and a pre-release says that where a README cannot --
+# `cargo add orbit-stream` will not pick it up by accident.
+version = "0.4.0-alpha.1"
 edition.workspace = true
 authors.workspace = true
 description = "Bounded async byte streams backed by memory or shared memory for process fleets."
