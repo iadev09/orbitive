@@ -14,7 +14,7 @@ use crate::wake::{Doorstep, Driver};
 use crate::{Error, Incarnation, Result, lock_unpoisoned};
 
 const MAGIC: u32 = 0x4F_50_41_59; // "OPAY"
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 
 const SLOT_FREE: u8 = 0;
 const SLOT_RESERVED: u8 = 1;
@@ -122,15 +122,19 @@ impl Header {
     }
 }
 
-#[repr(C, align(16))]
+#[repr(C, align(8))]
 struct SlotMeta {
     state: AtomicU8,
-    _reserved: [u8; 7],
+    _reserved: AtomicU8,
+    reader_node: std::sync::atomic::AtomicU16,
+    allocation_first: AtomicU64,
     generation: AtomicU64,
+    producer_incarnation: AtomicU64,
+    reader_incarnation: AtomicU64,
 }
 
 const _: () = assert!(size_of::<Header>() == 64);
-const _: () = assert!(size_of::<SlotMeta>() == 16);
+const _: () = assert!(size_of::<SlotMeta>() == 40);
 
 #[derive(Clone, Copy)]
 struct Geometry {
@@ -201,7 +205,7 @@ struct Arena {
     geometry: Geometry,
     kind: u8,
     node: u16,
-    _incarnation: Incarnation,
+    incarnation: Incarnation,
     allocation: Mutex<usize>,
     credit_wakers: Mutex<Vec<Waker>>,
     driver: Mutex<Option<Driver>>,
@@ -267,8 +271,16 @@ impl Arena {
             generation = self.header().next_generation.fetch_add(1, Ordering::Relaxed);
         }
         for slot in &self.metadata()[first..first + count] {
+            slot.allocation_first.store(first as u64, Ordering::Relaxed);
             slot.generation.store(generation, Ordering::Relaxed);
+            slot.producer_incarnation
+                .store(self.incarnation.get(), Ordering::Relaxed);
+            slot.reader_node.store(u16::MAX, Ordering::Relaxed);
+            slot.reader_incarnation.store(0, Ordering::Relaxed);
         }
+        self.metadata()[first]
+            .state
+            .store(SLOT_RESERVED, Ordering::Release);
         *hint = (candidate + count) & (self.geometry.slots_per_node - 1);
         Ok(Publication {
             arena: Arc::clone(self),
@@ -376,6 +388,41 @@ impl Arena {
         }
         Ok(())
     }
+
+    fn extent_count(&self, first: usize, generation: u64) -> usize {
+        let lane_end = (first / self.geometry.slots_per_node + 1) * self.geometry.slots_per_node;
+        self.metadata()[first..lane_end]
+            .iter()
+            .take_while(|slot| {
+                slot.allocation_first.load(Ordering::Acquire) as usize == first
+                    && slot.generation.load(Ordering::Acquire) == generation
+            })
+            .count()
+    }
+
+    fn node_dead(&self, node: u16, incarnation: Incarnation) {
+        let metadata = self.metadata();
+        for first in 0..metadata.len() {
+            let slot = &metadata[first];
+            let state = slot.state.load(Ordering::Acquire);
+            let producer_node = first / self.geometry.slots_per_node;
+            let abandoned_publication = state == SLOT_RESERVED
+                && slot.allocation_first.load(Ordering::Acquire) as usize == first
+                && producer_node == usize::from(node)
+                && slot.producer_incarnation.load(Ordering::Acquire) == incarnation.get();
+            let abandoned_read = state == SLOT_READING
+                && slot.reader_node.load(Ordering::Acquire) == node
+                && slot.reader_incarnation.load(Ordering::Acquire) == incarnation.get();
+            if !abandoned_publication && !abandoned_read {
+                continue;
+            }
+            let generation = slot.generation.load(Ordering::Acquire);
+            let count = self.extent_count(first, generation);
+            if count != 0 {
+                self.release(first, count, generation);
+            }
+        }
+    }
 }
 
 impl Doorstep for Arena {
@@ -469,6 +516,14 @@ impl PayloadArena {
         crate::wake_on(&header.credit_generation);
     }
 
+    /// Reclaim only allocations owned by a process incarnation whose death
+    /// was confirmed by the embedder. Committed unread chunks survive their
+    /// producer; a dead reader's held chunks and an unpublished reservation
+    /// do not.
+    pub fn node_dead(&self, node: orbit_core::NodeId, incarnation: Incarnation) {
+        self.arena.node_dead(node.get(), incarnation);
+    }
+
     /// Remove the arena's SHM name. Existing mappings remain valid.
     #[cfg(unix)]
     pub fn unlink(&self) -> Result<()> {
@@ -539,6 +594,12 @@ impl PayloadArena {
                 "chunk allocation is stale or already consumed".to_owned(),
             ));
         }
+        slots[0]
+            .reader_incarnation
+            .store(self.arena.incarnation.get(), Ordering::Release);
+        slots[0]
+            .reader_node
+            .store(self.arena.node, Ordering::Release);
         Ok(PayloadChunk {
             arena: Arc::clone(&self.arena),
             first,
@@ -655,12 +716,12 @@ fn open(
     };
     let mut arenas = lock_unpoisoned(&ARENAS);
     arenas.retain(|_, arena| arena.strong_count() > 0);
-    if let Some(arena) = arenas.get(&key).and_then(Weak::upgrade) {
-        if arena._incarnation != incarnation {
+        if let Some(arena) = arenas.get(&key).and_then(Weak::upgrade) {
+        if arena.incarnation != incarnation {
             return Err(Error::Malformed(format!(
                 "this process already opened payload kind {} as incarnation {}",
                 spec.kind,
-                arena._incarnation.get()
+                arena.incarnation.get()
             )));
         }
         if arena.geometry.slots_per_node != spec.slots_per_node
@@ -696,7 +757,7 @@ fn open(
         geometry,
         kind: spec.kind,
         node: fleet.node_id().get(),
-        _incarnation: incarnation,
+        incarnation,
         allocation: Mutex::new(0),
         credit_wakers: Mutex::new(Vec::new()),
         driver: Mutex::new(None),
@@ -831,5 +892,48 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         drop(chunk);
         waiter.join().expect("waiter").expect("credit wake");
+    }
+
+    #[test]
+    fn death_reclaims_only_unpublished_or_held_allocations() {
+        let arena = PayloadArena::open(
+            fleet(),
+            Incarnation::new(7),
+            PayloadArenaSpec::new(245, 2, 64),
+        )
+        .expect("arena");
+
+        let abandoned = arena.arena.reserve(128).expect("reserved by producer");
+        arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(7));
+        let replacement = arena.publish(&vec![2; 128]).expect("producer credit reclaimed");
+        drop(abandoned);
+        let replacement_descriptor = descriptor(&replacement, 2);
+        replacement.mark_published();
+        let held = arena.read(replacement_descriptor).expect("held by reader");
+
+        arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(6));
+        assert!(matches!(arena.publish(&[3]), Err(Error::PayloadFull { .. })));
+        arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(7));
+        let after_reader_death = arena.publish(&vec![4; 128]).expect("reader credit reclaimed");
+        drop(held);
+        let after_descriptor = descriptor(&after_reader_death, 3);
+        after_reader_death.mark_published();
+        assert!(arena.read(after_descriptor).is_ok());
+    }
+
+    #[test]
+    fn committed_unread_payload_survives_its_producer() {
+        let arena = PayloadArena::open(
+            fleet(),
+            Incarnation::new(8),
+            PayloadArenaSpec::new(246, 2, 64),
+        )
+        .expect("arena");
+        let publication = arena.publish(b"survives").expect("publication");
+        let descriptor = descriptor(&publication, 1);
+        publication.mark_published();
+
+        arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(8));
+        assert_eq!(&*arena.read(descriptor).expect("committed chunk"), b"survives");
     }
 }

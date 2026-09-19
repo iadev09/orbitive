@@ -178,6 +178,14 @@ impl Exchanges {
         &self.control
     }
 
+    /// Apply a confirmed process-death report to control ownership and both
+    /// payload arenas. This is never inferred from a replacement attaching.
+    pub fn node_dead(&self, node: NodeId, incarnation: Incarnation) {
+        self.control.node_dead(node, incarnation);
+        self.request_payload.node_dead(node, incarnation);
+        self.response_payload.node_dead(node, incarnation);
+    }
+
     /// Quiescent-owner maintenance only. Attaching a replacement process
     /// never resets an exchange table or either payload arena implicitly.
     pub fn reset_all(&self) {
