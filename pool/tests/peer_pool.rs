@@ -11,7 +11,7 @@
 //! crosses afterwards — here, text to uppercase — is this test's.
 
 #![cfg(all(
-    feature = "stream",
+    feature = "pool-stream",
     any(target_os = "linux", target_os = "freebsd", target_os = "macos")
 ))]
 

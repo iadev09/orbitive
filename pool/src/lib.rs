@@ -37,7 +37,7 @@ use orbit_core::{Fleet, NetId64, NodeId, OrbitEpoch};
 
 mod layout;
 mod policy;
-#[cfg(feature = "stream")]
+#[cfg(feature = "pool-stream")]
 mod session;
 mod table;
 
@@ -49,7 +49,7 @@ use layout::{
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use orbit_core::readiness::Readiness;
 pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
-#[cfg(feature = "stream")]
+#[cfg(feature = "pool-stream")]
 pub use session::{ExchangeSessionPlan, ExchangeSessionStart};
 use table::Table;
 pub use table::{segment_size, segment_size_for};

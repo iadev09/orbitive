@@ -11,7 +11,9 @@ keywords = ["pool", "shm", "fleet", "orbit", "ring"]
 exclude.workspace = true
 
 [features]
-stream = ["dep:orbit-stream"]
+pool-stream = ["dep:orbit-stream"]
+# Compatibility alias for callers of the pre-release API.
+stream = ["pool-stream"]
 
 [dependencies]
 orbit-core.workspace = true
@@ -27,4 +29,4 @@ libc.workspace = true
 [[bench]]
 name = "load"
 harness = false
-required-features = ["stream"]
+required-features = ["pool-stream"]

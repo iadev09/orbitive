@@ -13,10 +13,16 @@ processes but numbers: the connection stays where it is. Applications
 normally use it through `orbitive::pool`.
 
 Bringing the lease to its owner is the one step every consumer shares and
-every consumer can get wrong, so the `stream` feature owns it:
+every consumer can get wrong, so the optional `pool-stream` feature owns it:
 `open_session` reaches the owner over an `orbit-stream` stream you supply,
 `accept_session` reads the lease and accepts it exactly once before a byte
 of your payload is trusted, and what crosses afterwards is yours alone.
+
+Without `pool-stream`, this crate still owns the complete fleet-wide pool
+ledger: resource census, capacity, leases, creation claims, generations and
+waiting. The feature adds only the reusable ceremony that binds a remote
+lease to a paired byte exchange; it does not change pool policy or make
+streaming mandatory.
 
 ```rust
 use std::sync::Arc;
