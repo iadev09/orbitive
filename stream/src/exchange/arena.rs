@@ -894,6 +894,35 @@ mod tests {
         waiter.join().expect("waiter").expect("credit wake");
     }
 
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn returned_credit_wakes_a_pending_task() {
+        use std::future::poll_fn;
+
+        let arena = PayloadArena::open(
+            fleet(),
+            Incarnation::new(1),
+            PayloadArenaSpec::new(247, 2, 64),
+        )
+        .expect("arena");
+        let publication = arena.publish(&vec![1; 128]).expect("fills lane");
+        let descriptor = descriptor(&publication, 1);
+        publication.mark_published();
+        let chunk = arena.read(descriptor).expect("held chunk");
+
+        let waiting = arena.clone();
+        let waiter = tokio::spawn(async move {
+            poll_fn(|cx| waiting.poll_available(1, cx)).await
+        });
+        tokio::task::yield_now().await;
+        drop(chunk);
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("credit task stayed pending")
+            .expect("credit task")
+            .expect("credit wake");
+    }
+
     #[test]
     fn death_reclaims_only_unpublished_or_held_allocations() {
         let arena = PayloadArena::open(
