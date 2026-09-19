@@ -154,6 +154,15 @@ pub enum Error {
     Full {
         capacity: usize,
     },
+    /// The producer's payload arena has no contiguous run large enough.
+    PayloadFull {
+        requested_slots: usize,
+    },
+    /// One chunk cannot fit in a lane of the selected payload arena.
+    PayloadTooLarge {
+        len: usize,
+        capacity: usize,
+    },
     /// The text or id is not a stream address.
     Malformed(String),
     /// This write half was shut down; nothing more goes in.
@@ -173,6 +182,12 @@ impl fmt::Display for Error {
             Self::Stale(id) => write!(f, "stream {id} has ended"),
             Self::AlreadyClaimed(ticket) => write!(f, "stream side {ticket} is already held"),
             Self::Full { capacity } => write!(f, "stream lane is full: capacity={capacity}"),
+            Self::PayloadFull { requested_slots } => {
+                write!(f, "payload arena has no run of {requested_slots} free slots")
+            }
+            Self::PayloadTooLarge { len, capacity } => {
+                write!(f, "payload chunk is {len} bytes; arena lane capacity is {capacity}")
+            }
             Self::Malformed(text) => write!(f, "not a stream address: {text:?}"),
             Self::Closed => f.write_str("stream write half is shut down"),
             Self::Reset => f.write_str("stream direction was reset by the peer"),
@@ -202,7 +217,9 @@ impl From<Error> for io::Error {
     fn from(value: Error) -> Self {
         let kind = match &value {
             Error::Stale(_) | Error::AlreadyClaimed(_) => io::ErrorKind::NotConnected,
-            Error::Full { .. } => io::ErrorKind::OutOfMemory,
+            Error::Full { .. } | Error::PayloadFull { .. } | Error::PayloadTooLarge { .. } => {
+                io::ErrorKind::OutOfMemory
+            }
             Error::Malformed(_) => io::ErrorKind::InvalidInput,
             Error::Closed => io::ErrorKind::BrokenPipe,
             Error::Reset => io::ErrorKind::ConnectionReset,
