@@ -45,6 +45,15 @@ same one the arena and the cells rely on across processes. FIN and RESET
 are flags, so a full ring never blocks shutdown; a dropped `WriteHalf`
 without `finish` is a RESET, a dropped `ReadHalf` sets READER_GONE.
 
+### What a stream cannot carry
+
+Bytes, and only bytes. A file descriptor is a per-process index into the
+kernel's file table, not data, so a connection cannot be handed to another
+process through here — that needs `SCM_RIGHTS` over a Unix socket. The
+distinction has a name upstream of this crate: carrying the bytes while
+their owner keeps the socket is a *relay*, and this is the transport for
+it; handing the socket over is a *migration*, and it is not.
+
 ### What the ring holds when nobody is reading it
 
 A socket's payload is transient. A ring is **residue**: what crossed stays

@@ -831,6 +831,41 @@ impl Pool {
         }
     }
 
+    /// Every process generation that still owns a resource here.
+    ///
+    /// For a supervisor that lost its record of who was running — its own
+    /// restart, with workers adopted rather than replaced — and has to
+    /// decide what to report dead. The table is the authority: a
+    /// `(node, incarnation)` in this list holds resources whose units are
+    /// still counted against their keys, whether or not that process
+    /// exists.
+    ///
+    /// It says who is *in* the table, never who is alive; the caller
+    /// subtracts the generations it knows are running and reports the
+    /// rest. Creation claims are not represented here — they are counted
+    /// per node without a generation, and [`Pool::node_dead`] returns them
+    /// whichever incarnation it names.
+    pub fn owners(&self) -> Vec<(NodeId, Incarnation)> {
+        let mut seen: Vec<(NodeId, Incarnation)> = Vec::new();
+        for slot in self.table.resources() {
+            let state = slot.state.load(Ordering::Acquire);
+            if state != crate::layout::RESOURCE_LIVE
+                && state != crate::layout::RESOURCE_DRAINING
+            {
+                continue;
+            }
+            let owner = (
+                NodeId::new(slot.owner_node.load(Ordering::Acquire)),
+                Incarnation::new(slot.owner_incarnation.load(Ordering::Acquire)),
+            );
+            if !seen.contains(&owner) {
+                seen.push(owner);
+            }
+        }
+        seen.sort_by_key(|(node, incarnation)| (node.get(), incarnation.get()));
+        seen
+    }
+
     /// A confirmed death, reported by whoever supervises processes: every
     /// resource that incarnation of `node` owned is closed and the
     /// creation claims it held are returned. Leases it held on others'

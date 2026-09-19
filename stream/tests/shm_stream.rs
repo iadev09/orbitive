@@ -336,3 +336,37 @@ fn a_wait_can_be_bounded_without_losing_the_stream() {
 
     let _ = owner.unlink();
 }
+
+/// The mirror of the pool's reading, for the same supervisor: which
+/// process generations still hold a side here.
+#[test]
+fn the_table_says_which_generations_hold_a_side() {
+    let name = fleet_name("o");
+    let owner = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
+        Incarnation::new(10),
+    )
+    .expect("owner streams");
+    owner.reset_all();
+    let peer = Streams::new(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
+        Incarnation::new(11),
+    )
+    .expect("peer streams");
+    assert!(owner.owners().is_empty());
+
+    let (a, ticket) = owner.create().expect("create");
+    assert_eq!(owner.owners(), vec![(NodeId::ZERO, Incarnation::new(10))]);
+    let b = peer.open(ticket).expect("open");
+    assert_eq!(
+        peer.owners(),
+        vec![
+            (NodeId::ZERO, Incarnation::new(10)),
+            (NodeId::new(1), Incarnation::new(11)),
+        ]
+    );
+
+    drop((a, b));
+    assert!(owner.owners().is_empty());
+    let _ = owner.unlink();
+}

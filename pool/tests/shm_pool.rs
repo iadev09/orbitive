@@ -187,3 +187,29 @@ fn waiting_for_capacity_can_be_bounded() {
     assert!(version > since);
     assert!(peer.reserve(id).is_ok());
 }
+
+/// What a supervisor reads when it has lost its own record of who was
+/// running — its restart, with workers adopted rather than replaced. The
+/// table is the authority about what is still counted; the caller
+/// subtracts the generations it knows are alive.
+#[test]
+fn the_table_says_which_generations_are_in_it() {
+    let (owner, peer) = pair("o");
+    assert!(peer.owners().is_empty());
+
+    let id = owner.register(KEY, 1).expect("register");
+    // The same list from either side: it is the table's, not the reader's.
+    assert_eq!(peer.owners(), vec![(NodeId::ZERO, Incarnation::new(10))]);
+    assert_eq!(owner.owners(), peer.owners());
+
+    // A creation claim is not an owner — it carries no generation, and a
+    // death report returns it whichever incarnation it names.
+    let permit = peer.claim_create(KEY, 4).expect("claim");
+    assert_eq!(peer.owners().len(), 1);
+    permit.finish();
+
+    // The report takes the generation out with the resources it owned.
+    peer.node_dead(NodeId::ZERO, Incarnation::new(10));
+    assert!(peer.owners().is_empty());
+    assert!(matches!(peer.reserve(id), Err(Error::Stale(_))));
+}

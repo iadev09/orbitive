@@ -135,6 +135,39 @@ figure is built in: the embedder measures its connect cost on its host
 and writes the comparison into its own `Policy`. Fairness across
 contending tasks was exact on both hosts.
 
+## Above the ledger: two transports, and this crate chooses neither
+
+The table says who owns a resource and how much of it is in use. Reaching
+*at* someone else's resource is a transport question, and there are two of
+them with different costs and different limits. Naming them apart matters
+because one of them is not this crate family's to provide:
+
+- **Relay.** The borrower's bytes cross an `orbit-stream` session
+  (`open_session` / `accept_session`); the owner keeps the socket and
+  drives it. The cost is per request and permanent: measured on Linux,
+  ~31 µs of CPU and ~1.6 parks against ~1.2 µs for a local resource. It is
+  the only shape available to a connection that cannot move — a client
+  holding read-ahead, a TLS session's keys and sequence numbers, an H2
+  connection's HPACK table and flow-control windows.
+- **Migrate.** The descriptor crosses once, over a Unix socket with
+  `SCM_RIGHTS`, and afterwards there is no ongoing cost at all: the
+  connection is simply local to whoever holds it. Measured by a consumer at
+  845 ns against 1365 ns for a fresh local `connect()`, so moving one is
+  cheaper than dialling one. **`orbit-stream` cannot carry a descriptor** —
+  it is bytes in shared memory — so this needs a channel neither crate
+  provides, and it is only available to a connection that carries no
+  userspace state at rest.
+
+Neither is a knob. The protocol decides: a connection that cannot move
+relays, one that can may migrate, and an H2 connection can do neither,
+because two client state machines cannot share one TCP stream at byte
+level. Sharing H2 requires the owner to speak H2 and take requests rather
+than bytes, which is a proxy and not this primitive.
+
+What the ledger owes either transport is the same and no more: who owns
+what, how much is in use, a fence that says which reservation this is, and
+a death report that returns the units.
+
 ## Invariants
 
 - Capacity is never over-admitted; under-admission lasts until the owner

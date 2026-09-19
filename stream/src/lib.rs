@@ -562,6 +562,34 @@ impl Streams {
         }
     }
 
+    /// Every process generation that still holds a side of a stream here.
+    ///
+    /// The mirror of `Pool::owners`, and for the same caller: a supervisor
+    /// that has to decide what to report dead after losing its own record.
+    /// It says who is *in* the table, never who is alive.
+    pub fn owners(&self) -> Vec<(NodeId, Incarnation)> {
+        let mut seen: Vec<(NodeId, Incarnation)> = Vec::new();
+        for slot in self.table.slots() {
+            if slot.state.load(Ordering::Acquire) != SLOT_LIVE {
+                continue;
+            }
+            for side in 0..2 {
+                if slot.claimed[side].load(Ordering::Acquire) != SIDE_CLAIMED {
+                    continue;
+                }
+                let holder = (
+                    NodeId::new(slot.node[side].load(Ordering::Acquire)),
+                    Incarnation::new(slot.incarnation[side].load(Ordering::Acquire)),
+                );
+                if !seen.contains(&holder) {
+                    seen.push(holder);
+                }
+            }
+        }
+        seen.sort_by_key(|(node, incarnation)| (node.get(), incarnation.get()));
+        seen
+    }
+
     /// A confirmed death, reported by whoever supervises processes: every
     /// side that incarnation of `node` held, in any lane, is finished. Its
     /// unfinished writes become resets and its reads are gone, so a holder
