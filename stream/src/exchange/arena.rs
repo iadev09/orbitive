@@ -20,6 +20,7 @@ const SLOT_FREE: u8 = 0;
 const SLOT_RESERVED: u8 = 1;
 const SLOT_LIVE: u8 = 2;
 const SLOT_READING: u8 = 3;
+const SLOT_RECLAIMING: u8 = 4;
 
 /// Geometry and SHM identity of one directional payload arena.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -406,14 +407,27 @@ impl Arena {
             let slot = &metadata[first];
             let state = slot.state.load(Ordering::Acquire);
             let producer_node = first / self.geometry.slots_per_node;
-            let abandoned_publication = state == SLOT_RESERVED
-                && slot.allocation_first.load(Ordering::Acquire) as usize == first
+            let allocation_start = slot.allocation_first.load(Ordering::Acquire) as usize == first;
+            let abandoned_publication = allocation_start
+                && matches!(state, SLOT_RESERVED | SLOT_LIVE)
                 && producer_node == usize::from(node)
                 && slot.producer_incarnation.load(Ordering::Acquire) == incarnation.get();
             let abandoned_read = state == SLOT_READING
                 && slot.reader_node.load(Ordering::Acquire) == node
                 && slot.reader_incarnation.load(Ordering::Acquire) == incarnation.get();
             if !abandoned_publication && !abandoned_read {
+                continue;
+            }
+            if slot
+                .state
+                .compare_exchange(
+                    state,
+                    SLOT_RECLAIMING,
+                    Ordering::SeqCst,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
                 continue;
             }
             let generation = slot.generation.load(Ordering::Acquire);
@@ -517,9 +531,9 @@ impl PayloadArena {
     }
 
     /// Reclaim only allocations owned by a process incarnation whose death
-    /// was confirmed by the embedder. Committed unread chunks survive their
-    /// producer; a dead reader's held chunks and an unpublished reservation
-    /// do not.
+    /// was confirmed by the embedder. A producer's unpublished or unread
+    /// chunks and a dead reader's held chunks return; a chunk already held by
+    /// a surviving consumer remains that consumer's.
     pub fn node_dead(&self, node: orbit_core::NodeId, incarnation: Incarnation) {
         self.arena.node_dead(node.get(), incarnation);
     }
@@ -951,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_unread_payload_survives_its_producer() {
+    fn committed_unread_payload_is_reclaimed_with_its_dead_producer() {
         let arena = PayloadArena::open(
             fleet(),
             Incarnation::new(8),
@@ -963,6 +977,7 @@ mod tests {
         publication.mark_published();
 
         arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(8));
-        assert_eq!(&*arena.read(descriptor).expect("committed chunk"), b"survives");
+        assert!(arena.read(descriptor).is_err());
+        assert!(arena.publish(&vec![9; 128]).is_ok());
     }
 }
