@@ -23,6 +23,14 @@ its descriptor carries the arena kind, owner node, first slot, slot count,
 allocation generation, and exact byte length. Returning a received chunk gives
 the whole extent back and wakes only its owning producer node.
 
+Slot payload size and lane width are physical geometry. Chunk width is runtime
+policy: for a selected slot count `n`, full publication capacity is exactly
+`n * slot_payload_bytes`. `Sender::chunk_geometry()` exposes the geometry of
+that sender's actual direction, so request and response policy remain
+independent when their arenas differ. The helper rejects zero and slot counts
+outside the local lane; an adapter may choose `n` per invocation without
+changing the SHM contract.
+
 ## Endpoint and direction
 
 `Exchanges::create()` creates side A and an `ExchangeTicket`.
@@ -138,4 +146,3 @@ but neither protocol is encoded into `orbit-stream` or `orbit-pool`.
 is confirmed dead. `reset_all` is quiescent-owner maintenance. Attaching a new
 master or worker is not proof of quiescence. Unlink removes a name, not existing
 mappings, and is not an ordinary shutdown operation.
-

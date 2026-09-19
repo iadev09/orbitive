@@ -37,15 +37,20 @@ payload length. A 777-byte chunk in a 256-byte-slot arena therefore occupies
 four slots and produces one descriptor. A later chunk gets another extent
 and another descriptor; chunks are never pointer chains.
 
-Known payloads use one request/response-agnostic planner instead of repeating
-slot arithmetic in every adapter. `ChunkPlan::new(data_bytes, slot_bytes)`
-uses the same-host SHM benchmark-backed 64 KiB default and reports chunk count,
-full-chunk bytes/slots and the exact final chunk. `PayloadArenaSpec::plan_chunks`
-and `Sender::plan_chunks` apply the same rule while also clamping a chunk to
-one producer lane. A slot larger than 64 KiB becomes one chunk unit; a final
-short chunk keeps its exact byte length. External network bandwidth is not an
-input: slower consumption already propagates through arena credit and
-backpressure.
+Adapters do not repeat slot arithmetic. `Sender::chunk_geometry()` reports the
+actual arena used by that direction, including its payload bytes per slot and
+its per-node lane width. Runtime policy may choose a different slot count `n`
+for every request and response; `ChunkGeometry::chunk_bytes(n)` yields exactly
+`n * slot_payload_bytes` and rejects zero or a count outside the lane.
+`chunk_bytes_for_target` converts a runtime byte target into that same aligned,
+lane-bounded capacity. This leaves future network-aware policy above the
+transport while keeping physical SHM geometry compile-time stable.
+
+For known payload lengths, `ChunkGeometry::plan(data_bytes, n)` reports chunk
+count, full-chunk bytes/slots and the exact final chunk. The existing
+`ChunkPlan::new`, `PayloadArenaSpec::plan_chunks` and `Sender::plan_chunks`
+remain benchmark-backed 64 KiB conveniences; `plan_chunks_with` is the
+runtime-slot-count form. A final short chunk keeps its exact byte length.
 
 `start(Some(bytes))` and `data(bytes)` copy existing bytes into an extent.
 When the application is producing or encoding the bytes itself,

@@ -9,7 +9,7 @@ use orbit_core::Fleet;
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
-use super::{ChunkDescriptor, ChunkPlan, DEFAULT_CHUNK_BYTES};
+use super::{ChunkDescriptor, ChunkGeometry, ChunkPlan, DEFAULT_CHUNK_BYTES};
 use crate::wake::{Doorstep, Driver};
 use crate::{Error, Incarnation, Result, lock_unpoisoned};
 
@@ -52,6 +52,12 @@ impl PayloadArenaSpec {
         payload_len.div_ceil(self.slot_size)
     }
 
+    /// Physical chunk geometry for this arena. Runtime policy chooses the
+    /// slot count independently for each request or response.
+    pub const fn chunk_geometry(self) -> Option<ChunkGeometry> {
+        ChunkGeometry::new(self.slot_size, self.slots_per_node)
+    }
+
     /// Plan a known payload with the benchmark-backed default chunk target,
     /// clamped so one chunk always fits in this node lane.
     pub const fn plan_chunks(
@@ -61,6 +67,19 @@ impl PayloadArenaSpec {
         let lane_bytes = self.lane_bytes();
         let limit = if DEFAULT_CHUNK_BYTES < lane_bytes { DEFAULT_CHUNK_BYTES } else { lane_bytes };
         ChunkPlan::for_limit(data_bytes, self.slot_size, limit)
+    }
+
+    /// Plan using a runtime-selected number of slots per publication.
+    pub const fn plan_chunks_with(
+        self,
+        data_bytes: usize,
+        slots_per_chunk: usize
+    ) -> Option<ChunkPlan> {
+        let geometry = match self.chunk_geometry() {
+            Some(geometry) => geometry,
+            None => return None
+        };
+        geometry.plan(data_bytes, slots_per_chunk)
     }
 
     fn validate(self) -> Result<()> {
@@ -536,6 +555,12 @@ impl PayloadArena {
         self.arena.geometry.slots_per_node
     }
 
+    pub fn chunk_geometry(&self) -> ChunkGeometry {
+        // PayloadArena::open validates both geometry values as non-zero.
+        ChunkGeometry::new(self.slot_size(), self.slots_per_node())
+            .expect("opened payload arena has valid chunk geometry")
+    }
+
     pub fn plan_chunks(
         &self,
         data_bytes: usize
@@ -545,6 +570,19 @@ impl PayloadArena {
             .ok_or_else(|| {
                 Error::Malformed("payload arena cannot plan zero-sized geometry".to_owned())
             })
+    }
+
+    pub fn plan_chunks_with(
+        &self,
+        data_bytes: usize,
+        slots_per_chunk: usize
+    ) -> Result<ChunkPlan> {
+        self.chunk_geometry().plan(data_bytes, slots_per_chunk).ok_or_else(|| {
+            Error::Malformed(format!(
+                "chunk slot count {slots_per_chunk} exceeds payload lane capacity {}",
+                self.slots_per_node()
+            ))
+        })
     }
     /// Park this thread until a run large enough for `payload_len` may be
     /// available. Allocation still decides the race after the wake.

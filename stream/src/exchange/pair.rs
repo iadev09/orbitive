@@ -9,8 +9,8 @@ use orbit_core::{Fleet, NodeId};
 use super::arena::Publication;
 use super::protocol::CONTROL_FRAME_BYTES;
 use super::{
-    ChunkDescriptor, ChunkPlan, ControlEvent, ExchangeId, Flow, PayloadArena, PayloadArenaSpec,
-    PayloadChunk, ResetCode
+    ChunkDescriptor, ChunkGeometry, ChunkPlan, ControlEvent, ExchangeId, Flow, PayloadArena,
+    PayloadArenaSpec, PayloadChunk, ResetCode
 };
 use crate::{Error, Incarnation, ReadHalf, Result, Side, StreamSpec, Streams, Ticket, WriteHalf};
 
@@ -24,6 +24,20 @@ use crate::{Error, Incarnation, ReadHalf, Result, Side, StreamSpec, Streams, Tic
 pub enum ExchangePayloadSpec {
     Shared(PayloadArenaSpec),
     Directional { a_to_b: PayloadArenaSpec, b_to_a: PayloadArenaSpec }
+}
+
+impl ExchangePayloadSpec {
+    /// Physical payload arena used by one byte-flow direction.
+    pub const fn for_flow(
+        self,
+        flow: Flow
+    ) -> PayloadArenaSpec {
+        match (self, flow) {
+            (Self::Shared(payload), _) => payload,
+            (Self::Directional { a_to_b, .. }, Flow::AtoB) => a_to_b,
+            (Self::Directional { b_to_a, .. }, Flow::BtoA) => b_to_a
+        }
+    }
 }
 
 /// The physical resources used by an exchange table.
@@ -51,6 +65,22 @@ impl ExchangeSpec {
         b_to_a: PayloadArenaSpec
     ) -> Self {
         Self { control, payload: ExchangePayloadSpec::Directional { a_to_b, b_to_a } }
+    }
+
+    /// Physical payload arena used by one byte-flow direction.
+    pub const fn payload_for(
+        self,
+        flow: Flow
+    ) -> PayloadArenaSpec {
+        self.payload.for_flow(flow)
+    }
+
+    /// Physical chunk geometry used by one byte-flow direction.
+    pub const fn chunk_geometry(
+        self,
+        flow: Flow
+    ) -> Option<ChunkGeometry> {
+        self.payload_for(flow).chunk_geometry()
     }
 
     fn validate(self) -> Result<()> {
@@ -724,12 +754,26 @@ impl Sender {
         self.0.flow
     }
 
+    /// Physical geometry of this sender's actual directional payload arena.
+    pub fn chunk_geometry(&self) -> ChunkGeometry {
+        self.0.arena.chunk_geometry()
+    }
+
     /// Plan a known payload for this direction's actual arena geometry.
     pub fn plan_chunks(
         &self,
         data_bytes: usize
     ) -> Result<ChunkPlan> {
         self.0.arena.plan_chunks(data_bytes)
+    }
+
+    /// Plan this direction with a runtime-selected slot count.
+    pub fn plan_chunks_with(
+        &self,
+        data_bytes: usize,
+        slots_per_chunk: usize
+    ) -> Result<ChunkPlan> {
+        self.0.arena.plan_chunks_with(data_bytes, slots_per_chunk)
     }
     pub fn start(
         &mut self,
@@ -926,6 +970,13 @@ mod tests {
         .expect("directional exchanges");
         let (mut side_a, ticket) = exchanges.create().expect("side A");
         let mut side_b = exchanges.open_peer(ticket).expect("side B");
+
+        let request_geometry = side_a.sender().chunk_geometry();
+        let response_geometry = side_b.sender().chunk_geometry();
+        assert_eq!(request_geometry.slot_payload_bytes(), 64);
+        assert_eq!(response_geometry.slot_payload_bytes(), 128);
+        assert_eq!(request_geometry.chunk_bytes(1), Some(64));
+        assert_eq!(response_geometry.chunk_bytes(1), Some(128));
 
         side_a.sender().start(None).expect("A-to-B start");
         assert!(matches!(side_b.receiver().try_next(), Ok(FlowEvent::Start { .. })));
