@@ -15,6 +15,9 @@
 //! ring: taking a session never parks, in any runtime.
 
 use orbit_core::NodeId;
+use orbit_stream::exchange::{
+    ClientExchange, ExchangeTicket, Exchanges, FlowEvent, PayloadChunk, ServerExchange,
+};
 use orbit_stream::{ReadHalf, Streams, Ticket, WriteHalf};
 
 use crate::{Error, Execution, Incarnation, Lease, Pool, ResourceId, Result};
@@ -26,6 +29,23 @@ pub const SESSION_FRAME: usize = 32;
 
 const MAGIC: [u8; 4] = *b"PSES";
 const VERSION: u8 = 1;
+
+/// The request-start payload after the pool has consumed its lease prefix.
+/// Keeping this value keeps the zero-copy metadata bytes alive; dropping it
+/// returns their payload slots to the request arena.
+pub struct ExchangeSessionStart {
+    payload: PayloadChunk,
+}
+
+impl ExchangeSessionStart {
+    pub fn metadata(&self) -> &[u8] {
+        &self.payload[SESSION_FRAME..]
+    }
+
+    pub fn payload(&self) -> &PayloadChunk {
+        &self.payload
+    }
+}
 
 fn encode(lease: &Lease) -> [u8; SESSION_FRAME] {
     let mut frame = [0_u8; SESSION_FRAME];
@@ -131,6 +151,55 @@ impl Pool {
         let (read, write) = endpoint.split();
         Ok((execution, read, write))
     }
+
+    /// Create W1 for a leased resource, put the lease ahead of the
+    /// application's request-start metadata, then offer W2 to the resource
+    /// owner. The request flow is already started when this returns.
+    pub fn open_exchange_session(
+        &self,
+        lease: Lease,
+        exchanges: &Exchanges,
+        request_metadata: &[u8],
+    ) -> Result<ServerExchange> {
+        let (mut server, ticket) = exchanges.create()?;
+        let mut start = Vec::with_capacity(SESSION_FRAME + request_metadata.len());
+        start.extend_from_slice(&encode(&lease));
+        start.extend_from_slice(request_metadata);
+        server.request().start(Some(&start))?;
+        exchanges.offer(ticket, NodeId::new(lease.id.node()))?;
+        Ok(server)
+    }
+
+    /// Open W2 from an offered exchange, validate and accept its lease
+    /// before exposing any request data, and return the application portion
+    /// of request-start metadata without copying it out of SHM.
+    pub fn accept_exchange_session(
+        &self,
+        exchanges: &Exchanges,
+        ticket: ExchangeTicket,
+    ) -> Result<(Execution, ClientExchange, ExchangeSessionStart)> {
+        let mut client = exchanges.open_client(ticket)?;
+        let payload = match client.request().try_next()? {
+            FlowEvent::Start { metadata: Some(payload) } if payload.len() >= SESSION_FRAME => {
+                payload
+            }
+            FlowEvent::Start { .. } => {
+                return Err(Error::Malformed(
+                    "an exchange session start does not contain a lease frame".to_owned(),
+                ));
+            }
+            _ => {
+                return Err(Error::Malformed(
+                    "an exchange session did not begin with request start".to_owned(),
+                ));
+            }
+        };
+        let mut frame = [0_u8; SESSION_FRAME];
+        frame.copy_from_slice(&payload[..SESSION_FRAME]);
+        let lease = decode(&frame)?;
+        let execution = self.accept(lease)?;
+        Ok((execution, client, ExchangeSessionStart { payload }))
+    }
 }
 
 impl From<orbit_stream::Error> for Error {
@@ -170,5 +239,49 @@ mod tests {
         assert!(matches!(decode(&frame), Err(Error::Malformed(_))));
         frame[..4].copy_from_slice(b"HTTP");
         assert!(matches!(decode(&frame), Err(Error::Malformed(_))));
+    }
+
+    #[test]
+    fn an_exchange_session_accepts_the_lease_before_request_data() {
+        use std::sync::Arc;
+
+        use orbit_core::Fleet;
+        use orbit_stream::exchange::{ExchangeSpec, PayloadArenaSpec};
+        use orbit_stream::{Incarnation as StreamIncarnation, StreamSpec};
+
+        let fleet = Arc::new(Fleet::join("pool-exchange-session", 2).expect("fleet"));
+        let pool = Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
+        pool.reset_all();
+        let resource = pool.register(crate::Key::new(9), 1).expect("resource");
+        let lease = pool.reserve(resource).expect("lease");
+        let exchanges = Exchanges::open(
+            fleet,
+            StreamIncarnation::new(1),
+            ExchangeSpec::new(
+                StreamSpec::new(210, 4, 512),
+                PayloadArenaSpec::new(211, 8, 64),
+                PayloadArenaSpec::new(212, 8, 64),
+            ),
+        )
+        .expect("exchanges");
+        exchanges.reset_all();
+
+        let mut server = pool
+            .open_exchange_session(lease, &exchanges, b"request headers")
+            .expect("open session");
+        let ticket = exchanges.take_offer().expect("offered exchange");
+        let (execution, mut client, start) = pool
+            .accept_exchange_session(&exchanges, ticket)
+            .expect("accept session");
+        assert_eq!(start.metadata(), b"request headers");
+
+        server.request().data(b"body").expect("request body");
+        let body = match client.request().try_next().expect("request data") {
+            FlowEvent::Data(body) => body,
+            _ => panic!("expected request data"),
+        };
+        assert_eq!(&*body, b"body");
+        drop((start, body, execution));
+        assert!(pool.reserve(resource).is_ok());
     }
 }

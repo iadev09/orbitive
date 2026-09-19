@@ -48,6 +48,8 @@ use layout::{
     pack_counts, unpack_counts,
 };
 pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
+#[cfg(feature = "stream")]
+pub use session::ExchangeSessionStart;
 use table::Table;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use orbit_core::readiness::Readiness;
