@@ -79,8 +79,10 @@ The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
 [`orbit-arena`](arena/README.md), [`orbit-cell`](cell/README.md), [`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
 [`orbit-invoke`](invoke/README.md), [`orbit-lock`](lock/README.md),
-[`orbit-metrics`](metrics/README.md), and
-[`orbit-rustls`](rustls/README.md). Direct dependencies are supported when an
+[`orbit-metrics`](metrics/README.md), [`orbit-pool`](pool/README.md),
+[`orbit-rustls`](rustls/README.md), and
+[`orbit-stream`](stream/README.md) — the last on a pre-release track of its
+own, for the reason above. Direct dependencies are supported when an
 integration needs a single narrow layer; applications can otherwise use the
 facade and enable only the modules they need.
 
