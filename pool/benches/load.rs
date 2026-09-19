@@ -246,14 +246,19 @@ fn main() {
                     };
                     let served = Arc::clone(&served);
                     tokio::spawn(async move {
+                        // Every exchange on this session, not only the first:
+                        // one serving task then covers both the borrow-per-
+                        // request shape and the held-session one, and the
+                        // difference between them is the rendezvous.
                         let mut payload = [0_u8; 128];
-                        if read.read_exact(&mut payload).await.is_err() {
-                            return;
+                        while read.read_exact(&mut payload).await.is_ok() {
+                            if write.write_all(&payload).await.is_err() {
+                                break;
+                            }
+                            served.fetch_add(1, Ordering::Relaxed);
                         }
-                        let _ = write.write_all(&payload).await;
                         let _ = write.shutdown().await;
                         execution.complete();
-                        served.fetch_add(1, Ordering::Relaxed);
                     });
                 }
             })
@@ -272,6 +277,35 @@ fn main() {
                 let mut reply = [0_u8; 128];
                 read.read_exact(&mut reply).await.unwrap();
                 start.elapsed()
+            }
+        })
+        .await
+        .print();
+
+        // 4. The same borrow, used more than once. `remote reuse` pays a
+        // reserve and a rendezvous for every request, because an exclusive
+        // per-request lease is the shape upstream settled on. Holding the
+        // session over EXCHANGES round trips and dividing by them leaves the
+        // transport with a share of the setup instead of all of it, so the
+        // gap between the two lines is what entering and leaving a borrow
+        // costs -- the number the break-even arithmetic needs separated.
+        const EXCHANGES: usize = 8;
+        let pool = caller.clone();
+        let streams = caller_streams.clone();
+        run("remote reuse x8", ops / EXCHANGES, tasks, move |_| {
+            let pool = pool.clone();
+            let streams = streams.clone();
+            async move {
+                let start = Instant::now();
+                let lease = reserve_waiting(&pool, id).await;
+                let (mut read, mut write) = pool.open_session(lease, &streams).unwrap();
+                let mut reply = [0_u8; 128];
+                for _ in 0..EXCHANGES {
+                    write.write_all(&[7_u8; 128]).await.unwrap();
+                    read.read_exact(&mut reply).await.unwrap();
+                }
+                write.shutdown().await.unwrap();
+                start.elapsed() / EXCHANGES as u32
             }
         })
         .await
