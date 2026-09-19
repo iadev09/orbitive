@@ -39,3 +39,8 @@ required-features = ["tokio"]
 name = "fleet"
 harness = false
 required-features = ["tokio"]
+
+[[bench]]
+name = "phase2"
+harness = false
+required-features = ["tokio"]
