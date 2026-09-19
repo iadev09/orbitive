@@ -162,10 +162,13 @@ impl Pool {
         request_metadata: &[u8],
     ) -> Result<ServerExchange> {
         let (mut server, ticket) = exchanges.create()?;
-        let mut start = Vec::with_capacity(SESSION_FRAME + request_metadata.len());
-        start.extend_from_slice(&encode(&lease));
-        start.extend_from_slice(request_metadata);
-        server.request().start(Some(&start))?;
+        let frame = encode(&lease);
+        let mut start = server
+            .request()
+            .reserve_start(SESSION_FRAME + request_metadata.len())?;
+        start[..SESSION_FRAME].copy_from_slice(&frame);
+        start[SESSION_FRAME..].copy_from_slice(request_metadata);
+        start.commit()?;
         exchanges.offer(ticket, NodeId::new(lease.id.node()))?;
         Ok(server)
     }
