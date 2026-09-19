@@ -2,9 +2,14 @@
 //! physically separate payload arenas.
 
 mod arena;
+mod pair;
 mod protocol;
 
 pub use arena::{
     PayloadArena, PayloadArenaSpec, PayloadChunk, segment_size_for as payload_segment_size_for,
+};
+pub use pair::{
+    ClientExchange, DispatchError, ExchangeSpec, ExchangeTicket, Exchanges, FlowEvent, FlowHandler,
+    RequestConsumer, RequestProducer, ResponseConsumer, ResponseProducer, ServerExchange,
 };
 pub use protocol::{ChunkDescriptor, ControlEvent, ExchangeId, Flow, ResetCode};

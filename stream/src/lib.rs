@@ -979,6 +979,13 @@ fn writable(direction: &Direction, buffer_bytes: usize) -> bool {
         || direction.flags() & (FLAG_FIN | FLAG_RESET | FLAG_READER_GONE) != 0
 }
 
+fn writable_exact(direction: &Direction, buffer_bytes: usize, needed: usize) -> bool {
+    let queued =
+        (direction.head.load(Ordering::Relaxed) - direction.tail.load(Ordering::Acquire)) as usize;
+    buffer_bytes.saturating_sub(queued) >= needed
+        || direction.flags() & (FLAG_FIN | FLAG_RESET | FLAG_READER_GONE) != 0
+}
+
 impl Drop for Handle {
     /// Both halves are gone: give the side back. The slot empties once no
     /// side holds it any more, and every address to this generation goes
@@ -1259,6 +1266,19 @@ impl WriteHalf {
         })
     }
 
+    /// Park until an atomic write of `needed` bytes can be attempted.
+    pub fn wait_writable_exact(&self, needed: usize) -> Result<()> {
+        let buffer_bytes = self.handle.table.geometry().buffer_bytes;
+        if needed > buffer_bytes {
+            return Err(Error::Malformed(format!(
+                "atomic stream write is {needed} bytes; ring capacity is {buffer_bytes}"
+            )));
+        }
+        self.handle.wait_until(self.handle.side.write_direction(), |direction| {
+            writable_exact(direction, buffer_bytes, needed)
+        })
+    }
+
     /// Readiness for a task: `Ready` when a write would make progress or
     /// the direction ended, otherwise the waker is registered and `Pending`
     /// comes back. Runtime-neutral; the `tokio` feature builds `AsyncWrite`
@@ -1271,6 +1291,28 @@ impl WriteHalf {
                 writer: true,
             },
             |direction| writable(direction, buffer_bytes),
+            cx,
+        )
+    }
+
+    /// Task readiness for an indivisible write of `needed` bytes.
+    pub fn poll_writable_exact(
+        &self,
+        needed: usize,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+        let buffer_bytes = self.handle.table.geometry().buffer_bytes;
+        if needed > buffer_bytes {
+            return std::task::Poll::Ready(Err(Error::Malformed(format!(
+                "atomic stream write is {needed} bytes; ring capacity is {buffer_bytes}"
+            ))));
+        }
+        self.handle.poll_ready(
+            Interest {
+                direction: self.handle.side.write_direction(),
+                writer: true,
+            },
+            |direction| writable_exact(direction, buffer_bytes, needed),
             cx,
         )
     }

@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::task::{Context, Poll, Waker};
 
 use orbit_core::Fleet;
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
 use super::ChunkDescriptor;
+use crate::wake::{Doorstep, Driver};
 use crate::{Error, Incarnation, Result, lock_unpoisoned};
 
 const MAGIC: u32 = 0x4F_50_41_59; // "OPAY"
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 const SLOT_FREE: u8 = 0;
 const SLOT_RESERVED: u8 = 1;
@@ -78,7 +80,9 @@ struct Header {
     _reserved: [u8; 2],
     next_generation: AtomicU64,
     epoch: AtomicU64,
-    _padding: [u8; 24],
+    credit_generation: AtomicU32,
+    credit_waiters: AtomicU32,
+    _padding: [u8; 16],
 }
 
 impl Header {
@@ -97,7 +101,9 @@ impl Header {
             _reserved: [0; 2],
             next_generation: AtomicU64::new(1),
             epoch: AtomicU64::new(1),
-            _padding: [0; 24],
+            credit_generation: AtomicU32::new(0),
+            credit_waiters: AtomicU32::new(0),
+            _padding: [0; 16],
         }
     }
 
@@ -197,6 +203,8 @@ struct Arena {
     node: u16,
     _incarnation: Incarnation,
     allocation: Mutex<usize>,
+    credit_wakers: Mutex<Vec<Waker>>,
+    driver: Mutex<Option<Driver>>,
 }
 
 impl Arena {
@@ -237,16 +245,7 @@ impl Arena {
         self: &Arc<Self>,
         payload_len: usize,
     ) -> Result<Publication> {
-        if payload_len == 0 {
-            return Err(Error::Malformed("an empty payload needs no arena allocation".to_owned()));
-        }
-        let count = payload_len.div_ceil(self.geometry.slot_size);
-        if count > self.geometry.slots_per_node {
-            return Err(Error::PayloadTooLarge {
-                len: payload_len,
-                capacity: self.geometry.slots_per_node * self.geometry.slot_size,
-            });
-        }
+        let count = self.required_slots(payload_len)?;
 
         let mut hint = lock_unpoisoned(&self.allocation);
         let lane_start = usize::from(self.node) * self.geometry.slots_per_node;
@@ -295,6 +294,116 @@ impl Arena {
             slot.state.store(SLOT_FREE, Ordering::Relaxed);
         }
         slots[0].state.store(SLOT_FREE, Ordering::Release);
+        let header = self.header();
+        header.credit_generation.fetch_add(1, Ordering::SeqCst);
+        if header.credit_waiters.load(Ordering::SeqCst) > 0 {
+            crate::wake_on(&header.credit_generation);
+        }
+    }
+
+    fn required_slots(&self, payload_len: usize) -> Result<usize> {
+        if payload_len == 0 {
+            return Err(Error::Malformed("an empty payload needs no arena allocation".to_owned()));
+        }
+        let count = payload_len.div_ceil(self.geometry.slot_size);
+        if count > self.geometry.slots_per_node {
+            return Err(Error::PayloadTooLarge {
+                len: payload_len,
+                capacity: self.geometry.slots_per_node * self.geometry.slot_size,
+            });
+        }
+        Ok(count)
+    }
+
+    fn has_run(&self, count: usize) -> bool {
+        let lane_start = usize::from(self.node) * self.geometry.slots_per_node;
+        (0..=self.geometry.slots_per_node - count).any(|local| {
+            self.metadata()[lane_start + local..lane_start + local + count]
+                .iter()
+                .all(|slot| slot.state.load(Ordering::Acquire) == SLOT_FREE)
+        })
+    }
+
+    fn wait_available(&self, count: usize) -> Result<()> {
+        let header = self.header();
+        loop {
+            if self.has_run(count) {
+                return Ok(());
+            }
+            header.credit_waiters.fetch_add(1, Ordering::SeqCst);
+            let seen = header.credit_generation.load(Ordering::SeqCst);
+            let outcome = if self.has_run(count) {
+                Ok(())
+            } else {
+                crate::wait_on(&header.credit_generation, seen)
+            };
+            header.credit_waiters.fetch_sub(1, Ordering::SeqCst);
+            outcome?;
+        }
+    }
+
+    fn poll_available(
+        self: &Arc<Self>,
+        count: usize,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
+        if self.has_run(count) {
+            return Poll::Ready(Ok(()));
+        }
+        {
+            let mut wakers = lock_unpoisoned(&self.credit_wakers);
+            if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
+        }
+        if let Err(error) = self.ensure_driver() {
+            return Poll::Ready(Err(error));
+        }
+        if self.has_run(count) {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn ensure_driver(self: &Arc<Self>) -> Result<()> {
+        let mut driver = lock_unpoisoned(&self.driver);
+        if driver.is_none() {
+            *driver = Some(Driver::start(
+                Arc::as_ptr(self),
+                format!("orbit-payload-{}-{}-driver", self.kind, self.node),
+            )?);
+        }
+        Ok(())
+    }
+}
+
+impl Doorstep for Arena {
+    fn generation(&self) -> &AtomicU32 {
+        &self.header().credit_generation
+    }
+
+    fn listening(&self, delta: i32) {
+        if delta > 0 {
+            self.header().credit_waiters.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.header().credit_waiters.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn drain(&self) {
+        let wakers = std::mem::take(&mut *lock_unpoisoned(&self.credit_wakers));
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        if let Some(mut driver) = lock_unpoisoned(&self.driver).take() {
+            driver.stop(&self.header().credit_generation);
+        }
     }
 }
 
@@ -324,6 +433,52 @@ impl PayloadArena {
 
     pub fn slots_per_node(&self) -> usize {
         self.arena.geometry.slots_per_node
+    }
+
+    /// Park this thread until a run large enough for `payload_len` may be
+    /// available. Allocation still decides the race after the wake.
+    pub fn wait_available(&self, payload_len: usize) -> Result<()> {
+        let count = self.arena.required_slots(payload_len)?;
+        self.arena.wait_available(count)
+    }
+
+    /// Task readiness for directional payload credit. Credit returns are
+    /// coalesced through one shared generation and one local driver.
+    pub fn poll_available(
+        &self,
+        payload_len: usize,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
+        let count = match self.arena.required_slots(payload_len) {
+            Ok(count) => count,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        self.arena.poll_available(count, cx)
+    }
+
+    /// Clear this arena only while the fleet is known quiescent. Normal
+    /// attach and replacement never call this implicitly.
+    pub fn reset_all(&self) {
+        let mut hint = lock_unpoisoned(&self.arena.allocation);
+        *hint = 0;
+        for slot in self.arena.metadata() {
+            slot.state.store(SLOT_FREE, Ordering::Release);
+        }
+        let header = self.arena.header();
+        header.credit_generation.fetch_add(1, Ordering::SeqCst);
+        crate::wake_on(&header.credit_generation);
+    }
+
+    /// Remove the arena's SHM name. Existing mappings remain valid.
+    #[cfg(unix)]
+    pub fn unlink(&self) -> Result<()> {
+        match &self.arena.backing {
+            Backing::Memory(_) => {
+                self.reset_all();
+                Ok(())
+            }
+            Backing::Shm(region) => region.unlink().map_err(Error::Io),
+        }
     }
 
     pub(crate) fn publish(
@@ -482,6 +637,12 @@ fn open(
     incarnation: Incarnation,
     spec: PayloadArenaSpec,
 ) -> Result<Arc<Arena>> {
+    if !crate::waits_supported() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "payload arenas need a platform that can wait on a shared word",
+        )));
+    }
     let key = if fleet.is_shm() {
         #[cfg(unix)]
         {
@@ -537,6 +698,8 @@ fn open(
         node: fleet.node_id().get(),
         _incarnation: incarnation,
         allocation: Mutex::new(0),
+        credit_wakers: Mutex::new(Vec::new()),
+        driver: Mutex::new(None),
     });
     arenas.insert(key, Arc::downgrade(&arena));
     Ok(arena)
@@ -648,5 +811,25 @@ mod tests {
                 .expect("arena");
         drop(arena.publish(&vec![1; 128]).expect("reserved publication"));
         assert!(arena.publish(&vec![2; 128]).is_ok());
+    }
+
+    #[test]
+    fn returned_credit_wakes_a_parked_producer() {
+        let arena = PayloadArena::open(
+            fleet(),
+            Incarnation::new(1),
+            PayloadArenaSpec::new(244, 2, 64),
+        )
+        .expect("arena");
+        let publication = arena.publish(&vec![1; 128]).expect("fills lane");
+        let descriptor = descriptor(&publication, 1);
+        publication.mark_published();
+        let chunk = arena.read(descriptor).expect("held chunk");
+
+        let waiting = arena.clone();
+        let waiter = std::thread::spawn(move || waiting.wait_available(1));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(chunk);
+        waiter.join().expect("waiter").expect("credit wake");
     }
 }
