@@ -131,6 +131,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// real fence: fences start at one and count up.
 const PLACING: u64 = u64::MAX;
 
+/// Additions are expected: a cause discovered later lands here rather
+/// than in a new major version, so a caller matches what it handles and
+/// leaves the rest to a catch-all.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
     /// The id names a slot nothing occupies, or a generation that ended.
@@ -313,6 +317,9 @@ pub enum State {
 }
 
 /// One resource usable for a key, as the fleet sees it right now.
+/// Fields are expected to be added as the table learns to report more,
+/// so this is read rather than constructed from outside.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Candidate {
     pub id: ResourceId,

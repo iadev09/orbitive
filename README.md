@@ -65,8 +65,15 @@ bus.publish("worker.ready", b"worker-1")?;
 | `lock` | `orbitive::lock` | keyed leases with ownership checks and fencing tokens |
 | `metrics` | `orbitive::metrics` | current metrics snapshots across workers |
 | `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
-| `stream` / `stream-tokio` | `orbitive::stream` | bounded byte streams between two fleet members, in memory or shared memory |
+| `stream` / `stream-tokio` **(experimental)** | `orbitive::stream` | bounded byte streams between two fleet members, in memory or shared memory |
 | `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls 0.23/0.24 server-session storage |
+
+**`stream` is marked experimental, and the code is not what is experimental.**
+It is finished and tested on three platforms; what is unsettled is whether a
+byte relay between two processes belongs in a given problem, because the cost
+model is narrow and a socket is the right answer more often than it looks. The
+measured figures and the cases it does win are in
+[`orbit-stream`](stream/README.md); the session API is expected to move.
 
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),

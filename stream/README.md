@@ -11,6 +11,34 @@ the writer is done the reader drains to a clean end. That is what
 `orbit-stream` is for, and it works the same when both ends are in one
 process. Applications normally use it through `orbitive::stream`.
 
+## Experimental — the decision, not the code
+
+The implementation is finished, and saying "experimental" about it would be
+the wrong warning. Every test passes on Linux, FreeBSD and macOS; the lost
+wakeup this crate was written around is found, fixed, and pinned by a
+regression that fails by timeout without the fix; the transport moves bytes
+at about 0.25 µs/KiB, which is a socket's order of magnitude.
+
+What is experimental is **whether a byte relay between processes belongs in
+your problem at all**. The cost model is narrow, and it is measured rather
+than guessed — figures below from a 40-core bare-metal Xeon, `BENCHMARKS.local.md`:
+
+| | |
+|---|---|
+| transport, blocking | ~0.25 µs/KiB, 4–8 GB/s, flat across chunk sizes |
+| transport, through the async adapters | three to five times that — each drain wakes a driver, then a task, then a worker |
+| one borrow: reserve, session, a round trip | ~50 µs, of which roughly three quarters is the rendezvous and one quarter the bytes |
+| against dialling your own connection | a borrow pays only where a dial is expensive: about fifty requests' worth against a TLS handshake, and never against a Unix socket, where a dial costs 1.4 µs and a relayed request 50 |
+
+Read that as one sentence: **a socket is the right answer far more often than
+it looks**, and the cases left over are cold starts, bursts, and origins whose
+connection budget is genuinely scarce.
+
+The session API is expected to move as well. A release does not yet carry a
+verdict — the absence of one should mean *dirty* and today means nothing —
+and there is no error for an owner that has gone away.
+
+
 ```rust
 use std::sync::Arc;
 

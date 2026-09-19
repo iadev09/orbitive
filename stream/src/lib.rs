@@ -139,6 +139,10 @@ impl Default for StreamSpec {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// Additions are expected: a cause discovered later lands here rather
+/// than in a new major version, so a caller matches what it handles and
+/// leaves the rest to a catch-all.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
     /// The address names a slot nothing occupies, or a generation that ended.
