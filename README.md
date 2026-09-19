@@ -187,6 +187,45 @@ writer lane, and does not keep the fleet alive. `ring(kind)` opens only that
 already-existing uid-scoped object. Use `attach_existing_for_uid` when an
 operator process is permitted to inspect a different user's namespace.
 
+## Testing across platforms
+
+Three wait implementations sit under the same API — `futex` on Linux,
+`_umtx_op` on FreeBSD, `os_sync_wait_on_address` on macOS 14.4 and later — so
+a change to a wait path is not validated by one host. They do not merely
+differ in speed; they differ in which costs dominate.
+
+**Take the floor before reading anything else on a new host.**
+
+```sh
+cargo bench -p orbit-core --bench wake -- 50000
+```
+
+It bounces a word between two threads through `wait_word`/`wake_word` and
+nothing else, so whatever it reports is under every figure measured above it.
+The spread is wide enough to change a conclusion: on one machine, a wake cost
+1.03 µs on bare-metal Linux, 1.22 µs on a FreeBSD guest, and **22.5 µs on a
+Linux guest** — where a virtualised idle vCPU needs the host to reschedule it.
+On that guest, 37 of a relayed request's 39 µs were the hypervisor, and it
+took this bench to see it.
+
+**Do not build from a shared mount on a guest.** Where the source lives on a
+virtfs/9p share, `rustc` has been handed a different view of a file than a
+later read returns: parse errors that are not in the source, at different
+lines on each attempt, while `md5` of the same file matches from both hosts.
+Copy to local disk and build there, and keep Cargo's output off the share as
+well so two hosts do not overwrite each other's artefacts:
+
+```sh
+# from the machine that owns the files
+tar czf - --exclude=target --exclude=.git . \
+  | ssh guest 'rm -rf ~/orbitive && mkdir -p ~/orbitive && tar xzf - -C ~/orbitive'
+ssh guest 'cd ~/orbitive && CARGO_TARGET_DIR=$HOME/.cargo-target/orbitive cargo test --workspace'
+```
+
+Reading from the host's own filesystem and writing to the guest's own disk
+keeps the share out of the compile path entirely. With that, every crate
+passes on FreeBSD 15 arm64, including the bounded waits over `_umtx_op`.
+
 ## Runtime contract
 
 Every process joining the same shared fleet must agree on the immutable fleet
