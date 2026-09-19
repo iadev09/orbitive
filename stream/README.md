@@ -5,25 +5,27 @@ Bounded process-to-process flows in shared memory.
 The crate has two layers. `Streams` is the original private duplex byte ring:
 two endpoints, ordered bytes, independent directions and no message
 boundaries. `exchange` is the typed invocation layer: one paired exchange,
-one lossless control channel, and physically separate request and response
-payload arenas. Applications normally use both through `orbitive::stream`.
+one lossless control channel, and either one fleet-wide payload arena or two
+directional arenas. Applications normally use both through
+`orbitive::stream`.
 
 An exchange is not an HTTP implementation and is not specific to upstream
 connections. It is the common shape for two runtimes handing each other an
-invocation while preserving bounded memory and backpressure. W1 is the
-client-facing representative: request producer and response consumer. W2 is
-the owner-facing representative: request consumer and response producer.
-Those names describe ownership, not protocol timing; W2 may start a response
-before W1 finishes the request.
+invocation while preserving bounded memory and backpressure. Side A creates
+the exchange and side B opens its ticket. Both receive the same endpoint
+shape: an outbound `Sender` and an inbound `Receiver`. A worker may hold either
+side of many exchanges at once; producer and consumer are capabilities, never
+fixed worker roles.
 
 ## Paired exchanges
 
-`Exchanges` opens three resources under distinct SHM kinds:
+`Exchanges` opens either two or three resources under distinct SHM kinds:
 
 - a control `Streams` table carrying fixed-size `Start`, `Data`, `Fin` and
   `Reset` events;
-- a request payload arena;
-- a response payload arena.
+- one shared payload arena whose per-node lanes serve both directions; or
+- separate A-to-B and B-to-A payload arenas when an adapter needs independent
+  memory and credit budgets for the two flows.
 
 Payload slots are fixed physical memory units. A chunk is a publication
 decision, not a slot: one `ChunkDescriptor` identifies an exchange, flow,
@@ -41,29 +43,37 @@ an uncommitted guard publishes no event and returns all of its slots. If the
 control ring cannot accept the descriptor, the failed commit returns those
 slots too, so readiness can be awaited and the whole chunk retried.
 
-The two payload arenas are fleet-wide rather than one SHM object per
-exchange. Separating them means a held upload cannot spend response credit.
-Dropping a received `PayloadChunk` returns its complete extent. A producer
-whose arena is full parks on a shared credit generation or returns `Pending`;
-it does not poll. Notifications are coalesced: publication does not require
-an unconditional kernel wake per payload slot or per chunk.
+Payload arenas are fleet-wide rather than one SHM object per exchange. Every
+sender allocates from its worker node's exclusive lane; a descriptor carries
+the arena kind, owner node and extent coordinates, so the peer finds the same
+bytes without request/response-specific addressing. The shared layout is the
+compact generic default. A directional layout is for adapters such as an HTTP
+or FastCGI relay where an upload must not spend response credit and the two
+directions deliberately use different slot and chunk budgets. Dropping a
+received `PayloadChunk` returns its complete extent. A sender whose lane is
+full parks on its producer node's credit generation or returns `Pending`; it
+does not poll. Returning a chunk wakes only the node that owns that extent,
+not every producer sharing the arena.
+Notifications are coalesced: publication does not require an unconditional
+kernel wake per payload slot or per chunk.
 
-Request and response each enforce `Start -> Data* -> (Fin | Reset)`, but the
-two state machines are independent. The transport enforces ordering,
-ownership, credit and terminal rules only. The handler decides what an event
-means and whether a reset in one flow should affect its paired flow.
+Both directions enforce `Start -> Data* -> (Fin | Reset)`, but their state
+machines are independent. Either endpoint may start sending first. The
+transport enforces ordering, ownership, credit and terminal rules only; an
+adapter decides whether a direction means request, response, invocation input
+or something else.
 
 `orbit-pool`'s `open_exchange_session` writes the lease and application
-metadata directly into a reserved request-start extent.
-`accept_exchange_session` validates that lease before W2 sees request data.
+metadata directly into side A's reserved start extent.
+`accept_exchange_session` validates that lease before exposing later data.
 This connects a fleet-owned resource to the exchange without teaching the
 transport what that resource is.
 
 `node_dead` is explicit and incarnation-scoped. Merely attaching a
 replacement does not reset either arena. Once a process is confirmed dead,
-its unpublished or unread producer allocations and its held consumer chunks
-return to their arena; chunks already held by a surviving consumer remain
-that consumer's. `reset_all` remains quiescent-owner maintenance, never an
+its unpublished or unread sender allocations and its held receiver chunks
+return to the arena; chunks already held by a surviving receiver remain that
+receiver's. `reset_all` remains quiescent-owner maintenance, never an
 implicit boot action.
 
 The matched benchmark is:

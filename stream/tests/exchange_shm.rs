@@ -7,17 +7,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use orbit_core::{Fleet, NodeId};
-use orbit_stream::exchange::{
-    ExchangeSpec, Exchanges, FlowEvent, PayloadArenaSpec,
-};
+use orbit_stream::exchange::{ExchangeSpec, Exchanges, FlowEvent, PayloadArenaSpec};
 use orbit_stream::{Incarnation, StreamSpec};
 
 fn spec() -> ExchangeSpec {
-    ExchangeSpec::new(
-        StreamSpec::new(220, 8, 512),
-        PayloadArenaSpec::new(221, 8, 256),
-        PayloadArenaSpec::new(222, 8, 256),
-    )
+    ExchangeSpec::new(StreamSpec::new(220, 8, 512), PayloadArenaSpec::new(221, 8, 256))
 }
 
 fn report(line: &str) {
@@ -25,11 +19,17 @@ fn report(line: &str) {
     std::io::stdout().flush().expect("flush peer report");
 }
 
-fn pattern(len: usize, salt: u8) -> Vec<u8> {
+fn pattern(
+    len: usize,
+    salt: u8
+) -> Vec<u8> {
     (0..len).map(|index| (index as u8).wrapping_mul(31).wrapping_add(salt)).collect()
 }
 
-fn fill_pattern(bytes: &mut [u8], salt: u8) {
+fn fill_pattern(
+    bytes: &mut [u8],
+    salt: u8
+) {
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = (index as u8).wrapping_mul(31).wrapping_add(salt);
     }
@@ -44,7 +44,7 @@ fn exchange_peer() {
     let exchanges = Exchanges::open(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
         Incarnation::new(11),
-        spec(),
+        spec()
     )
     .expect("peer exchanges");
     report("ready");
@@ -54,19 +54,17 @@ fn exchange_peer() {
         match line.expect("peer command").as_str() {
             "exchange" => {
                 let ticket = exchanges.blocking_take_offer().expect("exchange offer");
-                let mut client = exchanges.open_client(ticket).expect("client side");
-                client.request().wait_readable().expect("request ready");
-                let request = match client.request().try_next().expect("request start") {
+                let mut client = exchanges.open_peer(ticket).expect("client side");
+                client.receiver().wait_readable().expect("request ready");
+                let request = match client.receiver().try_next().expect("request start") {
                     FlowEvent::Start { metadata: Some(metadata) } => metadata,
-                    _ => panic!("expected request start metadata"),
+                    _ => panic!("expected request start metadata")
                 };
                 assert_eq!(&*request, pattern(777, 7));
                 assert_eq!(request.descriptor().slot_count(), 4);
 
-                let mut pending = client
-                    .response()
-                    .reserve_start(513)
-                    .expect("reserve response start");
+                let mut pending =
+                    client.sender().reserve_start(513).expect("reserve response start");
                 fill_pattern(&mut pending, 19);
                 let descriptor = pending.commit().expect("commit response start");
                 assert_eq!(descriptor.slot_count(), 3);
@@ -78,7 +76,7 @@ fn exchange_peer() {
                 report("released");
             }
             "drop" => break,
-            command => panic!("unknown command {command}"),
+            command => panic!("unknown command {command}")
         }
     }
     report("dropped");
@@ -86,7 +84,7 @@ fn exchange_peer() {
 
 struct Peer {
     child: Child,
-    lines: Receiver<String>,
+    lines: Receiver<String>
 }
 
 impl Peer {
@@ -113,7 +111,10 @@ impl Peer {
         peer
     }
 
-    fn expect(&self, expected: &str) {
+    fn expect(
+        &self,
+        expected: &str
+    ) {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let line = self
@@ -126,7 +127,10 @@ impl Peer {
         }
     }
 
-    fn send(&mut self, command: &str) {
+    fn send(
+        &mut self,
+        command: &str
+    ) {
         writeln!(self.child.stdin.as_mut().expect("peer stdin"), "{command}")
             .expect("send peer command");
         self.child.stdin.as_mut().expect("peer stdin").flush().expect("flush peer command");
@@ -160,14 +164,14 @@ fn reserved_chunks_cross_processes_without_an_intermediate_payload_buffer() {
     let owner = Exchanges::open(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
         Incarnation::new(10),
-        spec(),
+        spec()
     )
     .expect("owner exchanges");
     owner.reset_all();
     let mut peer = Peer::spawn(name);
 
     let (mut server, ticket) = owner.create().expect("server side");
-    let mut pending = server.request().reserve_start(777).expect("reserve request start");
+    let mut pending = server.sender().reserve_start(777).expect("reserve request start");
     fill_pattern(&mut pending, 7);
     let descriptor = pending.commit().expect("commit request start");
     assert_eq!(descriptor.slot_count(), 4);
@@ -175,14 +179,14 @@ fn reserved_chunks_cross_processes_without_an_intermediate_payload_buffer() {
     peer.send("exchange");
     peer.expect("exchanged");
 
-    server.response().wait_readable().expect("response ready");
-    let response = match server.response().try_next().expect("response start") {
+    server.receiver().wait_readable().expect("response ready");
+    let response = match server.receiver().try_next().expect("response start") {
         FlowEvent::Start { metadata: Some(metadata) } => metadata,
-        _ => panic!("expected response start metadata"),
+        _ => panic!("expected response start metadata")
     };
     assert_eq!(&*response, pattern(513, 19));
     assert_eq!(response.descriptor().slot_count(), 3);
-    assert_ne!(descriptor.arena_kind(), response.descriptor().arena_kind());
+    assert_eq!(descriptor.arena_kind(), response.descriptor().arena_kind());
 
     drop(response);
     peer.send("release");
@@ -192,37 +196,37 @@ fn reserved_chunks_cross_processes_without_an_intermediate_payload_buffer() {
 }
 
 #[test]
-fn paired_flows_cross_separate_shm_mappings() {
+fn paired_flows_share_one_payload_segment_across_process_mappings() {
     let name: &'static str = Box::leak(format!("ex{:x}", std::process::id()).into_boxed_str());
     let owner = Exchanges::open(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
         Incarnation::new(10),
-        spec(),
+        spec()
     )
     .expect("owner exchanges");
     owner.reset_all();
     let peer = Exchanges::open(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
         Incarnation::new(11),
-        spec(),
+        spec()
     )
     .expect("peer exchanges");
 
     let (server, ticket) = owner.create().expect("server side");
-    let client = peer.open_client(ticket).expect("client side");
+    let client = peer.open_peer(ticket).expect("client side");
     let (mut request_out, mut response_in) = server.split();
-    let (mut request_in, mut response_out) = client.split();
+    let (mut response_out, mut request_in) = client.split();
 
     request_out.start(Some(b"request metadata")).expect("request start");
     request_out.data(&vec![5; 513]).expect("request data");
     let request_metadata = match request_in.try_next().expect("request start event") {
         FlowEvent::Start { metadata: Some(metadata) } => metadata,
-        _ => panic!("expected request start"),
+        _ => panic!("expected request start")
     };
     assert_eq!(&*request_metadata, b"request metadata");
     let request_data = match request_in.try_next().expect("request data event") {
         FlowEvent::Data(chunk) => chunk,
-        _ => panic!("expected request data"),
+        _ => panic!("expected request data")
     };
     assert_eq!(request_data.len(), 513);
     assert_eq!(request_data.descriptor().slot_count(), 3);
@@ -231,15 +235,17 @@ fn paired_flows_cross_separate_shm_mappings() {
     response_out.data(b"response data").expect("response data");
     let response_metadata = match response_in.try_next().expect("response start event") {
         FlowEvent::Start { metadata: Some(metadata) } => metadata,
-        _ => panic!("expected response start"),
+        _ => panic!("expected response start")
     };
     assert_eq!(&*response_metadata, b"response metadata");
     let response_data = match response_in.try_next().expect("response data event") {
         FlowEvent::Data(chunk) => chunk,
-        _ => panic!("expected response data"),
+        _ => panic!("expected response data")
     };
     assert_eq!(&*response_data, b"response data");
-    assert_ne!(request_data.descriptor().arena_kind(), response_data.descriptor().arena_kind());
+    assert_eq!(request_data.descriptor().arena_kind(), response_data.descriptor().arena_kind());
+    assert_eq!(request_data.descriptor().owner_node(), 0);
+    assert_eq!(response_data.descriptor().owner_node(), 1);
 
     drop((request_metadata, request_data, response_metadata, response_data));
     request_out.finish().expect("request fin");

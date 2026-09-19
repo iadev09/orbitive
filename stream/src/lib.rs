@@ -25,20 +25,19 @@
 //! turns the fleet's doorbell into those wakes. No thread and no descriptor
 //! per stream.
 //!
-//! [`exchange`] builds a typed request/response event program above that
-//! lossless control path. Payload bytes live in two separate shared arenas:
-//! fixed-size slots are physical allocation units, while each published
-//! chunk is one descriptor spanning as many contiguous slots as that
-//! protocol decision needs. Request and response have independent credit,
-//! FIN and RESET state, so either direction may start without imposing an
-//! HTTP sequencing rule on the transport.
+//! [`exchange`] builds a symmetric event program above that lossless control
+//! path. Payload bytes live in one shared arena whose per-node lanes make
+//! allocation ownership explicit: fixed-size slots are physical allocation
+//! units, while each published chunk is one descriptor spanning as many
+//! contiguous slots as that runtime decision needs. Both directions have
+//! independent START, FIN and RESET state, so either may begin first without
+//! imposing an application sequencing rule on the transport.
 
-use std::fmt;
-use std::io;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+use std::{fmt, io};
 
 use bytes::{Bytes, BytesMut};
 use orbit_core::{Fleet, NetId64};
@@ -52,12 +51,12 @@ mod wake;
 
 use layout::{
     Direction, FLAG_FIN, FLAG_READER_GONE, FLAG_RESET, GENERATION_MASK, SIDE_CLAIMED, SIDE_FREE,
-    SIDE_RELEASED, SLOT_BITS, SLOT_EMPTY, SLOT_LIVE, SLOT_MASK, Slot,
+    SIDE_RELEASED, SLOT_BITS, SLOT_EMPTY, SLOT_LIVE, SLOT_MASK, Slot
 };
 use orbit_core::NodeId;
-use table::Table;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use orbit_core::readiness::Readiness;
+use table::Table;
 pub use table::{segment_size, segment_size_for};
 use wake::Interest;
 
@@ -101,13 +100,17 @@ pub struct StreamSpec {
     /// most 65 536.
     pub lane_capacity: usize,
     /// Bytes each direction holds before its writer waits. A power of two.
-    pub buffer_bytes: usize,
+    pub buffer_bytes: usize
 }
 
 impl StreamSpec {
     pub const DEFAULT: Self = Self::new(STREAM_KIND, STREAM_LANE_CAPACITY, STREAM_BUFFER_BYTES);
 
-    pub const fn new(kind: u8, lane_capacity: usize, buffer_bytes: usize) -> Self {
+    pub const fn new(
+        kind: u8,
+        lane_capacity: usize,
+        buffer_bytes: usize
+    ) -> Self {
         Self { kind, lane_capacity, buffer_bytes }
     }
 
@@ -161,16 +164,16 @@ pub enum Error {
     AlreadyClaimed(Ticket),
     /// Every slot in this process's lane is in use.
     Full {
-        capacity: usize,
+        capacity: usize
     },
     /// The producer's payload arena has no contiguous run large enough.
     PayloadFull {
-        requested_slots: usize,
+        requested_slots: usize
     },
     /// One chunk cannot fit in a lane of the selected payload arena.
     PayloadTooLarge {
         len: usize,
-        capacity: usize,
+        capacity: usize
     },
     /// The text or id is not a stream address.
     Malformed(String),
@@ -182,11 +185,14 @@ pub enum Error {
     PeerGone,
     /// Nothing to read, or no room to write, right now.
     WouldBlock,
-    Io(io::Error),
+    Io(io::Error)
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         match self {
             Self::Stale(id) => write!(f, "stream {id} has ended"),
             Self::AlreadyClaimed(ticket) => write!(f, "stream side {ticket} is already held"),
@@ -202,7 +208,7 @@ impl fmt::Display for Error {
             Self::Reset => f.write_str("stream direction was reset by the peer"),
             Self::PeerGone => f.write_str("stream peer reader is gone"),
             Self::WouldBlock => f.write_str("stream operation would block"),
-            Self::Io(error) => write!(f, "Orbit stream io error: {error}"),
+            Self::Io(error) => write!(f, "Orbit stream io error: {error}")
         }
     }
 }
@@ -211,7 +217,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            _ => None,
+            _ => None
         }
     }
 }
@@ -234,7 +240,7 @@ impl From<Error> for io::Error {
             Error::Reset => io::ErrorKind::ConnectionReset,
             Error::PeerGone => io::ErrorKind::BrokenPipe,
             Error::WouldBlock => io::ErrorKind::WouldBlock,
-            Error::Io(error) => error.kind(),
+            Error::Io(error) => error.kind()
         };
         io::Error::new(kind, value)
     }
@@ -271,17 +277,25 @@ impl StreamId {
         (self.0.counter() >> SLOT_BITS) as u32
     }
 
-    fn make(kind: u8, node: u16, slot: u32, generation: u32) -> Self {
+    fn make(
+        kind: u8,
+        node: u16,
+        slot: u32,
+        generation: u32
+    ) -> Self {
         Self(NetId64::make(
             kind,
             node,
-            ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK),
+            ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK)
         ))
     }
 }
 
 impl fmt::Display for StreamId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -290,9 +304,7 @@ impl FromStr for StreamId {
     type Err = Error;
 
     fn from_str(text: &str) -> Result<Self> {
-        text.parse::<NetId64>()
-            .map(Self)
-            .map_err(|_| Error::Malformed(text.to_owned()))
+        text.parse::<NetId64>().map(Self).map_err(|_| Error::Malformed(text.to_owned()))
     }
 }
 
@@ -300,14 +312,14 @@ impl FromStr for StreamId {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Side {
     A,
-    B,
+    B
 }
 
 impl Side {
     const fn index(self) -> usize {
         match self {
             Self::A => 0,
-            Self::B => 1,
+            Self::B => 1
         }
     }
 
@@ -324,7 +336,7 @@ impl Side {
     const fn letter(self) -> char {
         match self {
             Self::A => 'a',
-            Self::B => 'b',
+            Self::B => 'b'
         }
     }
 }
@@ -341,11 +353,14 @@ impl Side {
 pub struct Ticket {
     pub id: StreamId,
     pub side: Side,
-    pub epoch: u64,
+    pub epoch: u64
 }
 
 impl fmt::Display for Ticket {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         write!(f, "{}/{}/{}", self.id, self.side.letter(), self.epoch)
     }
 }
@@ -360,12 +375,12 @@ impl FromStr for Ticket {
         let side = match side {
             "a" => Side::A,
             "b" => Side::B,
-            _ => return Err(malformed()),
+            _ => return Err(malformed())
         };
         Ok(Self {
             id: id.parse().map_err(|_| malformed())?,
             side,
-            epoch: epoch.parse().map_err(|_| malformed())?,
+            epoch: epoch.parse().map_err(|_| malformed())?
         })
     }
 }
@@ -392,14 +407,17 @@ impl Incarnation {
 /// the same table, the same driver and the same wakers.
 #[derive(Clone)]
 pub struct Streams {
-    table: Arc<Table>,
+    table: Arc<Table>
 }
 
 impl Streams {
     /// Open the fleet's table as this process's incarnation. Every side
     /// this process claims is stamped with it, and [`Streams::node_dead`]
     /// for the same node and incarnation is what ends those sides.
-    pub fn new(fleet: Arc<Fleet>, incarnation: Incarnation) -> Result<Self> {
+    pub fn new(
+        fleet: Arc<Fleet>,
+        incarnation: Incarnation
+    ) -> Result<Self> {
         Self::with_spec(fleet, incarnation, StreamSpec::DEFAULT)
     }
 
@@ -410,12 +428,10 @@ impl Streams {
     pub fn with_spec(
         fleet: Arc<Fleet>,
         incarnation: Incarnation,
-        spec: StreamSpec,
+        spec: StreamSpec
     ) -> Result<Self> {
         spec.validate()?;
-        Ok(Self {
-            table: table::open(&fleet, incarnation, spec)?,
-        })
+        Ok(Self { table: table::open(&fleet, incarnation, spec)? })
     }
 
     /// The kind this table's segment lives under.
@@ -452,26 +468,17 @@ impl Streams {
             self.table.kind(),
             self.table.node(),
             (index % self.table.geometry().lane_capacity) as u32,
-            generation,
+            generation
         );
-        let handle = Arc::new(Handle {
-            table: Arc::clone(&self.table),
-            index,
-            id,
-            side: Side::A,
-        });
-        Ok((
-            Endpoint::new(handle),
-            Ticket {
-                id,
-                side: Side::B,
-                epoch: self.table.epoch(),
-            },
-        ))
+        let handle = Arc::new(Handle { table: Arc::clone(&self.table), index, id, side: Side::A });
+        Ok((Endpoint::new(handle), Ticket { id, side: Side::B, epoch: self.table.epoch() }))
     }
 
     /// Hold the side a ticket names. Each side can be held once per stream.
-    pub fn open(&self, ticket: Ticket) -> Result<Endpoint> {
+    pub fn open(
+        &self,
+        ticket: Ticket
+    ) -> Result<Endpoint> {
         let index = self.locate(ticket.id)?;
         if ticket.epoch != self.table.epoch() {
             return Err(Error::Stale(ticket.id));
@@ -494,7 +501,7 @@ impl Streams {
                 SIDE_CLAIMED,
                 SIDE_FREE,
                 Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::SeqCst
             );
             return Err(Error::Stale(ticket.id));
         }
@@ -508,15 +515,16 @@ impl Streams {
             table: Arc::clone(&self.table),
             index,
             id: ticket.id,
-            side: ticket.side,
+            side: ticket.side
         })))
     }
 
     /// Whether the address names a live stream right now.
-    pub fn is_live(&self, id: StreamId) -> bool {
-        self.locate(id)
-            .map(|index| self.table.slots()[index].is(id.generation()))
-            .unwrap_or(false)
+    pub fn is_live(
+        &self,
+        id: StreamId
+    ) -> bool {
+        self.locate(id).map(|index| self.table.slots()[index].is(id.generation())).unwrap_or(false)
     }
 
     /// Tell `node`'s process that side B of this stream is its to take:
@@ -524,7 +532,11 @@ impl Streams {
     /// Discovery only; the ticket may just as well travel by any other
     /// channel. An offer is seen once, by that node, through
     /// [`Streams::take_offer`] and its waiting forms.
-    pub fn offer(&self, ticket: Ticket, to: NodeId) -> Result<()> {
+    pub fn offer(
+        &self,
+        ticket: Ticket,
+        to: NodeId
+    ) -> Result<()> {
         let index = self.locate(ticket.id)?;
         if ticket.epoch != self.table.epoch()
             || !self.table.slots()[index].is(ticket.id.generation())
@@ -549,7 +561,10 @@ impl Streams {
     /// A worker whose shutdown must be observed waits this way rather
     /// than parking on the next request forever.
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-    pub fn take_offer_timeout(&self, timeout: Duration) -> Result<Option<Ticket>> {
+    pub fn take_offer_timeout(
+        &self,
+        timeout: Duration
+    ) -> Result<Option<Ticket>> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(ticket) = self.take_offer() {
@@ -579,7 +594,7 @@ impl Streams {
     /// and `Pending` comes back.
     pub fn poll_take_offer(
         &self,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>
     ) -> std::task::Poll<Result<Ticket>> {
         if let Some(ticket) = self.take_offer() {
             return std::task::Poll::Ready(Ok(ticket));
@@ -589,7 +604,7 @@ impl Streams {
         }
         match self.take_offer() {
             Some(ticket) => std::task::Poll::Ready(Ok(ticket)),
-            None => std::task::Poll::Pending,
+            None => std::task::Poll::Pending
         }
     }
 
@@ -610,7 +625,7 @@ impl Streams {
                 }
                 let holder = (
                     NodeId::new(slot.node[side].load(Ordering::Acquire)),
-                    Incarnation::new(slot.incarnation[side].load(Ordering::Acquire)),
+                    Incarnation::new(slot.incarnation[side].load(Ordering::Acquire))
                 );
                 if !seen.contains(&holder) {
                     seen.push(holder);
@@ -627,7 +642,11 @@ impl Streams {
     /// of the other side wakes with an error; that holder keeps the slot
     /// until it drops its handles, and only then is the slot reused. A
     /// report for another incarnation of the same node touches nothing.
-    pub fn node_dead(&self, node: NodeId, incarnation: Incarnation) {
+    pub fn node_dead(
+        &self,
+        node: NodeId,
+        incarnation: Incarnation
+    ) {
         self.table.node_dead(node.get(), incarnation.get());
     }
 
@@ -637,7 +656,10 @@ impl Streams {
         self.table.reset_all();
     }
 
-    fn ticket_for(&self, index: usize) -> Option<Ticket> {
+    fn ticket_for(
+        &self,
+        index: usize
+    ) -> Option<Ticket> {
         let slot = &self.table.slots()[index];
         let generation = slot.generation.load(Ordering::Acquire);
         if !slot.is(generation) {
@@ -648,13 +670,9 @@ impl Streams {
             self.table.kind(),
             (index / lane_capacity) as u16,
             (index % lane_capacity) as u32,
-            generation,
+            generation
         );
-        Some(Ticket {
-            id,
-            side: Side::B,
-            epoch: self.table.epoch(),
-        })
+        Some(Ticket { id, side: Side::B, epoch: self.table.epoch() })
     }
 
     /// Remove the SHM object. Existing mappings stay valid until their
@@ -664,7 +682,10 @@ impl Streams {
         self.table.unlink()
     }
 
-    fn locate(&self, id: StreamId) -> Result<usize> {
+    fn locate(
+        &self,
+        id: StreamId
+    ) -> Result<usize> {
         let geometry = self.table.geometry();
         if id.kind() != self.table.kind()
             || usize::from(id.node()) >= geometry.fleet_capacity
@@ -683,25 +704,27 @@ struct Handle {
     table: Arc<Table>,
     index: usize,
     id: StreamId,
-    side: Side,
+    side: Side
 }
 
 impl Handle {
     fn slot(&self) -> Result<&Slot> {
         let slot = &self.table.slots()[self.index];
-        if slot.is(self.id.generation()) {
-            Ok(slot)
-        } else {
-            Err(Error::Stale(self.id))
-        }
+        if slot.is(self.id.generation()) { Ok(slot) } else { Err(Error::Stale(self.id)) }
     }
 
-    fn direction(slot: &Slot, direction: usize) -> &Direction {
+    fn direction(
+        slot: &Slot,
+        direction: usize
+    ) -> &Direction {
         &slot.directions[direction]
     }
 
     /// One attempt at the direction this side writes into.
-    fn try_write(&self, buf: &[u8]) -> Result<usize> {
+    fn try_write(
+        &self,
+        buf: &[u8]
+    ) -> Result<usize> {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.write_direction());
         let flags = direction.flags();
@@ -751,7 +774,10 @@ impl Handle {
     }
 
     /// Publish `buf` as one indivisible write, or publish nothing.
-    fn try_write_exact(&self, buf: &[u8]) -> Result<()> {
+    fn try_write_exact(
+        &self,
+        buf: &[u8]
+    ) -> Result<()> {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.write_direction());
         let flags = direction.flags();
@@ -796,7 +822,10 @@ impl Handle {
 
     /// One attempt at the direction this side reads from. `Ok(0)` with a
     /// non-empty buffer is clean end of stream.
-    fn try_read(&self, buf: &mut [u8]) -> Result<usize> {
+    fn try_read(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<usize> {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.read_direction());
         let flags = direction.flags();
@@ -839,7 +868,10 @@ impl Handle {
     }
 
     /// Consume exactly one complete frame, or consume nothing.
-    fn try_read_exact(&self, buf: &mut [u8]) -> Result<()> {
+    fn try_read_exact(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<()> {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.read_direction());
         let flags = direction.flags();
@@ -884,7 +916,11 @@ impl Handle {
         Ok(())
     }
 
-    fn set_flag(&self, direction_index: usize, flag: u8) {
+    fn set_flag(
+        &self,
+        direction_index: usize,
+        flag: u8
+    ) {
         if let Ok(slot) = self.slot() {
             let direction = Self::direction(slot, direction_index);
             if direction.flags.fetch_or(flag, Ordering::SeqCst) & flag == 0 {
@@ -900,7 +936,7 @@ impl Handle {
         &self,
         direction_index: usize,
         ready: impl Fn(&Direction) -> bool,
-        timeout: Duration,
+        timeout: Duration
     ) -> Result<bool> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -930,7 +966,11 @@ impl Handle {
         }
     }
 
-    fn wait_until(&self, direction_index: usize, ready: impl Fn(&Direction) -> bool) -> Result<()> {
+    fn wait_until(
+        &self,
+        direction_index: usize,
+        ready: impl Fn(&Direction) -> bool
+    ) -> Result<()> {
         loop {
             let slot = self.slot()?;
             let direction = Self::direction(slot, direction_index);
@@ -939,11 +979,8 @@ impl Handle {
             }
             direction.waiters.fetch_add(1, Ordering::SeqCst);
             let since = direction.changes.load(Ordering::SeqCst);
-            let outcome = if ready(direction) {
-                Ok(())
-            } else {
-                wait_on(&direction.changes, since)
-            };
+            let outcome =
+                if ready(direction) { Ok(()) } else { wait_on(&direction.changes, since) };
             direction.waiters.fetch_sub(1, Ordering::SeqCst);
             outcome?;
         }
@@ -955,11 +992,11 @@ impl Handle {
         &self,
         interest: Interest,
         ready: impl Fn(&Direction) -> bool,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>
     ) -> std::task::Poll<Result<()>> {
         let slot = match self.slot() {
             Ok(slot) => slot,
-            Err(error) => return std::task::Poll::Ready(Err(error)),
+            Err(error) => return std::task::Poll::Ready(Err(error))
         };
         let direction = Self::direction(slot, interest.direction);
         if ready(direction) {
@@ -968,11 +1005,7 @@ impl Handle {
         if let Err(error) = self.table.register(self.index, interest, cx.waker()) {
             return std::task::Poll::Ready(Err(error));
         }
-        if ready(direction) {
-            std::task::Poll::Ready(Ok(()))
-        } else {
-            std::task::Poll::Pending
-        }
+        if ready(direction) { std::task::Poll::Ready(Ok(())) } else { std::task::Poll::Pending }
     }
 }
 
@@ -981,14 +1014,20 @@ fn readable(direction: &Direction) -> bool {
         || direction.flags() & (FLAG_FIN | FLAG_RESET) != 0
 }
 
-fn writable(direction: &Direction, buffer_bytes: usize) -> bool {
+fn writable(
+    direction: &Direction,
+    buffer_bytes: usize
+) -> bool {
     let queued =
         (direction.head.load(Ordering::Relaxed) - direction.tail.load(Ordering::Acquire)) as usize;
-    queued < buffer_bytes
-        || direction.flags() & (FLAG_FIN | FLAG_RESET | FLAG_READER_GONE) != 0
+    queued < buffer_bytes || direction.flags() & (FLAG_FIN | FLAG_RESET | FLAG_READER_GONE) != 0
 }
 
-fn writable_exact(direction: &Direction, buffer_bytes: usize, needed: usize) -> bool {
+fn writable_exact(
+    direction: &Direction,
+    buffer_bytes: usize,
+    needed: usize
+) -> bool {
     let queued =
         (direction.head.load(Ordering::Relaxed) - direction.tail.load(Ordering::Acquire)) as usize;
     buffer_bytes.saturating_sub(queued) >= needed
@@ -1007,12 +1046,7 @@ impl Drop for Handle {
         // Only a side that is still ours is ours to release: a death
         // report may have finished it already.
         if slot.claimed[self.side.index()]
-            .compare_exchange(
-                SIDE_CLAIMED,
-                SIDE_RELEASED,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
+            .compare_exchange(SIDE_CLAIMED, SIDE_RELEASED, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
             return;
@@ -1026,7 +1060,7 @@ impl Drop for Handle {
                 SLOT_LIVE,
                 SLOT_EMPTY,
                 Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::SeqCst
             );
             for direction in &slot.directions {
                 // A parked waiter with a handle to this generation wakes
@@ -1046,19 +1080,14 @@ impl Drop for Handle {
 /// gives the halves to two tasks.
 pub struct Endpoint {
     read: ReadHalf,
-    write: WriteHalf,
+    write: WriteHalf
 }
 
 impl Endpoint {
     fn new(handle: Arc<Handle>) -> Self {
         Self {
-            read: ReadHalf {
-                handle: Arc::clone(&handle),
-            },
-            write: WriteHalf {
-                handle,
-                shut: false,
-            },
+            read: ReadHalf { handle: Arc::clone(&handle) },
+            write: WriteHalf { handle, shut: false }
         }
     }
 
@@ -1074,35 +1103,59 @@ impl Endpoint {
         (self.read, self.write)
     }
 
-    pub fn try_read(&self, buf: &mut [u8]) -> Result<usize> {
+    pub fn try_read(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<usize> {
         self.read.try_read(buf)
     }
 
-    pub fn try_read_exact(&self, buf: &mut [u8]) -> Result<()> {
+    pub fn try_read_exact(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<()> {
         self.read.try_read_exact(buf)
     }
 
-    pub fn blocking_read(&self, buf: &mut [u8]) -> Result<usize> {
+    pub fn blocking_read(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<usize> {
         self.read.blocking_read(buf)
     }
 
-    pub fn blocking_read_chunk(&self, max: usize) -> Result<Bytes> {
+    pub fn blocking_read_chunk(
+        &self,
+        max: usize
+    ) -> Result<Bytes> {
         self.read.blocking_read_chunk(max)
     }
 
-    pub fn try_write(&self, buf: &[u8]) -> Result<usize> {
+    pub fn try_write(
+        &self,
+        buf: &[u8]
+    ) -> Result<usize> {
         self.write.try_write(buf)
     }
 
-    pub fn try_write_exact(&self, buf: &[u8]) -> Result<()> {
+    pub fn try_write_exact(
+        &self,
+        buf: &[u8]
+    ) -> Result<()> {
         self.write.try_write_exact(buf)
     }
 
-    pub fn blocking_write(&self, buf: &[u8]) -> Result<usize> {
+    pub fn blocking_write(
+        &self,
+        buf: &[u8]
+    ) -> Result<usize> {
         self.write.blocking_write(buf)
     }
 
-    pub fn blocking_write_all(&self, buf: &[u8]) -> Result<()> {
+    pub fn blocking_write_all(
+        &self,
+        buf: &[u8]
+    ) -> Result<()> {
         self.write.blocking_write_all(buf)
     }
 
@@ -1118,7 +1171,7 @@ impl Endpoint {
 /// The reading end of one side. Dropping it tells the peer's writer that
 /// nothing more will be read.
 pub struct ReadHalf {
-    handle: Arc<Handle>,
+    handle: Arc<Handle>
 }
 
 impl ReadHalf {
@@ -1128,29 +1181,41 @@ impl ReadHalf {
 
     /// Read what is there now. `Ok(0)` is clean end of stream;
     /// [`Error::WouldBlock`] means nothing yet.
-    pub fn try_read(&self, buf: &mut [u8]) -> Result<usize> {
+    pub fn try_read(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<usize> {
         self.handle.try_read(buf)
     }
 
     /// Read the complete buffer atomically. When it is not all available,
     /// returns [`Error::WouldBlock`] without consuming a prefix.
-    pub fn try_read_exact(&self, buf: &mut [u8]) -> Result<()> {
+    pub fn try_read_exact(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<()> {
         self.handle.try_read_exact(buf)
     }
 
     /// Park until something can be read, then read it. `Ok(0)` is clean
     /// end of stream. Blocks the thread; an async runtime uses `AsyncRead`.
-    pub fn blocking_read(&self, buf: &mut [u8]) -> Result<usize> {
+    pub fn blocking_read(
+        &self,
+        buf: &mut [u8]
+    ) -> Result<usize> {
         loop {
             match self.handle.try_read(buf) {
                 Err(Error::WouldBlock) => self.wait_readable()?,
-                other => return other,
+                other => return other
             }
         }
     }
 
     /// Up to `max` bytes as one owned chunk; empty at clean end of stream.
-    pub fn blocking_read_chunk(&self, max: usize) -> Result<Bytes> {
+    pub fn blocking_read_chunk(
+        &self,
+        max: usize
+    ) -> Result<Bytes> {
         let mut chunk = BytesMut::zeroed(max);
         let len = self.blocking_read(&mut chunk)?;
         chunk.truncate(len);
@@ -1159,37 +1224,37 @@ impl ReadHalf {
 
     /// The same wait, bounded: `false` is the timeout and nothing else.
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-    pub fn wait_readable_timeout(&self, timeout: Duration) -> Result<bool> {
-        self.handle
-            .wait_until_timeout(self.handle.side.read_direction(), readable, timeout)
+    pub fn wait_readable_timeout(
+        &self,
+        timeout: Duration
+    ) -> Result<bool> {
+        self.handle.wait_until_timeout(self.handle.side.read_direction(), readable, timeout)
     }
 
     /// Park until a read would make progress or the direction ended.
     pub fn wait_readable(&self) -> Result<()> {
-        self.handle
-            .wait_until(self.handle.side.read_direction(), readable)
+        self.handle.wait_until(self.handle.side.read_direction(), readable)
     }
 
     /// Readiness for a task: `Ready` when a read would make progress or the
     /// direction ended, otherwise the waker is registered and `Pending`
     /// comes back. Runtime-neutral; the `tokio` feature builds `AsyncRead`
     /// on it.
-    pub fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<()>> {
+    pub fn poll_readable(
+        &self,
+        cx: &mut std::task::Context<'_>
+    ) -> std::task::Poll<Result<()>> {
         self.handle.poll_ready(
-            Interest {
-                direction: self.handle.side.read_direction(),
-                writer: false,
-            },
+            Interest { direction: self.handle.side.read_direction(), writer: false },
             readable,
-            cx,
+            cx
         )
     }
 }
 
 impl Drop for ReadHalf {
     fn drop(&mut self) {
-        self.handle
-            .set_flag(self.handle.side.read_direction(), FLAG_READER_GONE);
+        self.handle.set_flag(self.handle.side.read_direction(), FLAG_READER_GONE);
     }
 }
 
@@ -1197,7 +1262,7 @@ impl Drop for ReadHalf {
 /// resets the direction, as a dropped socket would.
 pub struct WriteHalf {
     handle: Arc<Handle>,
-    shut: bool,
+    shut: bool
 }
 
 impl WriteHalf {
@@ -1206,29 +1271,41 @@ impl WriteHalf {
     }
 
     /// Write what fits now; [`Error::WouldBlock`] when the ring is full.
-    pub fn try_write(&self, buf: &[u8]) -> Result<usize> {
+    pub fn try_write(
+        &self,
+        buf: &[u8]
+    ) -> Result<usize> {
         self.handle.try_write(buf)
     }
 
     /// Write the complete buffer atomically. When it does not all fit,
     /// returns [`Error::WouldBlock`] without publishing a prefix.
-    pub fn try_write_exact(&self, buf: &[u8]) -> Result<()> {
+    pub fn try_write_exact(
+        &self,
+        buf: &[u8]
+    ) -> Result<()> {
         self.handle.try_write_exact(buf)
     }
 
     /// Park until something fits, then write it. Blocks the thread.
-    pub fn blocking_write(&self, buf: &[u8]) -> Result<usize> {
+    pub fn blocking_write(
+        &self,
+        buf: &[u8]
+    ) -> Result<usize> {
         loop {
             match self.handle.try_write(buf) {
                 Err(Error::WouldBlock) => self.wait_writable()?,
-                other => return other,
+                other => return other
             }
         }
     }
 
     /// Write everything, waiting as needed. A failure part-way has already
     /// committed a prefix; nothing is replayed.
-    pub fn blocking_write_all(&self, mut buf: &[u8]) -> Result<()> {
+    pub fn blocking_write_all(
+        &self,
+        mut buf: &[u8]
+    ) -> Result<()> {
         while !buf.is_empty() {
             let written = self.blocking_write(buf)?;
             buf = &buf[written..];
@@ -1241,8 +1318,7 @@ impl WriteHalf {
     /// unaffected. `AsyncWriteExt::shutdown` does the same.
     pub fn finish(&mut self) -> Result<()> {
         self.shut = true;
-        self.handle
-            .set_flag(self.handle.side.write_direction(), FLAG_FIN);
+        self.handle.set_flag(self.handle.side.write_direction(), FLAG_FIN);
         Ok(())
     }
 
@@ -1250,20 +1326,22 @@ impl WriteHalf {
     /// are discarded.
     pub fn reset(&mut self) {
         self.shut = true;
-        self.handle
-            .set_flag(self.handle.side.write_direction(), FLAG_RESET);
+        self.handle.set_flag(self.handle.side.write_direction(), FLAG_RESET);
     }
 
     /// The same wait, bounded: `false` is the timeout and nothing else,
     /// which is how a caller with a deadline of its own gives up without
     /// giving up its stream.
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-    pub fn wait_writable_timeout(&self, timeout: Duration) -> Result<bool> {
+    pub fn wait_writable_timeout(
+        &self,
+        timeout: Duration
+    ) -> Result<bool> {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
         self.handle.wait_until_timeout(
             self.handle.side.write_direction(),
             |direction| writable(direction, buffer_bytes),
-            timeout,
+            timeout
         )
     }
 
@@ -1276,7 +1354,10 @@ impl WriteHalf {
     }
 
     /// Park until an atomic write of `needed` bytes can be attempted.
-    pub fn wait_writable_exact(&self, needed: usize) -> Result<()> {
+    pub fn wait_writable_exact(
+        &self,
+        needed: usize
+    ) -> Result<()> {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
         if needed > buffer_bytes {
             return Err(Error::Malformed(format!(
@@ -1292,15 +1373,15 @@ impl WriteHalf {
     /// the direction ended, otherwise the waker is registered and `Pending`
     /// comes back. Runtime-neutral; the `tokio` feature builds `AsyncWrite`
     /// on it.
-    pub fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<()>> {
+    pub fn poll_writable(
+        &self,
+        cx: &mut std::task::Context<'_>
+    ) -> std::task::Poll<Result<()>> {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
         self.handle.poll_ready(
-            Interest {
-                direction: self.handle.side.write_direction(),
-                writer: true,
-            },
+            Interest { direction: self.handle.side.write_direction(), writer: true },
             |direction| writable(direction, buffer_bytes),
-            cx,
+            cx
         )
     }
 
@@ -1308,7 +1389,7 @@ impl WriteHalf {
     pub fn poll_writable_exact(
         &self,
         needed: usize,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>
     ) -> std::task::Poll<Result<()>> {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
         if needed > buffer_bytes {
@@ -1317,12 +1398,9 @@ impl WriteHalf {
             ))));
         }
         self.handle.poll_ready(
-            Interest {
-                direction: self.handle.side.write_direction(),
-                writer: true,
-            },
+            Interest { direction: self.handle.side.write_direction(), writer: true },
             |direction| writable_exact(direction, buffer_bytes, needed),
-            cx,
+            cx
         )
     }
 }
@@ -1330,8 +1408,7 @@ impl WriteHalf {
 impl Drop for WriteHalf {
     fn drop(&mut self) {
         if !self.shut {
-            self.handle
-                .set_flag(self.handle.side.write_direction(), FLAG_RESET);
+            self.handle.set_flag(self.handle.side.write_direction(), FLAG_RESET);
         }
     }
 }
@@ -1356,17 +1433,30 @@ pub(crate) fn waits_supported() -> bool {
 /// Park until the word moves or `timeout` passes. `false` is the
 /// timeout and nothing else.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-pub(crate) fn wait_on_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> Result<bool> {
+pub(crate) fn wait_on_timeout(
+    word: &AtomicU32,
+    expected: u32,
+    timeout: Duration
+) -> Result<bool> {
     orbit_core::sync::wait_word_timeout(word, expected, timeout).map_err(Error::Io)
 }
 
-pub(crate) fn wait_on(word: &AtomicU32, expected: u32) -> Result<()> {
+pub(crate) fn wait_on(
+    word: &AtomicU32,
+    expected: u32
+) -> Result<()> {
     orbit_core::sync::wait_word(word, expected).map_err(Error::Io)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
-pub(crate) fn wait_on(_word: &AtomicU32, _expected: u32) -> Result<()> {
-    Err(Error::Io(std::io::Error::new(std::io::ErrorKind::Unsupported, "orbit-stream needs a platform that can wait on a shared word")))
+pub(crate) fn wait_on(
+    _word: &AtomicU32,
+    _expected: u32
+) -> Result<()> {
+    Err(Error::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "orbit-stream needs a platform that can wait on a shared word"
+    )))
 }
 
 /// Wake everyone parked on `word`; nothing to do where nobody can park.
@@ -1389,7 +1479,7 @@ mod tests {
     use orbit_core::{Fleet, NodeId};
 
     use super::{
-        Error, Incarnation, STREAM_BUFFER_BYTES, STREAM_LANE_CAPACITY, Side, Streams, Ticket,
+        Error, Incarnation, STREAM_BUFFER_BYTES, STREAM_LANE_CAPACITY, Side, Streams, Ticket
     };
 
     fn streams(name: &'static str) -> Streams {
@@ -1440,10 +1530,7 @@ mod tests {
         let streams = streams("stream-claim");
         let (a, ticket) = streams.create().unwrap();
         let b = streams.open(ticket).unwrap();
-        assert!(matches!(
-            streams.open(ticket),
-            Err(Error::AlreadyClaimed(_))
-        ));
+        assert!(matches!(streams.open(ticket), Err(Error::AlreadyClaimed(_))));
         assert!(streams.is_live(ticket.id));
 
         drop(a);
@@ -1509,9 +1596,7 @@ mod tests {
         let mut buf = vec![0_u8; STREAM_BUFFER_BYTES - 5];
         assert_eq!(b.blocking_read(&mut buf).unwrap(), STREAM_BUFFER_BYTES - 5);
         // Room again; the next write wraps around the end of the ring.
-        let tail = (0..STREAM_BUFFER_BYTES)
-            .map(|i| i as u8)
-            .collect::<Vec<_>>();
+        let tail = (0..STREAM_BUFFER_BYTES).map(|i| i as u8).collect::<Vec<_>>();
         assert_eq!(a.try_write(&tail).unwrap(), STREAM_BUFFER_BYTES - 5);
 
         let mut rest = vec![0_u8; 5];
@@ -1599,18 +1684,9 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(30));
         streams.node_dead(NodeId::ZERO, Incarnation::new(1));
-        assert!(matches!(
-            reader.join().unwrap(),
-            Err(Error::Reset | Error::Stale(_))
-        ));
-        assert!(matches!(
-            b.try_write(b"x"),
-            Err(Error::Reset | Error::Stale(_))
-        ));
-        assert!(matches!(
-            streams.open(ticket),
-            Err(Error::AlreadyClaimed(_) | Error::Stale(_))
-        ));
+        assert!(matches!(reader.join().unwrap(), Err(Error::Reset | Error::Stale(_))));
+        assert!(matches!(b.try_write(b"x"), Err(Error::Reset | Error::Stale(_))));
+        assert!(matches!(streams.open(ticket), Err(Error::AlreadyClaimed(_) | Error::Stale(_))));
         drop(b);
         assert!(!streams.is_live(ticket.id));
     }
@@ -1648,11 +1724,8 @@ mod tests {
                     std::thread::spawn(move || streams.open(ticket).is_ok())
                 })
                 .collect::<Vec<_>>();
-            let won = openers
-                .into_iter()
-                .map(|opener| opener.join().unwrap())
-                .filter(|won| *won)
-                .count();
+            let won =
+                openers.into_iter().map(|opener| opener.join().unwrap()).filter(|won| *won).count();
             assert_eq!(won, 1);
         }
     }
@@ -1662,9 +1735,8 @@ mod tests {
         let streams = streams("stream-random");
         let (mut a, ticket) = streams.create().unwrap();
         let b = streams.open(ticket).unwrap();
-        let payload = (0..300_000_u32)
-            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
-            .collect::<Vec<_>>();
+        let payload =
+            (0..300_000_u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect::<Vec<_>>();
         let expected = payload.clone();
         let writer = std::thread::spawn(move || {
             let mut rest = &payload[..];

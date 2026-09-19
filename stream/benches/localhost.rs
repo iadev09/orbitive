@@ -23,8 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use orbit_core::{Fleet, NodeId};
 use orbit_stream::exchange::{
-    ExchangeSpec, Exchanges, FlowEvent, PayloadArenaSpec, RequestConsumer, RequestProducer,
-    ResponseConsumer, ResponseProducer
+    ExchangeSpec, Exchanges, FlowEvent, PayloadArenaSpec, Receiver, Sender
 };
 use orbit_stream::{Error, Incarnation, Result, StreamSpec};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -35,7 +34,6 @@ const FLEET_CAPACITY: u16 = 2;
 const RUNTIME_THREADS: usize = 8;
 const CONTROL: StreamSpec = StreamSpec::new(238, 32, 4 * 1024);
 const REQUEST_PAYLOAD: PayloadArenaSpec = PayloadArenaSpec::new(239, 4_096, 4 * 1024);
-const RESPONSE_PAYLOAD: PayloadArenaSpec = PayloadArenaSpec::new(240, 4_096, 4 * 1024);
 const CONCURRENCY: [usize; 2] = [1, 16];
 
 #[derive(Clone, Copy)]
@@ -76,7 +74,7 @@ struct ExchangeFixtures {
 impl ExchangeFixtures {
     fn new() -> Self {
         let name = fresh_name();
-        let spec = ExchangeSpec::new(CONTROL, REQUEST_PAYLOAD, RESPONSE_PAYLOAD);
+        let spec = ExchangeSpec::new(CONTROL, REQUEST_PAYLOAD);
         let owner = Exchanges::open(
             Arc::new(Fleet::join_shm_as(name, FLEET_CAPACITY, NodeId::ZERO).expect("owner fleet")),
             Incarnation::new(1),
@@ -187,8 +185,7 @@ macro_rules! producer {
     };
 }
 
-producer!(RequestProducer);
-producer!(ResponseProducer);
+producer!(Sender);
 
 trait Consumer {
     fn poll_readable(
@@ -215,8 +212,7 @@ macro_rules! consumer {
     };
 }
 
-consumer!(RequestConsumer);
-consumer!(ResponseConsumer);
+consumer!(Receiver);
 
 async fn ready<P: Producer>(
     producer: &P,
@@ -301,9 +297,9 @@ async fn exchange_round_trip(
     duplex: bool
 ) {
     let (server, ticket) = owner.create().expect("server exchange");
-    let client = peer.open_client(ticket).expect("client exchange");
+    let client = peer.open_peer(ticket).expect("client exchange");
     let (mut request_out, mut response_in) = server.split();
-    let (mut request_in, mut response_out) = client.split();
+    let (mut response_out, mut request_in) = client.split();
     if duplex {
         let w1 = async {
             tokio::join!(

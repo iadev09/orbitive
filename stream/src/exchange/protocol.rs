@@ -10,8 +10,8 @@ const EVENT_START: u8 = 1;
 const EVENT_DATA: u8 = 2;
 const EVENT_FIN: u8 = 3;
 const EVENT_RESET: u8 = 4;
-const FLOW_REQUEST: u8 = 1;
-const FLOW_RESPONSE: u8 = 2;
+const FLOW_A_TO_B: u8 = 1;
+const FLOW_B_TO_A: u8 = 2;
 const HAS_PAYLOAD: u8 = 1;
 
 /// The identity shared by both directions of one exchange.
@@ -40,22 +40,22 @@ impl fmt::Display for ExchangeId {
 /// The two independent byte flows paired by an [`ExchangeId`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Flow {
-    Request,
-    Response
+    AtoB,
+    BtoA
 }
 
 impl Flow {
     const fn wire(self) -> u8 {
         match self {
-            Self::Request => FLOW_REQUEST,
-            Self::Response => FLOW_RESPONSE
+            Self::AtoB => FLOW_A_TO_B,
+            Self::BtoA => FLOW_B_TO_A
         }
     }
 
     fn from_wire(value: u8) -> Option<Self> {
         match value {
-            FLOW_REQUEST => Some(Self::Request),
-            FLOW_RESPONSE => Some(Self::Response),
+            FLOW_A_TO_B => Some(Self::AtoB),
+            FLOW_B_TO_A => Some(Self::BtoA),
             _ => None
         }
     }
@@ -317,14 +317,14 @@ mod tests {
         let events = [
             ControlEvent::Start {
                 exchange: exchange(),
-                flow: Flow::Request,
-                metadata: Some(descriptor(Flow::Request))
+                flow: Flow::AtoB,
+                metadata: Some(descriptor(Flow::AtoB))
             },
-            ControlEvent::Data(descriptor(Flow::Response)),
-            ControlEvent::Fin { exchange: exchange(), flow: Flow::Request },
+            ControlEvent::Data(descriptor(Flow::BtoA)),
+            ControlEvent::Fin { exchange: exchange(), flow: Flow::AtoB },
             ControlEvent::Reset {
                 exchange: exchange(),
-                flow: Flow::Response,
+                flow: Flow::BtoA,
                 code: ResetCode::new(503)
             }
         ];
@@ -335,10 +335,10 @@ mod tests {
 
     #[test]
     fn control_frames_refuse_unknown_or_incomplete_events() {
-        let mut frame = ControlEvent::Data(descriptor(Flow::Request)).encode();
+        let mut frame = ControlEvent::Data(descriptor(Flow::AtoB)).encode();
         frame[7] = 0;
         assert_eq!(ControlEvent::decode(&frame), Err("data event has no payload descriptor"));
-        frame = ControlEvent::Fin { exchange: exchange(), flow: Flow::Request }.encode();
+        frame = ControlEvent::Fin { exchange: exchange(), flow: Flow::AtoB }.encode();
         frame[6] = 99;
         assert_eq!(ControlEvent::decode(&frame), Err("unknown exchange flow"));
     }
