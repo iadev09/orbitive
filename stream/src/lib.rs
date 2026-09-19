@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use bytes::{Bytes, BytesMut};
 use orbit_core::{Fleet, NetId64};
 
+pub mod exchange;
 mod layout;
 #[cfg(feature = "tokio")]
 mod poll;
