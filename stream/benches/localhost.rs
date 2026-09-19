@@ -3,9 +3,11 @@
 //! stable `phase2` benchmark.
 //!
 //! The listener and SHM tables live for the whole benchmark. Each iteration
-//! opens a fresh logical exchange, Unix socket pair, or localhost TCP
-//! connection. Socket payload boundaries are known by the scenario, so the
-//! socket baselines do not pay for an application framing protocol.
+//! opens a fresh logical exchange and Unix socket pair. Localhost TCP is fresh
+//! per iteration on Linux/FreeBSD; macOS reuses a pool because its ephemeral
+//! port range is smaller than Criterion's warm-up connection count. Socket
+//! payload boundaries are known by the scenario, so the socket baselines do
+//! not pay for an application framing protocol.
 //!
 //! Run: `cargo bench -p orbit-stream --features tokio --bench localhost`
 
@@ -13,6 +15,8 @@
 
 use std::future::poll_fn;
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -109,13 +113,34 @@ impl TcpFixtures {
     }
 
     async fn pair(&self) -> (TcpStream, TcpStream) {
-        let (client, accepted) =
-            tokio::join!(TcpStream::connect(self.address), self.listener.accept());
-        let client = client.expect("localhost TCP connect");
-        let (server, _) = accepted.expect("localhost TCP accept");
+        // A listening socket can complete the local connect before userspace
+        // accepts it. Keeping these operations sequential also avoids losing
+        // an accept-readiness transition across repeated runtime entries on
+        // macOS/kqueue.
+        let client = TcpStream::connect(self.address).await.expect("localhost TCP connect");
+        let (server, _) = self.listener.accept().await.expect("localhost TCP accept");
         client.set_nodelay(true).expect("client TCP_NODELAY");
         server.set_nodelay(true).expect("server TCP_NODELAY");
         (client, server)
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct TcpPool {
+    pairs: Vec<Arc<Mutex<Option<(TcpStream, TcpStream)>>>>
+}
+
+#[cfg(target_os = "macos")]
+impl TcpPool {
+    async fn new(
+        fixtures: &TcpFixtures,
+        capacity: usize
+    ) -> Self {
+        let mut pairs = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            pairs.push(Arc::new(Mutex::new(Some(fixtures.pair().await))));
+        }
+        Self { pairs }
     }
 }
 
@@ -318,8 +343,8 @@ async fn write_chunks<W: AsyncWrite + Unpin>(
 }
 
 async fn socket_round_trip<S>(
-    a: S,
-    b: S,
+    a: &mut S,
+    b: &mut S,
     body: Arc<Vec<u8>>,
     chunk_size: usize,
     duplex: bool
@@ -384,8 +409,8 @@ async fn concurrent_unix(
     for _ in 0..concurrency {
         let body = Arc::clone(&body);
         tasks.push(tokio::spawn(async move {
-            let (a, b) = UnixStream::pair().expect("Unix socket pair");
-            socket_round_trip(a, b, body, chunk_size, duplex).await;
+            let (mut a, mut b) = UnixStream::pair().expect("Unix socket pair");
+            socket_round_trip(&mut a, &mut b, body, chunk_size, duplex).await;
         }));
     }
     for task in tasks {
@@ -393,6 +418,7 @@ async fn concurrent_unix(
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 async fn concurrent_tcp(
     fixtures: &TcpFixtures,
     body: Arc<Vec<u8>>,
@@ -407,12 +433,34 @@ async fn concurrent_tcp(
         let address = fixtures.address;
         tasks.push(tokio::spawn(async move {
             let local = TcpFixtures { listener, address };
-            let (a, b) = local.pair().await;
-            socket_round_trip(a, b, body, chunk_size, duplex).await;
+            let (mut a, mut b) = local.pair().await;
+            socket_round_trip(&mut a, &mut b, body, chunk_size, duplex).await;
         }));
     }
     for task in tasks {
         task.await.expect("localhost TCP task");
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn concurrent_tcp_persistent(
+    pool: &TcpPool,
+    body: Arc<Vec<u8>>,
+    chunk_size: usize,
+    duplex: bool
+) {
+    let mut tasks = Vec::with_capacity(pool.pairs.len());
+    for cell in &pool.pairs {
+        let body = Arc::clone(&body);
+        let cell = Arc::clone(cell);
+        tasks.push(tokio::spawn(async move {
+            let (mut a, mut b) = cell.lock().expect("TCP pair lock").take().expect("TCP pair");
+            socket_round_trip(&mut a, &mut b, body, chunk_size, duplex).await;
+            cell.lock().expect("TCP pair lock").replace((a, b));
+        }));
+    }
+    for task in tasks {
+        task.await.expect("persistent localhost TCP task");
     }
 }
 
@@ -472,6 +520,7 @@ fn bench_matrix(
                     });
                 }
             );
+            #[cfg(not(target_os = "macos"))]
             group.bench_with_input(
                 BenchmarkId::new(format!("localhost-tcp-t{RUNTIME_THREADS}"), &geometry),
                 &scenario.body_size,
@@ -487,6 +536,27 @@ fn bench_matrix(
                     });
                 }
             );
+            #[cfg(target_os = "macos")]
+            {
+                let tcp_pool = runtime.block_on(TcpPool::new(&tcp, concurrency));
+                group.bench_with_input(
+                    BenchmarkId::new(
+                        format!("localhost-tcp-persistent-t{RUNTIME_THREADS}"),
+                        &geometry
+                    ),
+                    &scenario.body_size,
+                    |bencher, _| {
+                        bencher.iter(|| {
+                            runtime.block_on(concurrent_tcp_persistent(
+                                &tcp_pool,
+                                Arc::clone(&body),
+                                scenario.chunk_size,
+                                duplex
+                            ))
+                        });
+                    }
+                );
+            }
         }
     }
     group.finish();
