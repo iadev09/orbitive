@@ -10,6 +10,7 @@ pub use arena::{
 };
 pub use pair::{
     ClientExchange, DispatchError, ExchangeSpec, ExchangeTicket, Exchanges, FlowEvent, FlowHandler,
-    RequestConsumer, RequestProducer, ResponseConsumer, ResponseProducer, ServerExchange,
+    PendingData, PendingStart, RequestConsumer, RequestProducer, ResponseConsumer,
+    ResponseProducer, ServerExchange,
 };
 pub use protocol::{ChunkDescriptor, ControlEvent, ExchangeId, Flow, ResetCode};

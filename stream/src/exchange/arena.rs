@@ -550,22 +550,22 @@ impl PayloadArena {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn publish(
         &self,
         payload: &[u8],
     ) -> Result<Publication> {
-        let publication = self.arena.reserve(payload.len())?;
-        // SAFETY: the run is exclusively reserved by this producer and is
-        // contiguous in the payload mapping.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                payload.as_ptr(),
-                self.arena.payload(publication.first),
-                payload.len(),
-            );
-        }
-        self.arena.metadata()[publication.first].state.store(SLOT_LIVE, Ordering::Release);
+        let mut publication = self.reserve(payload.len())?;
+        publication.as_mut_slice().copy_from_slice(payload);
+        publication.make_live();
         Ok(publication)
+    }
+
+    pub(crate) fn reserve(
+        &self,
+        payload_len: usize,
+    ) -> Result<Publication> {
+        self.arena.reserve(payload_len)
     }
 
     pub(crate) fn read(
@@ -635,6 +635,28 @@ pub(crate) struct Publication {
 }
 
 impl Publication {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: this publication owns a contiguous reserved extent and no
+        // consumer can observe it before the control descriptor is sent.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.arena.payload(self.first),
+                self.payload_len,
+            )
+        }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: this publication exclusively owns a contiguous reserved
+        // extent until it is made live and its control descriptor is sent.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.arena.payload(self.first),
+                self.payload_len,
+            )
+        }
+    }
+
     pub(crate) fn coordinates(&self) -> (u64, u32, u32, u32, u8, u16) {
         let first_local = self.first % self.arena.geometry.slots_per_node;
         (
@@ -645,6 +667,10 @@ impl Publication {
             self.arena.kind,
             self.arena.node,
         )
+    }
+
+    pub(crate) fn make_live(&self) {
+        self.arena.metadata()[self.first].state.store(SLOT_LIVE, Ordering::Release);
     }
 
     pub(crate) fn mark_published(mut self) {

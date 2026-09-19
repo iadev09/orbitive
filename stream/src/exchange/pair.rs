@@ -1,4 +1,5 @@
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -315,21 +316,18 @@ impl Producer {
         if self.state != ProducerState::New {
             return Err(Error::Malformed("flow start was already sent".to_owned()));
         }
-        let publication = match metadata.filter(|bytes| !bytes.is_empty()) {
-            Some(bytes) => Some(self.arena.publish(bytes)?),
-            None => None,
-        };
-        let descriptor = publication.as_ref().map(|publication| self.descriptor(publication));
-        self.send(ControlEvent::Start {
-            exchange: self.exchange,
-            flow: self.flow,
-            metadata: descriptor,
-        })?;
-        if let Some(publication) = publication {
-            publication.mark_published();
-            self.next_chunk += 1;
+        if let Some(bytes) = metadata.filter(|bytes| !bytes.is_empty()) {
+            let mut pending = self.reserve_start(bytes.len())?;
+            pending.copy_from_slice(bytes);
+            pending.commit()?;
+        } else {
+            self.send(ControlEvent::Start {
+                exchange: self.exchange,
+                flow: self.flow,
+                metadata: None,
+            })?;
+            self.state = ProducerState::Open;
         }
-        self.state = ProducerState::Open;
         Ok(())
     }
 
@@ -337,11 +335,44 @@ impl Producer {
         &mut self,
         payload: &[u8],
     ) -> Result<ChunkDescriptor> {
+        let mut pending = self.reserve_data(payload.len())?;
+        pending.copy_from_slice(payload);
+        pending.commit()
+    }
+
+    fn reserve_start(&mut self, payload_len: usize) -> Result<PendingStart<'_>> {
+        if self.state != ProducerState::New {
+            return Err(Error::Malformed("flow start was already sent".to_owned()));
+        }
+        let publication = self.arena.reserve(payload_len)?;
+        Ok(PendingStart { producer: self, publication })
+    }
+
+    fn reserve_data(&mut self, payload_len: usize) -> Result<PendingData<'_>> {
         if self.state != ProducerState::Open {
             return Err(Error::Malformed("flow data requires an open flow".to_owned()));
         }
-        let publication = self.arena.publish(payload)?;
+        let publication = self.arena.reserve(payload_len)?;
+        Ok(PendingData { producer: self, publication })
+    }
+
+    fn commit_start(&mut self, publication: Publication) -> Result<ChunkDescriptor> {
         let descriptor = self.descriptor(&publication);
+        publication.make_live();
+        self.send(ControlEvent::Start {
+            exchange: self.exchange,
+            flow: self.flow,
+            metadata: Some(descriptor),
+        })?;
+        publication.mark_published();
+        self.next_chunk += 1;
+        self.state = ProducerState::Open;
+        Ok(descriptor)
+    }
+
+    fn commit_data(&mut self, publication: Publication) -> Result<ChunkDescriptor> {
+        let descriptor = self.descriptor(&publication);
+        publication.make_live();
         self.send(ControlEvent::Data(descriptor))?;
         publication.mark_published();
         self.next_chunk += 1;
@@ -395,6 +426,69 @@ impl Producer {
             arena_kind,
             owner_node,
         )
+    }
+}
+
+/// A request or response start payload reserved directly in its directional
+/// SHM arena. The bytes become immutable and visible only when `commit` sends
+/// the matching start event. Dropping this value returns the reserved slots.
+pub struct PendingStart<'a> {
+    producer: &'a mut Producer,
+    publication: Publication,
+}
+
+impl PendingStart<'_> {
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.publication.as_mut_slice()
+    }
+
+    pub fn commit(self) -> Result<ChunkDescriptor> {
+        self.producer.commit_start(self.publication)
+    }
+}
+
+impl Deref for PendingStart<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.publication.as_slice()
+    }
+}
+
+impl DerefMut for PendingStart<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
+/// A data chunk reserved directly in its directional SHM arena. One commit
+/// publishes the complete variable-sized chunk and one descriptor.
+pub struct PendingData<'a> {
+    producer: &'a mut Producer,
+    publication: Publication,
+}
+
+impl PendingData<'_> {
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.publication.as_mut_slice()
+    }
+
+    pub fn commit(self) -> Result<ChunkDescriptor> {
+        self.producer.commit_data(self.publication)
+    }
+}
+
+impl Deref for PendingData<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.publication.as_slice()
+    }
+}
+
+impl DerefMut for PendingData<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
     }
 }
 
@@ -551,11 +645,25 @@ macro_rules! producer {
                 self.0.start(metadata)
             }
 
+            /// Reserve start metadata directly in this flow's payload arena.
+            /// No start event is visible until the returned guard is committed.
+            pub fn reserve_start(&mut self, payload_len: usize) -> Result<PendingStart<'_>> {
+                debug_assert_eq!(self.0.flow, $flow);
+                self.0.reserve_start(payload_len)
+            }
+
             pub fn data(
                 &mut self,
                 payload: &[u8],
             ) -> Result<ChunkDescriptor> {
                 self.0.data(payload)
+            }
+
+            /// Reserve one variable-sized data chunk directly in this flow's
+            /// payload arena. One commit emits one data descriptor.
+            pub fn reserve_data(&mut self, payload_len: usize) -> Result<PendingData<'_>> {
+                debug_assert_eq!(self.0.flow, $flow);
+                self.0.reserve_data(payload_len)
             }
 
             pub fn finish(&mut self) -> Result<()> {
@@ -715,6 +823,53 @@ mod tests {
         assert!(matches!(request_in.try_next(), Ok(FlowEvent::Fin)));
         response_out.finish().expect("response fin");
         assert!(matches!(response_in.try_next(), Ok(FlowEvent::Fin)));
+    }
+
+    #[test]
+    fn a_reserved_chunk_is_one_descriptor_over_many_slots() {
+        let exchanges = Exchanges::open(
+            Arc::new(Fleet::join("exchange-reservation-test", 2).expect("fleet")),
+            Incarnation::new(1),
+            ExchangeSpec::new(
+                StreamSpec::new(233, 8, 512),
+                PayloadArenaSpec::new(234, 8, 256),
+                PayloadArenaSpec::new(235, 8, 256),
+            ),
+        )
+        .expect("exchanges");
+        let (mut server, ticket) = exchanges.create().expect("server");
+        let mut client = exchanges.open_client(ticket).expect("client");
+
+        let expected: Vec<u8> = (0..777).map(|index| (index % 251) as u8).collect();
+        let descriptor = {
+            let mut pending = server.request().reserve_start(expected.len()).expect("reserve");
+            pending.copy_from_slice(&expected);
+            pending.commit().expect("commit")
+        };
+        assert_eq!(descriptor.payload_len(), 777);
+        assert_eq!(descriptor.slot_count(), 4);
+        let received = match client.request().try_next().expect("start") {
+            FlowEvent::Start { metadata: Some(metadata) } => metadata,
+            _ => panic!("expected start metadata"),
+        };
+        assert_eq!(&*received, expected);
+    }
+
+    #[test]
+    fn dropping_an_uncommitted_chunk_returns_credit_without_an_event() {
+        let exchanges = exchanges();
+        let (mut server, ticket) = exchanges.create().expect("server");
+        let mut client = exchanges.open_client(ticket).expect("client");
+        server.request().start(None).expect("start");
+        assert!(matches!(
+            client.request().try_next(),
+            Ok(FlowEvent::Start { metadata: None })
+        ));
+
+        let pending = server.request().reserve_data(256).expect("reserve all slots");
+        drop(pending);
+        assert!(matches!(client.request().try_next(), Err(Error::WouldBlock)));
+        assert!(server.request().reserve_data(256).is_ok());
     }
 
     #[test]
