@@ -1,25 +1,80 @@
 # orbit-stream
 
-A byte stream between two processes, in shared memory.
+Bounded process-to-process flows in shared memory.
 
-One worker accepts a request and another holds the connection it needs. The
-first writes the request body into a stream, the second reads it as it
-arrives and writes the response back the same way, and neither process
-copies more than the bytes themselves: no socket, no descriptor passing, no
-frame protocol between them. When the reader is slow the writer waits; when
-the writer is done the reader drains to a clean end. That is what
-`orbit-stream` is for, and it works the same when both ends are in one
-process. Applications normally use it through `orbitive::stream`.
+The crate has two layers. `Streams` is the original private duplex byte ring:
+two endpoints, ordered bytes, independent directions and no message
+boundaries. `exchange` is the typed invocation layer: one paired exchange,
+one lossless control channel, and physically separate request and response
+payload arenas. Applications normally use both through `orbitive::stream`.
+
+An exchange is not an HTTP implementation and is not specific to upstream
+connections. It is the common shape for two runtimes handing each other an
+invocation while preserving bounded memory and backpressure. W1 is the
+client-facing representative: request producer and response consumer. W2 is
+the owner-facing representative: request consumer and response producer.
+Those names describe ownership, not protocol timing; W2 may start a response
+before W1 finishes the request.
+
+## Paired exchanges
+
+`Exchanges` opens three resources under distinct SHM kinds:
+
+- a control `Streams` table carrying fixed-size `Start`, `Data`, `Fin` and
+  `Reset` events;
+- a request payload arena;
+- a response payload arena.
+
+Payload slots are fixed physical memory units. A chunk is a publication
+decision, not a slot: one `ChunkDescriptor` identifies an exchange, flow,
+chunk sequence, allocation generation, first slot, slot count and actual
+payload length. A 777-byte chunk in a 256-byte-slot arena therefore occupies
+four slots and produces one descriptor. A later chunk gets another extent
+and another descriptor; chunks are never pointer chains.
+
+The two payload arenas are fleet-wide rather than one SHM object per
+exchange. Separating them means a held upload cannot spend response credit.
+Dropping a received `PayloadChunk` returns its complete extent. A producer
+whose arena is full parks on a shared credit generation or returns `Pending`;
+it does not poll. Notifications are coalesced: publication does not require
+an unconditional kernel wake per payload slot or per chunk.
+
+Request and response each enforce `Start -> Data* -> (Fin | Reset)`, but the
+two state machines are independent. The transport enforces ordering,
+ownership, credit and terminal rules only. The handler decides what an event
+means and whether a reset in one flow should affect its paired flow.
+
+`orbit-pool`'s `open_exchange_session` and `accept_exchange_session` put the
+lease in request-start metadata and validate it before W2 sees request data.
+This connects a fleet-owned resource to the exchange without teaching the
+transport what that resource is.
+
+`node_dead` is explicit and incarnation-scoped. Merely attaching a
+replacement does not reset either arena. Once a process is confirmed dead,
+its unpublished or unread producer allocations and its held consumer chunks
+return to their arena; chunks already held by a surviving consumer remain
+that consumer's. `reset_all` remains quiescent-owner maintenance, never an
+implicit boot action.
+
+The matched benchmark is:
+
+```console
+cargo bench -p orbit-stream --features tokio --bench phase2
+```
+
+It compares the paired SHM exchange with a Unix socket under the same body,
+concurrency and application chunk decisions. Slot size and chunk size are
+reported separately in benchmark IDs.
 
 ## Experimental — the decision, not the code
 
-The implementation is finished, and saying "experimental" about it would be
+The private byte-ring implementation is finished, and saying "experimental" about it would be
 the wrong warning. Every test passes on Linux, FreeBSD and macOS; the lost
 wakeup this crate was written around is found, fixed, and pinned by a
 regression that fails by timeout without the fix; the transport moves bytes
 at about 0.25 µs/KiB, which is a socket's order of magnitude.
 
-What is experimental is **whether a byte relay between processes belongs in
+What is experimental is **whether that private byte relay between processes belongs in
 your problem at all**. The cost model is narrow, and it is measured rather
 than guessed — figures below from a 40-core bare-metal Xeon, `BENCHMARKS.local.md`:
 
@@ -34,7 +89,7 @@ Read that as one sentence: **a socket is the right answer far more often than
 it looks**, and the cases left over are cold starts, bursts, and origins whose
 connection budget is genuinely scarce.
 
-The session API is expected to move as well. A release does not yet carry a
+The original byte-stream session API is expected to move as well. A release does not yet carry a
 verdict — the absence of one should mean *dirty* and today means nothing —
 and there is no error for an owner that has gone away.
 

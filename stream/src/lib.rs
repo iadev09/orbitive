@@ -1,4 +1,5 @@
-//! Bounded byte streams between two members of an Orbit fleet.
+//! Bounded byte streams and paired exchanges between members of an Orbit
+//! fleet.
 //!
 //! A stream is a place with two ends. [`Streams::create`] takes a slot in
 //! this process's lane, hands back the endpoint for side A and a [`Ticket`]
@@ -23,6 +24,14 @@
 //! registers its waker and returns `Pending`, and one thread per process
 //! turns the fleet's doorbell into those wakes. No thread and no descriptor
 //! per stream.
+//!
+//! [`exchange`] builds a typed request/response event program above that
+//! lossless control path. Payload bytes live in two separate shared arenas:
+//! fixed-size slots are physical allocation units, while each published
+//! chunk is one descriptor spanning as many contiguous slots as that
+//! protocol decision needs. Request and response have independent credit,
+//! FIN and RESET state, so either direction may start without imposing an
+//! HTTP sequencing rule on the transport.
 
 use std::fmt;
 use std::io;
