@@ -237,6 +237,25 @@ impl Exchanges {
         Ok((self.endpoint(endpoint), ExchangeTicket(ticket)))
     }
 
+    /// Whether side A can currently reserve its first flow payload.
+    /// Session transports use this before reserving a remote resource so
+    /// payload backpressure does not become an abandoned resource lease.
+    pub fn create_payload_available(
+        &self,
+        payload_len: usize
+    ) -> Result<bool> {
+        self.payload.for_flow(Flow::AtoB).is_available(payload_len)
+    }
+
+    /// Task readiness for side A's first flow payload credit.
+    pub fn poll_create_payload_available(
+        &self,
+        payload_len: usize,
+        cx: &mut std::task::Context<'_>
+    ) -> std::task::Poll<Result<()>> {
+        self.payload.for_flow(Flow::AtoB).poll_available(payload_len, cx)
+    }
+
     /// Open side B. Its sender writes B-to-A and its receiver reads A-to-B.
     /// Both directions have independent lifecycle and may start in either order.
     pub fn open_peer(

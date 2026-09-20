@@ -594,6 +594,17 @@ impl PayloadArena {
         self.arena.wait_available(count)
     }
 
+    /// Whether this producer lane currently has a contiguous run for the
+    /// payload. This is only a readiness snapshot; allocation still decides
+    /// a race between concurrent producers.
+    pub fn is_available(
+        &self,
+        payload_len: usize
+    ) -> Result<bool> {
+        let count = self.arena.required_slots(payload_len)?;
+        Ok(self.arena.has_run(count))
+    }
+
     /// Task readiness for this node's payload credit. Credit returns are
     /// coalesced through one shared generation and one local driver.
     pub fn poll_available(

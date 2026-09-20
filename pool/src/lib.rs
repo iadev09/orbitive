@@ -50,7 +50,7 @@ use layout::{
 pub use orbit_core::readiness::Readiness;
 pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
 #[cfg(feature = "pool-stream")]
-pub use session::{ExchangeSessionPlan, ExchangeSessionStart};
+pub use session::{ExchangeSessionPlan, ExchangeSessionStart, SESSION_FRAME};
 use table::Table;
 pub use table::{segment_size, segment_size_for};
 
@@ -168,6 +168,8 @@ pub enum Error {
         capacity: usize
     },
     Malformed(String),
+    /// The rendezvous transport could not carry a reserved lease.
+    Stream(orbit_stream::Error),
     Io(io::Error)
 }
 
@@ -190,6 +192,7 @@ impl fmt::Display for Error {
             Self::KeyFull { capacity } => write!(f, "pool key table is full: capacity={capacity}"),
             Self::Full { capacity } => write!(f, "pool lane is full: capacity={capacity}"),
             Self::Malformed(text) => write!(f, "not a pool resource id: {text:?}"),
+            Self::Stream(error) => write!(f, "Orbit pool stream error: {error}"),
             Self::Io(error) => write!(f, "Orbit pool io error: {error}")
         }
     }
@@ -198,6 +201,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Stream(error) => Some(error),
             Self::Io(error) => Some(error),
             _ => None
         }
@@ -699,6 +703,34 @@ impl Pool {
         }
         slot.last_reserve_ms.store(now, Ordering::Release);
         Ok(Lease { id, fence, holder: self.node(), holder_incarnation: self.incarnation() })
+    }
+
+    /// Return an exact reservation that this process could not deliver to its
+    /// owner. This is not request cancellation: once the owner has accepted
+    /// the fence, only its [`Execution`] may return the active unit.
+    pub fn cancel_reservation(
+        &self,
+        lease: Lease
+    ) -> Result<()> {
+        if lease.holder != self.node() || lease.holder_incarnation != self.incarnation() {
+            return Err(Error::NotReserved(lease));
+        }
+        let (_, slot) = self.locate(lease.id)?;
+        let cancelled = slot.pending.iter().any(|reservation| {
+            reservation
+                .fence
+                .compare_exchange(lease.fence, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        });
+        if !cancelled {
+            return Err(Error::NotReserved(lease));
+        }
+        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+            let (reserved, active) = unpack_counts(units);
+            Some(pack_counts(reserved.saturating_sub(1), active))
+        });
+        self.table.key_changed(slot.key_index.load(Ordering::Acquire) as usize);
+        Ok(())
     }
 
     /// The owner takes a lease a caller brought it: the unit moves from

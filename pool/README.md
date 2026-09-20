@@ -84,11 +84,14 @@ once and turns the unit into an active one; the returned `Execution` guard
 gives the unit back when dropped or completed. A lease accepted twice, or
 after the owner aged it out, is refused.
 
-That guard is the only way capacity returns. A caller that gives up, times
-out or dies frees nothing, because only the owner knows when the resource
-is idle again; a reservation the owner never received is aged out by the
-owner's `reconcile`, with a grace it chooses, and never by a caller's
-clock. Caller cancellation and owner completion are two different events.
+That guard is the only way accepted capacity returns. A caller that gives up,
+times out or dies after delivery frees nothing, because only the owner knows
+when the resource is idle again; a reservation whose delivery is uncertain is
+aged out by the owner's `reconcile`, with a grace it chooses, and never by a
+caller's clock. The session helper has one narrower guarantee: when it proves
+that the exchange offer was never published, it cancels that exact pending
+fence immediately. This is transport rollback before ownership transfer, not
+request cancellation after delivery.
 
 A **creation claim** keeps a fleet from overshooting: `claim_create`
 counts live resources and claims in progress together against the

@@ -112,9 +112,12 @@ owner: poll_accept_exchange_session
 
 The lease frame precedes application metadata inside side A's `START` payload.
 The owner accepts it before later application bytes are exposed. Dropping the
-returned `Execution` releases resource capacity. A caller cannot release an
-unaccepted reservation because it cannot prove the owner stopped using the
-resource; the owner ages abandoned reservations through `Pool::reconcile`.
+returned `Execution` releases resource capacity. Payload credit is checked
+before the remote reservation and is readiness-driven when full. If creating or
+offering the session still fails, the helper cancels the exact pending fence
+only when no offer was successfully published. Once delivery is possible or
+uncertain, the caller cannot infer completion; the owner ages abandoned
+reservations through `Pool::reconcile`.
 
 The pool and stream generations remain deliberately distinct:
 

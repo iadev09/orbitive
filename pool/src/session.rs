@@ -208,14 +208,24 @@ impl Pool {
         exchanges: &Exchanges,
         request_metadata: &[u8]
     ) -> Result<ExchangeEndpoint> {
-        let (mut server, ticket) = exchanges.create()?;
-        let frame = encode(&lease);
-        let mut start = server.sender().reserve_start(SESSION_FRAME + request_metadata.len())?;
-        start[..SESSION_FRAME].copy_from_slice(&frame);
-        start[SESSION_FRAME..].copy_from_slice(request_metadata);
-        start.commit()?;
-        exchanges.offer(ticket, NodeId::new(lease.id.node()))?;
-        Ok(server)
+        let opened = (|| {
+            let (mut server, ticket) = exchanges.create()?;
+            let frame = encode(&lease);
+            let mut start =
+                server.sender().reserve_start(SESSION_FRAME + request_metadata.len())?;
+            start[..SESSION_FRAME].copy_from_slice(&frame);
+            start[SESSION_FRAME..].copy_from_slice(request_metadata);
+            start.commit()?;
+            exchanges.offer(ticket, NodeId::new(lease.id.node()))?;
+            Ok(server)
+        })();
+        if opened.is_err() {
+            // No successful offer means the owner cannot accept this fence.
+            // Return it immediately instead of occupying capacity until the
+            // owner's abandoned-reservation grace expires.
+            let _ = self.cancel_reservation(lease);
+        }
+        opened
     }
 
     /// Open side B from an offered exchange, validate and accept its lease
@@ -269,7 +279,7 @@ impl Pool {
 
 impl From<orbit_stream::Error> for Error {
     fn from(value: orbit_stream::Error) -> Self {
-        Self::Io(value.into())
+        Self::Stream(value)
     }
 }
 
@@ -343,6 +353,38 @@ mod tests {
         assert_eq!(&*body, b"body");
         drop((start, body, execution));
         assert!(pool.reserve(resource).is_ok());
+    }
+
+    #[test]
+    fn a_session_that_cannot_publish_returns_its_reservation() {
+        use std::sync::Arc;
+
+        use orbit_core::Fleet;
+        use orbit_stream::exchange::{ExchangeSpec, PayloadArenaSpec};
+        use orbit_stream::{Incarnation as StreamIncarnation, StreamSpec};
+
+        let fleet = Arc::new(Fleet::join("pool-exchange-session-full", 1).expect("fleet"));
+        let pool = Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
+        pool.reset_all();
+        let resource = pool.register(crate::Key::new(11), 1).expect("resource");
+        let exchanges = Exchanges::open(
+            fleet,
+            StreamIncarnation::new(1),
+            ExchangeSpec::new(StreamSpec::new(214, 4, 512), PayloadArenaSpec::new(215, 1, 64))
+        )
+        .expect("exchanges");
+        exchanges.reset_all();
+
+        let (mut occupying, _ticket) = exchanges.create().expect("occupying exchange");
+        occupying.sender().start(Some(b"occupied")).expect("occupy the only payload slot");
+
+        let lease = pool.reserve(resource).expect("lease");
+        assert!(matches!(
+            pool.open_exchange_session(lease, &exchanges, b"request"),
+            Err(Error::Stream(orbit_stream::Error::PayloadFull { requested_slots: 1 }))
+        ));
+        let candidate = pool.candidates(crate::Key::new(11))[0];
+        assert_eq!((candidate.reserved, candidate.active, candidate.free()), (0, 0, 1));
     }
 
     #[test]
