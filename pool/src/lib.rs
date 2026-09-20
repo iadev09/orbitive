@@ -455,29 +455,6 @@ impl Pool {
         if capacity == 0 {
             return Err(Error::Malformed("capacity must be at least one".to_owned()));
         }
-        self.register_with_capacity(key, capacity)
-    }
-
-    /// Count a resource owned by this process under `key` without making
-    /// it available for fleet leases.
-    ///
-    /// A census resource participates in the key's live/creation budget
-    /// and follows the same owner lifecycle as a regular registration,
-    /// but has zero lease capacity. It is therefore visible for accounting
-    /// and never usable as a candidate. This is useful when one physical
-    /// limit covers both private and fleet-borrowable resources.
-    pub fn register_census(
-        &self,
-        key: Key
-    ) -> Result<ResourceId> {
-        self.register_with_capacity(key, 0)
-    }
-
-    fn register_with_capacity(
-        &self,
-        key: Key,
-        capacity: u32
-    ) -> Result<ResourceId> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
         let (index, generation) = self.table.allocate((lo, hi), key_index, capacity)?;
@@ -1302,25 +1279,6 @@ mod tests {
             .collect::<Vec<_>>();
         let held = threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
         assert_eq!(held.iter().filter(|claim| claim.is_some()).count(), 3);
-    }
-
-    #[test]
-    fn a_census_resource_counts_toward_the_budget_but_cannot_be_leased() {
-        let pool = pool("pool-census");
-        let id = pool.register_census(KEY).unwrap();
-
-        assert_eq!(pool.budget(KEY), (1, 0));
-        let candidate = pool.candidates(KEY)[0];
-        assert_eq!(candidate.id, id);
-        assert_eq!(candidate.capacity, 0);
-        assert_eq!(candidate.free(), 0);
-        assert!(matches!(pool.reserve(id), Err(Error::Busy(found)) if found == id));
-
-        let limits = Limits { max_live: 1, attempts: 2 };
-        assert!(matches!(pool.acquire(KEY, &limits, &LocalFirst).unwrap(), Plan::Wait(_)));
-
-        pool.unregister(id).unwrap();
-        assert_eq!(pool.budget(KEY), (0, 0));
     }
 
     #[test]
