@@ -455,9 +455,46 @@ impl Pool {
         if capacity == 0 {
             return Err(Error::Malformed("capacity must be at least one".to_owned()));
         }
+        self.register_inner(key, capacity, false).map(|(id, _)| id)
+    }
+
+    /// Register a resource with one unit already active and return the owner's
+    /// guard for that unit.
+    ///
+    /// The active count is installed before the resource enters the key's
+    /// candidate bitmap. A peer can therefore never reserve a newly-created
+    /// exclusive resource in the gap between registration and the owner's
+    /// first use.
+    pub fn register_active(
+        &self,
+        key: Key,
+        capacity: u32
+    ) -> Result<(ResourceId, Execution)> {
+        if capacity == 0 {
+            return Err(Error::Malformed("capacity must be at least one".to_owned()));
+        }
+        let (id, execution) = self.register_inner(key, capacity, true)?;
+        Ok((id, execution.expect("active registration creates its execution guard")))
+    }
+
+    fn register_inner(
+        &self,
+        key: Key,
+        capacity: u32,
+        active: bool
+    ) -> Result<(ResourceId, Option<Execution>)> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
         let (index, generation) = self.table.allocate((lo, hi), key_index, capacity)?;
+        if active {
+            self.table.resources()[index].units.store(pack_counts(0, 1), Ordering::Release);
+        }
+        let id = ResourceId::make(
+            self.table.kind(),
+            self.table.node(),
+            (index % self.table.geometry().lane_capacity) as u32,
+            generation
+        );
         self.table.members(key_index)[index / 64].fetch_or(1 << (index % 64), Ordering::SeqCst);
         let _ = self.table.key(key_index).counts.try_update(
             Ordering::SeqCst,
@@ -468,12 +505,16 @@ impl Pool {
             }
         );
         self.table.key_changed(key_index);
-        Ok(ResourceId::make(
-            self.table.kind(),
-            self.table.node(),
-            (index % self.table.geometry().lane_capacity) as u32,
-            generation
-        ))
+        let execution = active.then(|| Execution {
+            table: Arc::clone(&self.table),
+            lease: Lease {
+                id,
+                fence: 0,
+                holder: self.node(),
+                holder_incarnation: self.incarnation()
+            }
+        });
+        Ok((id, execution))
     }
 
     /// Take the resource away. Leases out on it become stale.
@@ -1158,6 +1199,21 @@ mod tests {
         assert_eq!(again.fence, 2);
         drop(pool.accept(again).unwrap());
         assert_eq!(pool.candidates(KEY)[0].free(), 1);
+    }
+
+    #[test]
+    fn an_active_registration_is_never_visible_as_idle() {
+        let pool = pool("pool-register-active");
+        let (id, execution) = pool.register_active(KEY, 1).unwrap();
+
+        let candidate = pool.candidates(KEY)[0];
+        assert_eq!(candidate.id, id);
+        assert_eq!((candidate.reserved, candidate.active, candidate.free()), (0, 1, 0));
+        assert!(matches!(pool.reserve(id), Err(Error::Busy(found)) if found == id));
+
+        execution.complete();
+        assert_eq!(pool.candidates(KEY)[0].free(), 1);
+        assert!(pool.reserve(id).is_ok());
     }
 
     #[test]
