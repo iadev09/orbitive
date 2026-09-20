@@ -97,39 +97,29 @@ implicit boot action.
 The matched benchmark is:
 
 ```console
-cargo bench -p orbit-stream --features tokio --bench phase2
+cargo bench -p orbit-stream --features tokio --bench transport
 ```
 
 It compares the paired SHM exchange with a Unix socket under the same body,
 concurrency and application chunk decisions. Slot size and chunk size are
 reported separately in benchmark IDs.
 
-## Experimental — the decision, not the code
+## Transport scope and measured cost
 
-The private byte-ring implementation is finished, and saying "experimental" about it would be
-the wrong warning. Every test passes on Linux, FreeBSD and macOS; the lost
-wakeup this crate was written around is found, fixed, and pinned by a
-regression that fails by timeout without the fix; the transport moves bytes
-at about 0.25 µs/KiB, which is a socket's order of magnitude.
+`orbit-stream` is a stable transport primitive. It guarantees bounded memory,
+duplex progress, backpressure, terminal signaling and explicit owner-death
+recovery. It deliberately does not decide whether relaying bytes through
+another process is preferable to opening a socket directly.
 
-What is experimental is **whether that private byte relay between processes belongs in
-your problem at all**. The cost model is narrow, and it is measured rather
-than guessed — figures below from a 40-core bare-metal Xeon, `BENCHMARKS.local.md`:
+That choice belongs to the adapter and must be measured at the same boundary
+as its real workload. The included benchmarks report slot size, application
+chunk size, body size and concurrency separately. A zero-copy receive result
+does not include application parsing or copying, and a same-process benchmark
+does not by itself prove a production routing benefit.
 
-| | |
-|---|---|
-| transport, blocking | ~0.25 µs/KiB, 4–8 GB/s, flat across chunk sizes |
-| transport, through the async adapters | three to five times that — each drain wakes a driver, then a task, then a worker |
-| one borrow: reserve, session, a round trip | ~50 µs, of which roughly three quarters is the rendezvous and one quarter the bytes |
-| against dialling your own connection | a borrow pays only where a dial is expensive: about fifty requests' worth against a TLS handshake, and never against a Unix socket, where a dial costs 1.4 µs and a relayed request 50 |
-
-Read that as one sentence: **a socket is the right answer far more often than
-it looks**, and the cases left over are cold starts, bursts, and origins whose
-connection budget is genuinely scarce.
-
-The original byte-stream session API is expected to move as well. A release does not yet carry a
-verdict — the absence of one should mean *dirty* and today means nothing —
-and there is no error for an owner that has gone away.
+The optional `orbit-pool` session binding is experimental. It is useful only
+when an application has already decided to execute against a remotely owned
+resource; it is not part of the stream transport contract.
 
 
 ```rust

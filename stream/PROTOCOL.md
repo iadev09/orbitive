@@ -95,7 +95,7 @@ This makes the configured arena credit the application backpressure boundary.
 Kernel, TLS, and protocol-library buffers still exist and must be included in
 end-to-end buffering claims.
 
-## Pool session binding
+## Experimental pool session binding
 
 With the optional `orbit-pool` integration, a remote resource use is bound to
 an exchange as follows:

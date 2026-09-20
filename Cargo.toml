@@ -44,7 +44,6 @@ full = [
     "stream",
     "stream-tokio",
     "pool",
-    "pool-stream",
 ]
 
 [dependencies]
@@ -107,7 +106,7 @@ orbit-arena = { version = "0.4.0", path = "arena", default-features = false }
 orbit-invoke = { version = "0.4.0", path = "invoke", default-features = false }
 orbit-metrics = { version = "0.4.0", path = "metrics", default-features = false }
 orbit-pool = { version = "0.4.0", path = "pool", default-features = false}
-orbit-stream = { version = "0.4.0-alpha.1", path = "stream", default-features = false }
+orbit-stream = { version = "0.4.0", path = "stream", default-features = false }
 orbit-rustls = { version = "0.4.0", path = "rustls", default-features = false }
 
 bytes = "1.11"

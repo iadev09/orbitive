@@ -105,6 +105,12 @@ and `Execution::complete_idle(max_idle)` either retains the unit within the
 shared ceiling or tells the owner to retire the resource. The default spec
 does not pay for or reinterpret this policy.
 
+`max_live`, `min_idle`, and `max_idle` are caller policy inputs, not a policy
+document stored in the pool. The shared table enforces each atomic claim, but
+all nodes using one key must currently be configured with the same values.
+A future fleet-managed policy can make that configuration canonical without
+changing the pool's ownership counters.
+
 `acquire` runs the loop for one request: snapshot, ask the **policy**,
 reserve or claim what it chose, retry a lost race with a fresh snapshot,
 and hand back a committed `Plan`: `LocalReuse`, `RemoteReuse`, `Create`,
@@ -121,6 +127,10 @@ no bytes: the input and output of a remote use travel over an
 in its first bytes or in any setup message the application prefers. A
 local use goes nowhere: no stream, no shared-memory hop. HTTP, health,
 load-balancing weights and retry rules live above it.
+
+The optional `pool-stream` feature is experimental. It is an adapter for the
+case where a remotely owned resource must execute over a paired exchange;
+neither the pool nor the stream transport depends on that composition.
 
 ## Waiting and death
 

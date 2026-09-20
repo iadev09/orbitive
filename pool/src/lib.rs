@@ -182,6 +182,7 @@ pub enum Error {
     },
     Malformed(String),
     /// The rendezvous transport could not carry a reserved lease.
+    #[cfg(feature = "pool-stream")]
     Stream(orbit_stream::Error),
     Io(io::Error)
 }
@@ -208,6 +209,7 @@ impl fmt::Display for Error {
             Self::KeyFull { capacity } => write!(f, "pool key table is full: capacity={capacity}"),
             Self::Full { capacity } => write!(f, "pool lane is full: capacity={capacity}"),
             Self::Malformed(text) => write!(f, "not a pool resource id: {text:?}"),
+            #[cfg(feature = "pool-stream")]
             Self::Stream(error) => write!(f, "Orbit pool stream error: {error}"),
             Self::Io(error) => write!(f, "Orbit pool io error: {error}")
         }
@@ -217,6 +219,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "pool-stream")]
             Self::Stream(error) => Some(error),
             Self::Io(error) => Some(error),
             _ => None

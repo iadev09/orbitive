@@ -1,9 +1,6 @@
 [package]
 name = "orbit-stream"
-# Alpha on its own track: the crate works, but what it is for is still
-# being decided, and a pre-release says that where a README cannot --
-# `cargo add orbit-stream` will not pick it up by accident.
-version = "0.4.0-alpha.1"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Bounded byte streams and paired exchanges over shared memory for process fleets."
@@ -32,20 +29,5 @@ libc.workspace = true
 
 [[bench]]
 name = "transport"
-harness = false
-required-features = ["tokio"]
-
-[[bench]]
-name = "fleet"
-harness = false
-required-features = ["tokio"]
-
-[[bench]]
-name = "phase2"
-harness = false
-required-features = ["tokio"]
-
-[[bench]]
-name = "localhost"
 harness = false
 required-features = ["tokio"]

@@ -30,7 +30,7 @@ use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
 
 ```toml
 [dependencies]
-orbitive = { version = "0.3.13", features = ["events", "lock"] }
+orbitive = { version = "0.4.0", features = ["events", "lock"] }
 ```
 
 Core types used by most integrations are available at the crate root. The full
@@ -65,15 +65,15 @@ bus.publish("worker.ready", b"worker-1")?;
 | `lock` | `orbitive::lock` | keyed leases with ownership checks and fencing tokens |
 | `metrics` | `orbitive::metrics` | current metrics snapshots across workers |
 | `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
-| `stream` / `stream-tokio` **(experimental)** | `orbitive::stream` | bounded byte streams between two fleet members, in memory or shared memory |
+| `stream` / `stream-tokio` | `orbitive::stream` | bounded byte streams and paired exchanges between fleet members |
+| `pool-stream` **(experimental)** | `orbitive::pool` + `orbitive::stream` | optional binding between a fleet resource lease and a paired exchange |
 | `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls 0.23/0.24 server-session storage |
 
-**`stream` is marked experimental, and the code is not what is experimental.**
-It is finished and tested on three platforms; what is unsettled is whether a
-byte relay between two processes belongs in a given problem, because the cost
-model is narrow and a socket is the right answer more often than it looks. The
-measured figures and the cases it does win are in
-[`orbit-stream`](stream/README.md); the session API is expected to move.
+`stream` is the transport primitive: it provides bounded duplex byte flow and
+typed paired exchanges without deciding why an application moves those bytes.
+The optional `pool-stream` composition remains experimental. It binds a
+fleet-owned resource lease to an exchange, but it is not enabled by `full` and
+applications should opt in only when they need remote resource execution.
 
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
@@ -81,8 +81,7 @@ The implementation crates are also published separately as
 [`orbit-invoke`](invoke/README.md), [`orbit-lock`](lock/README.md),
 [`orbit-metrics`](metrics/README.md), [`orbit-pool`](pool/README.md),
 [`orbit-rustls`](rustls/README.md), and
-[`orbit-stream`](stream/README.md) — the last on a pre-release track of its
-own, for the reason above. Direct dependencies are supported when an
+[`orbit-stream`](stream/README.md). Direct dependencies are supported when an
 integration needs a single narrow layer; applications can otherwise use the
 facade and enable only the modules they need.
 

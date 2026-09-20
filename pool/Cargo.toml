@@ -11,6 +11,7 @@ keywords = ["pool", "shm", "fleet", "orbit", "ring"]
 exclude.workspace = true
 
 [features]
+# Experimental adapter: the pool remains useful without a byte transport.
 pool-stream = ["dep:orbit-stream"]
 # Compatibility alias for callers of the pre-release API.
 stream = ["pool-stream"]
