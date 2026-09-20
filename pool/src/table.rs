@@ -299,10 +299,25 @@ impl Table {
     /// Capacity may have come back on `key_index`: count it for blocking
     /// waiters and ring every node that registered interest.
     pub(crate) fn key_changed(&self, key_index: usize) {
+        self.key_changed_with(key_index, false);
+    }
+
+    /// Exactly one capacity unit came back. Wake one blocking contender;
+    /// async subscribers still observe the generation through their node
+    /// doorbells.
+    pub(crate) fn key_changed_one(&self, key_index: usize) {
+        self.key_changed_with(key_index, true);
+    }
+
+    fn key_changed_with(&self, key_index: usize, one: bool) {
         let key = self.key(key_index);
         key.changes.fetch_add(1, Ordering::SeqCst);
         if key.waiters.load(Ordering::SeqCst) > 0 {
-            crate::wake_on(&key.changes);
+            if one {
+                crate::wake_one_on(&key.changes);
+            } else {
+                crate::wake_on(&key.changes);
+            }
         }
         let word = key_index / 64;
         let bit = 1_u64 << (key_index % 64);

@@ -2,7 +2,8 @@
 //! this changes" in Orbit: ring readiness, cell changes.
 //!
 //! [`wait_word`] parks the caller until the word no longer holds `expected`
-//! (or spuriously; callers loop). [`wake_word`] wakes every waiter on it. The
+//! (or spuriously; callers loop). [`wake_word_one`] wakes one waiter and
+//! [`wake_word`] wakes every waiter on it. The
 //! word may live in shared memory: Linux futex, FreeBSD umtx and macOS
 //! `os_sync_wait_on_address` all key waiters by the physical location, so a
 //! wake in one process reaches a waiter in another with nothing carried
@@ -102,6 +103,26 @@ pub fn wait_word_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> 
 }
 
 #[cfg(target_os = "linux")]
+pub fn wake_word_one(word: &AtomicU32) -> io::Result<()> {
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            word.as_ptr(),
+            libc::FUTEX_WAKE,
+            1,
+            std::ptr::null::<libc::timespec>(),
+            std::ptr::null::<u32>(),
+            0,
+        )
+    };
+    if result >= 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
     let result = unsafe {
         libc::syscall(
@@ -180,6 +201,24 @@ pub fn wait_word_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> 
         Some(libc::EINTR) => Ok(true),
         Some(libc::ETIMEDOUT) => Ok(false),
         _ => Err(error),
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+pub fn wake_word_one(word: &AtomicU32) -> io::Result<()> {
+    let result = unsafe {
+        libc::_umtx_op(
+            word.as_ptr().cast(),
+            libc::UMTX_OP_WAKE,
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -274,7 +313,17 @@ pub fn wait_word_timeout(word: &AtomicU32, expected: u32, timeout: Duration) -> 
 }
 
 #[cfg(target_os = "macos")]
+pub fn wake_word_one(word: &AtomicU32) -> io::Result<()> {
+    wake_macos(word, false)
+}
+
+#[cfg(target_os = "macos")]
 pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
+    wake_macos(word, true)
+}
+
+#[cfg(target_os = "macos")]
+fn wake_macos(word: &AtomicU32, all: bool) -> io::Result<()> {
     debug_assert_eq!(
         (word.as_ptr() as usize) % size_of::<u32>(),
         0,
@@ -286,8 +335,8 @@ pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
         return Ok(());
     };
     loop {
-        let result =
-            unsafe { (api.wake_all)(word.as_ptr().cast(), size_of::<u32>(), macos::SHARED) };
+        let wake = if all { api.wake_all } else { api.wake_one };
+        let result = unsafe { wake(word.as_ptr().cast(), size_of::<u32>(), macos::SHARED) };
         if result >= 0 {
             return Ok(());
         }
@@ -323,6 +372,7 @@ pub(crate) mod macos {
     pub(crate) struct Api {
         pub(super) wait: Wait,
         pub(super) wait_timeout: WaitTimeout,
+        pub(super) wake_one: Wake,
         pub(super) wake_all: Wake,
     }
 
@@ -333,7 +383,8 @@ pub(crate) mod macos {
     static STATE: AtomicU8 = AtomicU8::new(UNRESOLVED);
     static WAIT: AtomicUsize = AtomicUsize::new(0);
     static WAIT_TIMEOUT: AtomicUsize = AtomicUsize::new(0);
-    static WAKE: AtomicUsize = AtomicUsize::new(0);
+    static WAKE_ONE: AtomicUsize = AtomicUsize::new(0);
+    static WAKE_ALL: AtomicUsize = AtomicUsize::new(0);
 
     /// Resolve the 14.4 entry points, once per process but never by waiting.
     ///
@@ -365,7 +416,8 @@ pub(crate) mod macos {
                 wait_timeout: std::mem::transmute::<usize, WaitTimeout>(
                     WAIT_TIMEOUT.load(Ordering::Acquire),
                 ),
-                wake_all: std::mem::transmute::<usize, Wake>(WAKE.load(Ordering::Acquire)),
+                wake_one: std::mem::transmute::<usize, Wake>(WAKE_ONE.load(Ordering::Acquire)),
+                wake_all: std::mem::transmute::<usize, Wake>(WAKE_ALL.load(Ordering::Acquire)),
             }
         }
     }
@@ -379,16 +431,19 @@ pub(crate) mod macos {
                 c"os_sync_wait_on_address_with_timeout".as_ptr(),
             )
         };
-        let wake =
+        let wake_one =
+            unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"os_sync_wake_by_address_any".as_ptr()) };
+        let wake_all =
             unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"os_sync_wake_by_address_all".as_ptr()) };
-        if wait.is_null() || wait_timeout.is_null() || wake.is_null() {
+        if wait.is_null() || wait_timeout.is_null() || wake_one.is_null() || wake_all.is_null() {
             STATE.store(UNAVAILABLE, Ordering::Release);
             return None;
         }
         // Pointers first, then the state that publishes them.
         WAIT.store(wait as usize, Ordering::Release);
         WAIT_TIMEOUT.store(wait_timeout as usize, Ordering::Release);
-        WAKE.store(wake as usize, Ordering::Release);
+        WAKE_ONE.store(wake_one as usize, Ordering::Release);
+        WAKE_ALL.store(wake_all as usize, Ordering::Release);
         STATE.store(READY, Ordering::Release);
         Some(load())
     }
@@ -433,6 +488,37 @@ mod timeout_tests {
         let started = Instant::now();
         assert!(wait_word_timeout(&word, 0, Duration::from_secs(10)).expect("wait"));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn wake_one_releases_only_one_parked_waiter() {
+        if !supported() {
+            return;
+        }
+        let word = Arc::new(AtomicU32::new(0));
+        let (sent, received) = std::sync::mpsc::channel();
+        let waiters = (0..2)
+            .map(|_| {
+                let word = Arc::clone(&word);
+                let sent = sent.clone();
+                std::thread::spawn(move || {
+                    let outcome =
+                        wait_word_timeout(&word, 0, Duration::from_millis(500)).expect("wait");
+                    sent.send(outcome).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+
+        std::thread::sleep(Duration::from_millis(100));
+        word.store(1, Ordering::SeqCst);
+        wake_word_one(&word).expect("wake one");
+
+        assert!(received.recv_timeout(Duration::from_millis(200)).unwrap());
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(!received.recv_timeout(Duration::from_millis(400)).unwrap());
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
     }
 
     #[test]

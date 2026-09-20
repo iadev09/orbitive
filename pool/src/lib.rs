@@ -768,7 +768,7 @@ impl Pool {
         });
         let key_index = slot.key_index.load(Ordering::Acquire) as usize;
         self.table.add_available(key_index, 1);
-        self.table.key_changed(key_index);
+        self.table.key_changed_one(key_index);
         Ok(())
     }
 
@@ -1182,7 +1182,7 @@ impl Execution {
                 Some(pack_counts(reserved, active.saturating_sub(1)))
             });
         }
-        self.table.key_changed(key_index);
+        self.table.key_changed_one(key_index);
         retained
     }
 }
@@ -1232,7 +1232,7 @@ impl Drop for CreationPermit {
             Ordering::SeqCst,
             |held| held.checked_sub(1)
         );
-        self.table.key_changed(self.key_index);
+        self.table.key_changed_one(self.key_index);
     }
 }
 
@@ -1282,6 +1282,13 @@ pub(crate) fn wait_on(
 pub(crate) fn wake_on(word: &AtomicU32) {
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     let _ = orbit_core::sync::wake_word(word);
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+    let _ = word;
+}
+
+pub(crate) fn wake_one_on(word: &AtomicU32) {
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    let _ = orbit_core::sync::wake_word_one(word);
     #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
     let _ = word;
 }
@@ -1540,6 +1547,43 @@ mod tests {
         execution.complete();
         assert!(waiter.join().unwrap().unwrap() > since);
         assert!(pool.reserve(id).is_ok());
+    }
+
+    #[test]
+    fn one_returned_unit_wakes_one_blocking_contender() {
+        let pool = pool("pool-wait-one");
+        let id = pool.register(KEY, 1).unwrap();
+        let execution = pool.accept(pool.reserve(id).unwrap()).unwrap();
+        let since = pool.version(KEY).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let waiters = (0..2)
+            .map(|_| {
+                let pool = pool.clone();
+                let sent = sent.clone();
+                std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    let changed = pool
+                        .wait_capacity_timeout(KEY, since, Duration::from_millis(500))
+                        .unwrap();
+                    sent.send((changed, started.elapsed())).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+
+        std::thread::sleep(Duration::from_millis(100));
+        execution.complete();
+
+        let (first, first_waited) = received.recv_timeout(Duration::from_millis(200)).unwrap();
+        assert!(first.is_some());
+        assert!(first_waited < Duration::from_millis(300));
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+
+        let (second, second_waited) = received.recv_timeout(Duration::from_millis(400)).unwrap();
+        assert!(second.is_some());
+        assert!(second_waited >= Duration::from_millis(450));
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
     }
 
     #[test]
