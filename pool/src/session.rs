@@ -202,6 +202,13 @@ impl Pool {
     /// Create side A for a leased resource, put the lease ahead of the
     /// application's start metadata, then offer side B to the resource owner.
     /// Side A's outbound flow is already started when this returns.
+    ///
+    /// `RENDEZVOUS_BACKPRESSURE: NO_PHANTOM_RESERVATION` — failure before a
+    /// successful offer must return the exact pending fence immediately. The
+    /// owner cannot possibly accept an offer that was never published, so
+    /// retaining that reservation until reconciliation would turn transport
+    /// pressure into false pool exhaustion. This does not authorize cancelling
+    /// a delivered or accepted lease.
     pub fn open_exchange_session(
         &self,
         lease: Lease,
