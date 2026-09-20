@@ -133,7 +133,7 @@ pub struct Fleet {
 }
 
 struct FleetInner {
-    name: &'static str,
+    name: Arc<str>,
     fleet_capacity: u16,
     node_id: NodeId,
     /// Per-KIND counter for `next_id` calls that don't go through a
@@ -171,12 +171,12 @@ enum RingBacking {
 impl Fleet {
     /// Join (or create) a fleet under `name` with `fleet_capacity` physical
     /// node lanes. In-memory backings remain process-local.
-    pub fn join(name: &'static str, fleet_capacity: u16) -> Result<Self> {
+    pub fn join(name: &str, fleet_capacity: u16) -> Result<Self> {
         Self::join_as(name, fleet_capacity, NodeId::ZERO)
     }
 
     /// Join (or create) a process-local fleet with an explicit node id.
-    pub fn join_as(name: &'static str, fleet_capacity: u16, node_id: NodeId) -> Result<Self> {
+    pub fn join_as(name: &str, fleet_capacity: u16, node_id: NodeId) -> Result<Self> {
         if fleet_capacity == 0 {
             return Err(Error::EmptyFleet);
         }
@@ -188,7 +188,7 @@ impl Fleet {
         }
         Ok(Self {
             inner: Arc::new(FleetInner {
-                name,
+                name: Arc::from(name),
                 fleet_capacity,
                 node_id,
                 id_counters: DashMap::new(),
@@ -211,7 +211,7 @@ impl Fleet {
     /// macOS limits POSIX SHM names to 31 chars (PSHMNAMLEN); a
     /// short fleet name is required there.
     #[cfg(unix)]
-    pub fn join_shm(name: &'static str, fleet_capacity: u16) -> Result<Self> {
+    pub fn join_shm(name: &str, fleet_capacity: u16) -> Result<Self> {
         Self::join_shm_as(name, fleet_capacity, NodeId::ZERO)
     }
 
@@ -221,7 +221,7 @@ impl Fleet {
     /// Orbit validates the id range but does not own process lifecycle and
     /// therefore cannot prevent duplicate live memberships.
     #[cfg(unix)]
-    pub fn join_shm_as(name: &'static str, fleet_capacity: u16, node_id: NodeId) -> Result<Self> {
+    pub fn join_shm_as(name: &str, fleet_capacity: u16, node_id: NodeId) -> Result<Self> {
         if fleet_capacity == 0 {
             return Err(Error::EmptyFleet);
         }
@@ -231,21 +231,22 @@ impl Fleet {
                 fleet_capacity,
             });
         }
-        let membership = crate::shm::join_fleet_membership(name).map_err(Error::Io)?;
+        let name: Arc<str> = Arc::from(name);
+        let membership = crate::shm::join_fleet_membership(&name).map_err(Error::Io)?;
         Ok(Self {
             inner: Arc::new(FleetInner {
-                name,
+                name: Arc::clone(&name),
                 fleet_capacity,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::Shm(ShmRingRegistry::new(name, fleet_capacity)),
+                backing: RingBacking::Shm(ShmRingRegistry::new(name.as_ref(), fleet_capacity)),
                 membership: Some(membership),
             }),
         })
     }
 
-    pub fn name(&self) -> &'static str {
-        self.inner.name
+    pub fn name(&self) -> &str {
+        &self.inner.name
     }
 
     /// Number of physical node lanes reserved for this fleet.
