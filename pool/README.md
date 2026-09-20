@@ -98,6 +98,13 @@ counts live resources and claims in progress together against the
 caller's `max_live`, so forty workers that all see an empty key do not
 each open a connection. Dropping the permit returns the claim.
 
+A consumer that needs one fleet-wide idle policy opens a distinct
+`PoolSpec::with_fleet_availability()` kind. That contract adds an atomic free
+unit count per key: `claim_warm` claims only the shared `min_idle` deficit,
+and `Execution::complete_idle(max_idle)` either retains the unit within the
+shared ceiling or tells the owner to retire the resource. The default spec
+does not pay for or reinterpret this policy.
+
 `acquire` runs the loop for one request: snapshot, ask the **policy**,
 reserve or claim what it chose, retry a lost race with a fresh snapshot,
 and hand back a committed `Plan`: `LocalReuse`, `RemoteReuse`, `Create`,

@@ -40,7 +40,8 @@ pub(crate) struct Header {
     pub(crate) key_stride: u32,
     pub(crate) resource_size: u32,
     pub(crate) fleet_capacity: u16,
-    _reserved: [u8; 6],
+    pub(crate) flags: u8,
+    _reserved: [u8; 5],
     pub(crate) epoch: AtomicU64,
     _reserved2: [u8; 24],
 }
@@ -56,7 +57,8 @@ impl Header {
             key_stride: geometry.key_stride as u32,
             resource_size: size_of::<ResourceSlot>() as u32,
             fleet_capacity,
-            _reserved: [0; 6],
+            flags: u8::from(geometry.fleet_availability),
+            _reserved: [0; 5],
             epoch: AtomicU64::new(epoch),
             _reserved2: [0; 24],
         }
@@ -74,6 +76,7 @@ impl Header {
             && self.key_stride as usize == geometry.key_stride
             && self.resource_size as usize == size_of::<ResourceSlot>()
             && self.fleet_capacity == fleet_capacity
+            && self.flags == u8::from(geometry.fleet_availability)
     }
 }
 
@@ -102,7 +105,11 @@ pub(crate) struct KeySlot {
     /// unregister, a closed resource); the word waiters park on.
     pub(crate) changes: AtomicU32,
     pub(crate) waiters: AtomicU32,
-    _padding: [u8; 24],
+    /// Free units across this key. Used only by specs that opt into fleet
+    /// availability; it lives in former padding so default table geometry is
+    /// unchanged.
+    pub(crate) available: AtomicU32,
+    _padding: [u8; 20],
 }
 
 impl KeySlot {
@@ -222,6 +229,7 @@ pub(crate) struct Geometry {
     pub(crate) lane_capacity: usize,
     pub(crate) fleet_capacity: usize,
     pub(crate) total_resources: usize,
+    pub(crate) fleet_availability: bool,
     /// Words in a resource bitmap (key members).
     pub(crate) member_words: usize,
     /// Words in a key bitmap (pending, interest).
@@ -239,7 +247,7 @@ pub(crate) struct Geometry {
 
 impl Geometry {
     pub(crate) fn new(fleet_capacity: u16, spec: PoolSpec) -> Self {
-        let PoolSpec { key_capacity, lane_capacity, .. } = spec;
+        let PoolSpec { key_capacity, lane_capacity, fleet_availability, .. } = spec;
         let fleet_capacity = usize::from(fleet_capacity);
         let total_resources = fleet_capacity * lane_capacity;
         let member_words = total_resources.div_ceil(64);
@@ -260,6 +268,7 @@ impl Geometry {
             lane_capacity,
             fleet_capacity,
             total_resources,
+            fleet_availability,
             member_words,
             key_words,
             key_stride,

@@ -230,6 +230,7 @@ impl Table {
                     slot.key_lo.store(lo, Ordering::Relaxed);
                     slot.key_hi.store(hi, Ordering::Relaxed);
                     slot.counts.store(0, Ordering::Relaxed);
+                    slot.available.store(0, Ordering::Relaxed);
                     slot.changes.store(0, Ordering::Relaxed);
                     slot.waiters.store(0, Ordering::Relaxed);
                     for word in self.members(index) {
@@ -321,6 +322,46 @@ impl Table {
                 }
             }
         }
+    }
+
+    pub(crate) fn take_available(&self, key_index: usize) -> bool {
+        if !self.geometry.fleet_availability {
+            return true;
+        }
+        self.key(key_index)
+            .available
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |available| {
+                (available > 0).then(|| available - 1)
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn add_available(&self, key_index: usize, units: u32) {
+        if self.geometry.fleet_availability && units > 0 {
+            self.key(key_index).available.fetch_add(units, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn remove_available(&self, key_index: usize, units: u32) {
+        if self.geometry.fleet_availability && units > 0 {
+            let _ = self.key(key_index).available.try_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |available| Some(available.saturating_sub(units)),
+            );
+        }
+    }
+
+    pub(crate) fn retain_available_below(&self, key_index: usize, max: u32) -> bool {
+        if !self.geometry.fleet_availability {
+            return true;
+        }
+        self.key(key_index)
+            .available
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |available| {
+                (available < max).then_some(available + 1)
+            })
+            .is_ok()
     }
 
     fn wake(&self, key_index: usize) {
@@ -514,6 +555,12 @@ impl Table {
         let key_index = slot.key_index.load(Ordering::Acquire) as usize;
         self.members(key_index)[index / 64].fetch_and(!(1_u64 << (index % 64)), Ordering::SeqCst);
         let key = self.key(key_index);
+        if self.geometry.fleet_availability {
+            let (reserved, active) =
+                crate::layout::unpack_counts(slot.units.load(Ordering::SeqCst));
+            let free = slot.capacity.load(Ordering::Relaxed).saturating_sub(reserved + active);
+            self.remove_available(key_index, free);
+        }
         let _ = key
             .counts
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |counts| {
@@ -644,6 +691,7 @@ pub(crate) fn open(
         // mismatch here rather than a silently shared table.
         if table.geometry.key_capacity != spec.key_capacity
             || table.geometry.lane_capacity != spec.lane_capacity
+            || table.geometry.fleet_availability != spec.fleet_availability
         {
             return Err(Error::Malformed(format!(
                 "this process already opened kind {} with key_capacity={} lane_capacity={}",

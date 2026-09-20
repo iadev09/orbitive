@@ -8,8 +8,9 @@ geometry, header refused on mismatch, memory twin with the same layout.
 
 ## Specs: one fleet, several pools
 
-A `PoolSpec` names the segment a `Pool` opens — its kind and its two
-capacities — and `Pool::new` is `with_spec(PoolSpec::DEFAULT)`, the kind
+A `PoolSpec` names the segment a `Pool` opens — its kind, its two capacities,
+and whether fleet availability is tracked — and `Pool::new` is
+`with_spec(PoolSpec::DEFAULT)`, the kind
 247 table built from the compile-time geometry. Independent specs are
 independent pools: separate segments, separate key spaces, separate
 creation budgets, separate epochs, and a `reset_all` on one leaves the
@@ -28,7 +29,8 @@ its own.
 ## Tables
 
 `KeySlot` (64 B + `member_words × 8`): the caller's 128-bit key, `counts =
-live << 32 | creating`, `changes`/`waiters`, then a bitmap of the resource
+live << 32 | creating`, optional fleet-wide `available`, `changes`/`waiters`,
+then a bitmap of the resource
 slots registered under it. Keys are found by open addressing on the
 caller's digest and installed under the process lock; they are never
 removed within an epoch.
@@ -67,6 +69,14 @@ the table may under-admit until the owner reconciles, never over-admit.
 per-node claim table so a death report can return it. `register` adds to
 `live`; the permit's drop subtracts from `creating`, so the overlap while
 both are counted is conservative.
+
+For a spec with fleet availability, `claim_warm(key, max_live, min_idle)`
+first takes the same creation claim and keeps it only while
+`available + creating <= min_idle`. Concurrent workers therefore claim one
+shared deficit rather than repeating the floor. `complete_idle(max_idle)`
+claims one available unit with a CAS before releasing the active unit; if the
+ceiling is full it leaves the resource active and returns `false`, so the owner
+can unregister it without ever publishing an uncounted free candidate.
 
 ## Decisions
 

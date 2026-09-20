@@ -88,7 +88,10 @@ pub struct PoolSpec {
     pub key_capacity: usize,
     /// Resources one fleet node can register at once. A power of two, at
     /// most 65 536.
-    pub lane_capacity: usize
+    pub lane_capacity: usize,
+    /// Track fleet-wide available units for an exact idle floor/ceiling.
+    /// Off by default so existing pool-table kinds keep their wire contract.
+    fleet_availability: bool
 }
 
 impl PoolSpec {
@@ -99,7 +102,15 @@ impl PoolSpec {
         key_capacity: usize,
         lane_capacity: usize
     ) -> Self {
-        Self { kind, key_capacity, lane_capacity }
+        Self { kind, key_capacity, lane_capacity, fleet_availability: false }
+    }
+
+    /// Make free resource units part of this table's shared contract.
+    ///
+    /// Use a distinct kind when enabling this on an existing deployment.
+    pub const fn with_fleet_availability(mut self) -> Self {
+        self.fleet_availability = true;
+        self
     }
 
     /// What the compile-time geometry used to assert. A spec is checked
@@ -159,6 +170,8 @@ pub enum Error {
         key: Key,
         max_live: u32
     },
+    /// This table's spec did not opt into fleet-wide free-unit accounting.
+    AvailabilityDisabled,
     /// Every key slot is taken.
     KeyFull {
         capacity: usize
@@ -188,6 +201,9 @@ impl fmt::Display for Error {
             }
             Self::CreationBudget { key, max_live } => {
                 write!(f, "creation budget for {key} is spent: max_live={max_live}")
+            }
+            Self::AvailabilityDisabled => {
+                f.write_str("pool spec does not track fleet availability")
             }
             Self::KeyFull { capacity } => write!(f, "pool key table is full: capacity={capacity}"),
             Self::Full { capacity } => write!(f, "pool lane is full: capacity={capacity}"),
@@ -500,6 +516,7 @@ impl Pool {
             generation
         );
         self.table.members(key_index)[index / 64].fetch_or(1 << (index % 64), Ordering::SeqCst);
+        self.table.add_available(key_index, capacity - u32::from(active));
         let _ = self.table.key(key_index).counts.try_update(
             Ordering::SeqCst,
             Ordering::SeqCst,
@@ -516,7 +533,8 @@ impl Pool {
                 fence: 0,
                 holder: self.node(),
                 holder_incarnation: self.incarnation()
-            }
+            },
+            completed: false
         });
         Ok((id, execution))
     }
@@ -575,15 +593,24 @@ impl Pool {
                 aged += 1;
             }
         }
-        let mut freed = false;
+        let mut available_delta = 0_i64;
         let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
             let (reserved, was_active) = unpack_counts(units);
             let reserved = reserved.saturating_sub(aged);
-            freed = reserved + active < unpack_counts(units).0 + was_active;
+            let capacity = slot.capacity.load(Ordering::Relaxed);
+            let was_free = capacity.saturating_sub(unpack_counts(units).0 + was_active);
+            let now_free = capacity.saturating_sub(reserved + active);
+            available_delta = i64::from(now_free) - i64::from(was_free);
             Some(pack_counts(reserved, active))
         });
-        if freed {
-            self.table.key_changed(slot.key_index.load(Ordering::Acquire) as usize);
+        let key_index = slot.key_index.load(Ordering::Acquire) as usize;
+        if available_delta > 0 {
+            self.table.add_available(key_index, available_delta as u32);
+        } else if available_delta < 0 {
+            self.table.remove_available(key_index, (-available_delta) as u32);
+        }
+        if available_delta > 0 {
+            self.table.key_changed(key_index);
         }
         Ok(())
     }
@@ -659,13 +686,21 @@ impl Pool {
             RESOURCE_DRAINING => return Err(Error::Draining(id)),
             _ => return Err(Error::Stale(id))
         }
+        let key_index = slot.key_index.load(Ordering::Acquire) as usize;
+        if !self.table.take_available(key_index) {
+            return Err(Error::Busy(id));
+        }
         let capacity = slot.capacity.load(Ordering::Relaxed);
-        slot.units
+        if slot.units
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
                 let (reserved, active) = unpack_counts(units);
                 (reserved + active < capacity).then(|| pack_counts(reserved + 1, active))
             })
-            .map_err(|_| Error::Busy(id))?;
+            .is_err()
+        {
+            self.table.add_available(key_index, 1);
+            return Err(Error::Busy(id));
+        }
         // The slot may have ended between the state check and the count;
         // give the unit back rather than hold a lease on the next tenant.
         if !slot.is(id.generation()) {
@@ -673,6 +708,7 @@ impl Pool {
                 let (reserved, active) = unpack_counts(units);
                 Some(pack_counts(reserved.saturating_sub(1), active))
             });
+            self.table.add_available(key_index, 1);
             return Err(Error::Stale(id));
         }
         let fence = slot.fence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -699,6 +735,7 @@ impl Pool {
                 let (reserved, active) = unpack_counts(units);
                 Some(pack_counts(reserved.saturating_sub(1), active))
             });
+            self.table.add_available(key_index, 1);
             return Err(Error::Busy(id));
         }
         slot.last_reserve_ms.store(now, Ordering::Release);
@@ -729,7 +766,9 @@ impl Pool {
             let (reserved, active) = unpack_counts(units);
             Some(pack_counts(reserved.saturating_sub(1), active))
         });
-        self.table.key_changed(slot.key_index.load(Ordering::Acquire) as usize);
+        let key_index = slot.key_index.load(Ordering::Acquire) as usize;
+        self.table.add_available(key_index, 1);
+        self.table.key_changed(key_index);
         Ok(())
     }
 
@@ -762,7 +801,7 @@ impl Pool {
             let (reserved, active) = unpack_counts(units);
             Some(pack_counts(reserved.saturating_sub(1), active + 1))
         });
-        Ok(Execution { table: Arc::clone(&self.table), lease })
+        Ok(Execution { table: Arc::clone(&self.table), lease, completed: false })
     }
 
     /// Whether `lease` is the current state of its resource: the resource
@@ -843,6 +882,39 @@ impl Pool {
             Ok(key_index) => unpack_counts(self.table.key(key_index).counts.load(Ordering::SeqCst)),
             Err(_) => (0, 0)
         }
+    }
+
+    /// Fleet-wide free resource units for specs that opted into availability.
+    pub fn available(&self, key: Key) -> Result<u32> {
+        if !self.table.geometry().fleet_availability {
+            return Err(Error::AvailabilityDisabled);
+        }
+        let (lo, hi) = key.parts();
+        Ok(self
+            .table
+            .key_index(lo, hi)
+            .map(|index| self.table.key(index).available.load(Ordering::SeqCst))
+            .unwrap_or(0))
+    }
+
+    /// Atomically claim a dial only while the fleet-wide idle floor is short.
+    pub fn claim_warm(
+        &self,
+        key: Key,
+        max_live: u32,
+        min_idle: u32
+    ) -> Result<CreationPermit> {
+        if !self.table.geometry().fleet_availability {
+            return Err(Error::AvailabilityDisabled);
+        }
+        let permit = self.claim_create(key, max_live)?;
+        let (_, creating) = self.budget(key);
+        let available = self.available(key)?;
+        if available.saturating_add(creating) > min_idle {
+            drop(permit);
+            return Err(Error::CreationBudget { key, max_live });
+        }
+        Ok(permit)
     }
 
     /// The same wait, bounded: `None` is the timeout and nothing else.
@@ -1064,7 +1136,8 @@ pub enum Plan {
 /// nothing until the owner's work has actually ended.
 pub struct Execution {
     table: Arc<Table>,
-    lease: Lease
+    lease: Lease,
+    completed: bool
 }
 
 impl Execution {
@@ -1073,23 +1146,52 @@ impl Execution {
     }
 
     pub fn complete(self) {}
+
+    /// Finish this use and retain the resource idle only if the fleet-wide
+    /// idle ceiling still has room. `false` means the owner must retire it.
+    pub fn complete_idle(mut self, max_idle: u32) -> Result<bool> {
+        if !self.table.geometry().fleet_availability {
+            return Err(Error::AvailabilityDisabled);
+        }
+        let retained = self.finish(Some(max_idle));
+        self.completed = true;
+        Ok(retained)
+    }
+
+    fn finish(&self, max_idle: Option<u32>) -> bool {
+        let index = usize::from(self.lease.id.node()) * self.table.geometry().lane_capacity
+            + self.lease.id.slot() as usize;
+        let slot = &self.table.resources()[index];
+        let state = slot.state.load(Ordering::Acquire);
+        if slot.generation.load(Ordering::Acquire) != self.lease.id.generation()
+            || (state != RESOURCE_LIVE && state != RESOURCE_DRAINING)
+        {
+            return false;
+        }
+        let key_index = slot.key_index.load(Ordering::Acquire) as usize;
+        let retained = state == RESOURCE_LIVE
+            && max_idle
+                .map(|limit| self.table.retain_available_below(key_index, limit))
+                .unwrap_or_else(|| {
+                    self.table.add_available(key_index, 1);
+                    true
+                });
+        if retained || state == RESOURCE_DRAINING {
+            let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
+                let (reserved, active) = unpack_counts(units);
+                Some(pack_counts(reserved, active.saturating_sub(1)))
+            });
+        }
+        self.table.key_changed(key_index);
+        retained
+    }
 }
 
 impl Drop for Execution {
     fn drop(&mut self) {
-        let index = usize::from(self.lease.id.node()) * self.table.geometry().lane_capacity
-            + self.lease.id.slot() as usize;
-        let slot = &self.table.resources()[index];
-        // Only while the resource is still the one we accepted on: a
-        // closed or reinstalled slot has nothing of ours to give back.
-        if slot.generation.load(Ordering::Acquire) != self.lease.id.generation() {
-            return;
+        if !self.completed {
+            self.finish(None);
         }
-        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-            let (reserved, active) = unpack_counts(units);
-            Some(pack_counts(reserved, active.saturating_sub(1)))
-        });
-        self.table.key_changed(slot.key_index.load(Ordering::Acquire) as usize);
     }
 }
 
@@ -1197,11 +1299,20 @@ mod tests {
 
     use super::{
         Error, Incarnation, Key, Limits, LocalFirst, LocalOnly, POOL_RESOURCE_LANE_CAPACITY, Plan,
-        Pool, State
+        Pool, PoolSpec, State
     };
 
     fn pool(name: &'static str) -> Pool {
         Pool::new(Arc::new(Fleet::join(name, 2).unwrap()), Incarnation::new(1)).unwrap()
+    }
+
+    fn fleet_capacity_pool(name: &'static str) -> Pool {
+        Pool::with_spec(
+            Arc::new(Fleet::join(name, 2).unwrap()),
+            Incarnation::new(1),
+            PoolSpec::new(190, 16, 16).with_fleet_availability()
+        )
+        .unwrap()
     }
 
     const KEY: Key = Key::new(0xC0FFEE);
@@ -1246,6 +1357,52 @@ mod tests {
         execution.complete();
         assert_eq!(pool.candidates(KEY)[0].free(), 1);
         assert!(pool.reserve(id).is_ok());
+    }
+
+    #[test]
+    fn fleet_idle_ceiling_is_an_atomic_retention_decision() {
+        let pool = fleet_capacity_pool("pool-fleet-idle-ceiling");
+        let (first, first_use) = pool.register_active(KEY, 1).unwrap();
+        let (second, second_use) = pool.register_active(KEY, 1).unwrap();
+
+        assert!(first_use.complete_idle(1).unwrap());
+        assert!(!second_use.complete_idle(1).unwrap());
+        assert_eq!(pool.available(KEY).unwrap(), 1);
+        assert!(pool.reserve(first).is_ok());
+        assert!(matches!(pool.reserve(second), Err(Error::Busy(id)) if id == second));
+    }
+
+    #[test]
+    fn default_pool_does_not_silently_apply_fleet_idle_policy() {
+        let pool = pool("pool-no-fleet-idle-policy");
+        assert!(matches!(pool.available(KEY), Err(Error::AvailabilityDisabled)));
+        assert!(matches!(pool.claim_warm(KEY, 8, 2), Err(Error::AvailabilityDisabled)));
+    }
+
+    #[test]
+    fn fleet_idle_floor_claims_only_the_shared_deficit() {
+        let pool = fleet_capacity_pool("pool-fleet-idle-floor");
+        let first = pool.claim_warm(KEY, 8, 2).unwrap();
+        let second = pool.claim_warm(KEY, 8, 2).unwrap();
+        assert!(matches!(pool.claim_warm(KEY, 8, 2), Err(Error::CreationBudget { .. })));
+
+        let (_, first_use) = pool.register_active(KEY, 1).unwrap();
+        first.finish();
+        assert!(first_use.complete_idle(2).unwrap());
+        let (_, second_use) = pool.register_active(KEY, 1).unwrap();
+        second.finish();
+        assert!(second_use.complete_idle(2).unwrap());
+        assert_eq!(pool.available(KEY).unwrap(), 2);
+        assert!(matches!(pool.claim_warm(KEY, 8, 2), Err(Error::CreationBudget { .. })));
+    }
+
+    #[test]
+    fn retiring_an_active_resource_does_not_publish_ghost_idle_capacity() {
+        let pool = fleet_capacity_pool("pool-fleet-retire-active");
+        let (id, execution) = pool.register_active(KEY, 1).unwrap();
+        pool.unregister(id).unwrap();
+        drop(execution);
+        assert_eq!(pool.available(KEY).unwrap(), 0);
     }
 
     #[test]
