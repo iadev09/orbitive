@@ -95,6 +95,13 @@ counts live resources and claims in progress together against the
 caller's `max_live`, so forty workers that all see an empty key do not
 each open a connection. Dropping the permit returns the claim.
 
+A resource that belongs to the same physical limit but must stay private
+is registered with `register_census`. It counts as live under the key and
+follows the owner's normal unregister/death lifecycle, but its zero lease
+capacity makes it impossible for any policy to select or reserve. This
+lets private and fleet-borrowable resources share one creation ceiling
+without pretending that ownership changes their physical origin.
+
 `acquire` runs the loop for one request: snapshot, ask the **policy**,
 reserve or claim what it chose, retry a lost race with a fresh snapshot,
 and hand back a committed `Plan`: `LocalReuse`, `RemoteReuse`, `Create`,

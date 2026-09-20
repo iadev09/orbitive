@@ -66,7 +66,11 @@ the table may under-admit until the owner reconciles, never over-admit.
 `live + creating < max_live`; the node's claim is also counted in the
 per-node claim table so a death report can return it. `register` adds to
 `live`; the permit's drop subtracts from `creating`, so the overlap while
-both are counted is conservative.
+both are counted is conservative. `register_census` installs the same
+live row with capacity zero: it consumes the shared creation budget and
+has the normal owner lifecycle, but can never be reserved. Thus a caller
+can account private and borrowable resources under one physical key
+without exposing the private rows to fleet reuse.
 
 ## Decisions
 
