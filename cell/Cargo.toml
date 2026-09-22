@@ -1,6 +1,6 @@
 [package]
 name = "orbit-cell"
-version.workspace = true
+version = "0.4.1"
 edition.workspace = true
 authors.workspace = true
 description = "Fleet-shared typed atomic cells over Orbit shared memory, addressed by id rather than by name."
