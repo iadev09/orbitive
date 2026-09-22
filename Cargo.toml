@@ -96,7 +96,7 @@ exclude = [
 ]
 
 [workspace.dependencies]
-orbit-core = { version = "0.4.0", path = "core", default-features = false }
+orbit-core = { version = "0.4.1", path = "core", default-features = false }
 orbit-cache = { version = "0.4.0", path = "cache", default-features = false }
 orbit-lock = { version = "0.4.0", path = "lock", default-features = false }
 orbit-events = { version = "0.4.0", path = "events", default-features = false }
@@ -105,7 +105,7 @@ orbit-cell = { version = "0.4.1", path = "cell", default-features = false }
 orbit-arena = { version = "0.4.0", path = "arena", default-features = false }
 orbit-invoke = { version = "0.4.0", path = "invoke", default-features = false }
 orbit-metrics = { version = "0.4.0", path = "metrics", default-features = false }
-orbit-pool = { version = "0.4.0", path = "pool", default-features = false}
+orbit-pool = { version = "0.4.1", path = "pool", default-features = false}
 orbit-stream = { version = "0.4.0", path = "stream", default-features = false }
 orbit-rustls = { version = "0.4.0", path = "rustls", default-features = false }
 
