@@ -201,6 +201,50 @@ impl Text {
         }
     }
 
+    /// [`Self::wait_changed`], but a second word can end it. `Ok(None)`
+    /// means the interrupt arrived, not that time ran out — nothing here
+    /// measures time. The canceller sets `interrupt`, then calls
+    /// [`Self::wake_waiters`].
+    pub fn wait_changed_until(
+        &self,
+        since: u32,
+        interrupt: &core::sync::atomic::AtomicBool,
+    ) -> Result<Option<u32>> {
+        loop {
+            if interrupt.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+
+            let slot = self.slot()?;
+            let now = slot.version.load(Ordering::SeqCst);
+            if now != since {
+                if now & 1 == 1 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                return Ok(Some(now));
+            }
+
+            slot.waiters.fetch_add(1, Ordering::SeqCst);
+            let outcome = if slot.version.load(Ordering::SeqCst) == since
+                && !interrupt.load(Ordering::SeqCst)
+            {
+                crate::wait_on(&slot.version, since)
+            } else {
+                Ok(())
+            };
+            slot.waiters.fetch_sub(1, Ordering::SeqCst);
+            outcome?;
+        }
+    }
+
+    /// Wake everyone parked on this text cell without appending to it.
+    /// Only useful after the word the waiter also watches has been set.
+    pub fn wake_waiters(&self) -> Result<()> {
+        crate::wake_on(&self.slot()?.version);
+        Ok(())
+    }
+
     fn slot(&self) -> Result<&TextSlot> {
         self.table.slot(self.id)
     }

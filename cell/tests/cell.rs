@@ -214,3 +214,57 @@ fn racing_callers_divide_a_limit_without_ever_passing_it() {
         "a claim on a finished limit takes nothing"
     );
 }
+
+/// A wait that may outlive its reason has to be endable without a write and
+/// without a clock. The canceller sets the word the waiter also watches,
+/// then wakes it: no interval, no slice, and a wait nobody interrupts is
+/// still the plain parked wait.
+#[test]
+fn a_waiter_ends_on_an_interrupt_without_a_write() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let cells = cells();
+    let cell = cells.allocate(0_i64).expect("allocate");
+    let since = cell.version().expect("version");
+    let interrupt = Arc::new(AtomicBool::new(false));
+
+    let parked = {
+        let cell = cells.open::<i64>(cell.id()).expect("open");
+        let interrupt = Arc::clone(&interrupt);
+        std::thread::spawn(move || cell.wait_changed_until(since, &interrupt))
+    };
+
+    // Set first, wake second: a waiter already parked is released by the
+    // wake, one not yet parked reads the flag.
+    interrupt.store(true, Ordering::SeqCst);
+    while !parked.is_finished() {
+        cell.wake_waiters().expect("wake");
+        std::thread::yield_now();
+    }
+
+    assert_eq!(parked.join().expect("join").expect("wait"), None);
+    assert_eq!(cell.version().expect("version"), since, "no write was involved");
+}
+
+/// The same call with nothing interrupting it is the ordinary wait: it ends
+/// when, and only when, somebody writes.
+#[test]
+fn an_uninterrupted_waiter_ends_on_the_write() {
+    use std::sync::atomic::AtomicBool;
+
+    let cells = cells();
+    let cell = cells.allocate(0_i64).expect("allocate");
+    let since = cell.version().expect("version");
+    let interrupt = Arc::new(AtomicBool::new(false));
+
+    let parked = {
+        let cell = cells.open::<i64>(cell.id()).expect("open");
+        let interrupt = Arc::clone(&interrupt);
+        std::thread::spawn(move || cell.wait_changed_until(since, &interrupt))
+    };
+
+    cell.swap(7).expect("write");
+    let changed = parked.join().expect("join").expect("wait").expect("a write ends the wait");
+    assert_ne!(changed, since);
+    assert_eq!(cell.load().expect("load"), 7);
+}

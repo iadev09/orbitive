@@ -544,6 +544,59 @@ impl<T: CellType> Orbital<T> {
         Ok(exchanged.map(T::from_bits).map_err(T::from_bits))
     }
 
+    /// [`Self::wait_changed`], but a second word can end it. The waiter
+    /// still parks until something wakes it; `interrupt` is what tells it
+    /// which kind of wake arrived. `Ok(Some(count))` is a write,
+    /// `Ok(None)` is the interrupt.
+    ///
+    /// This is the shape a caller needs when the wait may outlive its
+    /// reason — a process that has to shut down while a script waits on a
+    /// cell nothing will write again. It is not a timeout: nothing here
+    /// measures time, and a wait nobody interrupts is
+    /// [`Self::wait_changed`] exactly.
+    ///
+    /// The canceller sets `interrupt` and then calls
+    /// [`Self::wake_waiters`], in that order. Set-then-wake is what closes
+    /// the window: a waiter that had already parked is released by the
+    /// wake, and one that had not yet parked sees the flag instead.
+    pub fn wait_changed_until(
+        &self,
+        since: u32,
+        interrupt: &core::sync::atomic::AtomicBool,
+    ) -> Result<Option<u32>> {
+        loop {
+            if interrupt.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+
+            let slot = self.slot()?;
+            let now = slot.changes.load(Ordering::SeqCst);
+            if now != since {
+                return Ok(Some(now));
+            }
+
+            slot.waiters.fetch_add(1, Ordering::SeqCst);
+            let outcome = if slot.changes.load(Ordering::SeqCst) == since
+                && !interrupt.load(Ordering::SeqCst)
+            {
+                wait_on(&slot.changes, since)
+            } else {
+                Ok(())
+            };
+            slot.waiters.fetch_sub(1, Ordering::SeqCst);
+            outcome?;
+        }
+    }
+
+    /// Wake everyone parked on this cell without writing to it. On its own
+    /// this changes nothing — a waiter re-checks the count, finds it where
+    /// it was and parks again — so it is only useful after the word the
+    /// waiter also watches has been set. See [`Self::wait_changed_until`].
+    pub fn wake_waiters(&self) -> Result<()> {
+        wake_on(&self.slot()?.changes);
+        Ok(())
+    }
+
     /// Give the cell back; this and every other handle to it go stale.
     pub fn release(self) -> Result<()> {
         self.cells.release(self.id)
