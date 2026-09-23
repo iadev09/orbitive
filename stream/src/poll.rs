@@ -21,7 +21,7 @@ impl AsyncRead for ReadHalf {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
+        buf: &mut ReadBuf<'_>
     ) -> Poll<io::Result<()>> {
         let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
         loop {
@@ -37,7 +37,7 @@ impl AsyncRead for ReadHalf {
                 // Ready said yes and the ring said no: somebody consumed the
                 // change in between. Ask again.
                 Err(Error::WouldBlock) => continue,
-                Err(error) => return Poll::Ready(Err(error.into())),
+                Err(error) => return Poll::Ready(Err(error.into()))
             }
         }
     }
@@ -47,7 +47,7 @@ impl AsyncWrite for WriteHalf {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &[u8],
+        buf: &[u8]
     ) -> Poll<io::Result<usize>> {
         let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
         loop {
@@ -65,11 +65,17 @@ impl AsyncWrite for WriteHalf {
     }
 
     /// Writes commit as they happen; there is nothing buffered to push.
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>
+    ) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>
+    ) -> Poll<io::Result<()>> {
         Poll::Ready(self.finish().map_err(io::Error::from))
     }
 }
@@ -78,7 +84,7 @@ impl AsyncRead for Endpoint {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
+        buf: &mut ReadBuf<'_>
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.read).poll_read(cx, buf)
     }
@@ -88,16 +94,22 @@ impl AsyncWrite for Endpoint {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &[u8],
+        buf: &[u8]
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.write).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.write).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.write).poll_shutdown(cx)
     }
 }

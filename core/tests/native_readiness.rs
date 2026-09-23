@@ -18,12 +18,11 @@ impl OrbitTyped for Record {
     const RING_SPEC: RingSpec = RingSpec::new(64, 8);
 }
 
-fn readable(fd: &RingEventFd, timeout: i32) -> bool {
-    let mut poll = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
+fn readable(
+    fd: &RingEventFd,
+    timeout: i32
+) -> bool {
+    let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
     let result = unsafe { libc::poll(&mut poll, 1, timeout) };
     assert!(result >= 0, "poll: {}", std::io::Error::last_os_error());
     result > 0 && poll.revents & libc::POLLIN != 0
@@ -53,7 +52,7 @@ fn readiness_peer() {
                 report("awake");
             }
             "drop" => break,
-            command => panic!("unknown command {command}"),
+            command => panic!("unknown command {command}")
         }
     }
     drop(fd);
@@ -69,7 +68,7 @@ fn readiness_peer() {
 
 struct Peer {
     child: Child,
-    lines: Receiver<String>,
+    lines: Receiver<String>
 }
 impl Peer {
     fn spawn(name: &str) -> Self {
@@ -94,7 +93,10 @@ impl Peer {
         peer.expect("ready");
         peer
     }
-    fn expect(&self, message: &str) {
+    fn expect(
+        &self,
+        message: &str
+    ) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let line = self
@@ -106,7 +108,10 @@ impl Peer {
             }
         }
     }
-    fn send(&mut self, command: &str) {
+    fn send(
+        &mut self,
+        command: &str
+    ) {
         writeln!(self.child.stdin.as_mut().unwrap(), "{command}").unwrap();
         self.child.stdin.as_mut().unwrap().flush().unwrap();
     }
@@ -148,9 +153,7 @@ async fn async_reactor_drains_and_rearms_native_fd() {
         let publisher = fleet.0.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(2)).await;
-            publisher
-                .publish_notified::<Record>(0, round, Bytes::from_static(b"async"))
-                .unwrap();
+            publisher.publish_notified::<Record>(0, round, Bytes::from_static(b"async")).unwrap();
         });
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -175,19 +178,13 @@ fn independent_readers_broadcast_late_join_and_drop() {
     let name = Box::leak(format!("nr{:x}", std::process::id()).into_boxed_str());
     let fleet = TestFleet(Fleet::join_shm_as(name, 1, NodeId::new(0)).unwrap());
     // A publisher with no native waiters must still succeed.
-    fleet
-        .0
-        .publish_notified::<Record>(0, 0, Bytes::from_static(b"before"))
-        .unwrap();
+    fleet.0.publish_notified::<Record>(0, 0, Bytes::from_static(b"before")).unwrap();
     let mut first = Peer::spawn(name);
     let mut second = Peer::spawn(name);
     first.send("wait");
     second.send("wait");
     std::thread::sleep(Duration::from_millis(20));
-    fleet
-        .0
-        .publish_notified::<Record>(0, 1, Bytes::from_static(b"one"))
-        .unwrap();
+    fleet.0.publish_notified::<Record>(0, 1, Bytes::from_static(b"one")).unwrap();
     first.expect("awake");
     second.expect("awake");
 
@@ -196,10 +193,7 @@ fn independent_readers_broadcast_late_join_and_drop() {
     for peer in [&mut first, &mut second, &mut late] {
         peer.send("wait");
     }
-    fleet
-        .0
-        .publish_batch_notified::<Record>(0, 2, vec![Bytes::from_static(b"two"); 32])
-        .unwrap();
+    fleet.0.publish_batch_notified::<Record>(0, 2, vec![Bytes::from_static(b"two"); 32]).unwrap();
     for peer in [&first, &second, &late] {
         peer.expect("awake");
     }
@@ -208,10 +202,7 @@ fn independent_readers_broadcast_late_join_and_drop() {
         for peer in [&mut first, &mut second, &mut late] {
             peer.send("wait");
         }
-        fleet
-            .0
-            .publish_notified::<Record>(0, round, Bytes::from_static(b"race"))
-            .unwrap();
+        fleet.0.publish_notified::<Record>(0, round, Bytes::from_static(b"race")).unwrap();
         for peer in [&first, &second, &late] {
             peer.expect("awake");
         }

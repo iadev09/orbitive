@@ -14,13 +14,15 @@ use crate::transport::CacheTransport;
 pub struct CacheEntry {
     pub value: Bytes,
     pub revision: CacheRevision,
-    pub expires_at_ms: Option<u64>,
+    pub expires_at_ms: Option<u64>
 }
 
 impl CacheEntry {
-    pub fn is_expired_at(&self, now_ms: u64) -> bool {
-        self.expires_at_ms
-            .is_some_and(|deadline| deadline <= now_ms)
+    pub fn is_expired_at(
+        &self,
+        now_ms: u64
+    ) -> bool {
+        self.expires_at_ms.is_some_and(|deadline| deadline <= now_ms)
     }
 }
 
@@ -33,31 +35,31 @@ pub enum CacheRead {
     Miss,
     /// Mutation history was lost or malformed. No local hit is served until
     /// a higher layer explicitly re-establishes a coherent snapshot.
-    ResyncRequired,
+    ResyncRequired
 }
 
 #[derive(Clone)]
 pub struct LocalCache {
-    inner: Arc<Mutex<LocalState>>,
+    inner: Arc<Mutex<LocalState>>
 }
 
 struct LocalState {
     slots: LruCache<Vec<u8>, LocalSlot>,
     revision_floor: Option<u64>,
-    coherent: bool,
+    coherent: bool
 }
 
 #[derive(Clone)]
 enum LocalSlot {
     Present(CacheEntry),
-    Missing { revision: CacheRevision },
+    Missing { revision: CacheRevision }
 }
 
 impl LocalSlot {
     fn revision(&self) -> CacheRevision {
         match self {
             Self::Present(entry) => entry.revision,
-            Self::Missing { revision } => *revision,
+            Self::Missing { revision } => *revision
         }
     }
 }
@@ -65,7 +67,7 @@ impl LocalSlot {
 pub(crate) enum ApplyOutcome {
     Applied,
     Ignored,
-    PayloadUnavailable { key: Bytes },
+    PayloadUnavailable { key: Bytes }
 }
 
 impl LocalCache {
@@ -74,16 +76,23 @@ impl LocalCache {
             inner: Arc::new(Mutex::new(LocalState {
                 slots: LruCache::new(capacity),
                 revision_floor: None,
-                coherent: true,
-            })),
+                coherent: true
+            }))
         }
     }
 
-    pub fn read(&self, key: &[u8]) -> CacheRead {
+    pub fn read(
+        &self,
+        key: &[u8]
+    ) -> CacheRead {
         self.read_at(key, now_ms())
     }
 
-    pub fn read_at(&self, key: &[u8], now_ms: u64) -> CacheRead {
+    pub fn read_at(
+        &self,
+        key: &[u8],
+        now_ms: u64
+    ) -> CacheRead {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if !state.coherent {
             return CacheRead::ResyncRequired;
@@ -94,25 +103,17 @@ impl LocalCache {
         match slot {
             LocalSlot::Present(entry) if !entry.is_expired_at(now_ms) => CacheRead::Hit(entry),
             LocalSlot::Present(entry) => {
-                let _ = state.put_slot(
-                    key.to_vec(),
-                    LocalSlot::Missing {
-                        revision: entry.revision,
-                    },
-                );
+                let _ =
+                    state.put_slot(key.to_vec(), LocalSlot::Missing { revision: entry.revision });
                 CacheRead::Miss
             }
-            LocalSlot::Missing { .. } => CacheRead::Miss,
+            LocalSlot::Missing { .. } => CacheRead::Miss
         }
     }
 
     pub fn len(&self) -> usize {
         let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        state
-            .slots
-            .iter()
-            .filter(|(_, slot)| matches!(slot, LocalSlot::Present(_)))
-            .count()
+        state.slots.iter().filter(|(_, slot)| matches!(slot, LocalSlot::Present(_))).count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -120,10 +121,7 @@ impl LocalCache {
     }
 
     pub fn is_coherent(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .coherent
+        self.inner.lock().unwrap_or_else(|error| error.into_inner()).coherent
     }
 
     /// Clear uncertain local state after transport loss.
@@ -134,13 +132,14 @@ impl LocalCache {
         state.coherent = false;
     }
 
-    pub(crate) fn recover_from_backing(&self, revision_floor: u64) {
+    pub(crate) fn recover_from_backing(
+        &self,
+        revision_floor: u64
+    ) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         state.slots.clear();
         state.revision_floor = Some(
-            state
-                .revision_floor
-                .map_or(revision_floor, |current| current.max(revision_floor)),
+            state.revision_floor.map_or(revision_floor, |current| current.max(revision_floor))
         );
         state.coherent = true;
     }
@@ -155,13 +154,13 @@ impl LocalCache {
     pub(crate) fn apply<L: CacheLayout>(
         &self,
         transport: &CacheTransport<L>,
-        mutation: CacheMutation,
+        mutation: CacheMutation
     ) -> ApplyOutcome {
         // A value may span the complete payload lane. Copy it before taking
         // the L1 lock so local reads are not blocked on SHM traversal.
         let resolved_payload = match &mutation {
             CacheMutation::Put { payload, .. } => Some(transport.read_payload(*payload)),
-            CacheMutation::Delete { .. } | CacheMutation::Reset { .. } => None,
+            CacheMutation::Delete { .. } | CacheMutation::Reset { .. } => None
         };
         let revision = mutation.revision();
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -170,41 +169,25 @@ impl LocalCache {
         }
 
         match mutation {
-            CacheMutation::Put {
-                store: _,
-                key,
-                revision,
-                expires_at_ms,
-                ..
-            } => match resolved_payload.expect("put payload was resolved before L1 lock") {
-                Some(value) => {
-                    let applied = state.put_slot(
-                        key.to_vec(),
-                        LocalSlot::Present(CacheEntry {
-                            value,
-                            revision,
-                            expires_at_ms,
-                        }),
-                    );
-                    if applied {
-                        ApplyOutcome::Applied
-                    } else {
-                        ApplyOutcome::Ignored
+            CacheMutation::Put { store: _, key, revision, expires_at_ms, .. } => {
+                match resolved_payload.expect("put payload was resolved before L1 lock") {
+                    Some(value) => {
+                        let applied = state.put_slot(
+                            key.to_vec(),
+                            LocalSlot::Present(CacheEntry { value, revision, expires_at_ms })
+                        );
+                        if applied { ApplyOutcome::Applied } else { ApplyOutcome::Ignored }
+                    }
+                    None => {
+                        if state.put_slot(key.to_vec(), LocalSlot::Missing { revision }) {
+                            ApplyOutcome::PayloadUnavailable { key }
+                        } else {
+                            ApplyOutcome::Ignored
+                        }
                     }
                 }
-                None => {
-                    if state.put_slot(key.to_vec(), LocalSlot::Missing { revision }) {
-                        ApplyOutcome::PayloadUnavailable { key }
-                    } else {
-                        ApplyOutcome::Ignored
-                    }
-                }
-            },
-            CacheMutation::Delete {
-                store: _,
-                key,
-                revision,
-            } => {
+            }
+            CacheMutation::Delete { store: _, key, revision } => {
                 if state.put_slot(key.to_vec(), LocalSlot::Missing { revision }) {
                     ApplyOutcome::Applied
                 } else {
@@ -223,29 +206,32 @@ impl LocalCache {
         key: &[u8],
         value: Bytes,
         revision: CacheRevision,
-        expires_at_ms: Option<u64>,
+        expires_at_ms: Option<u64>
     ) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if state.accepts(revision) {
             let _ = state.put_slot(
                 key.to_vec(),
-                LocalSlot::Present(CacheEntry {
-                    value,
-                    revision,
-                    expires_at_ms,
-                }),
+                LocalSlot::Present(CacheEntry { value, revision, expires_at_ms })
             );
         }
     }
 
-    pub(crate) fn install_missing(&self, key: &[u8], revision: CacheRevision) {
+    pub(crate) fn install_missing(
+        &self,
+        key: &[u8],
+        revision: CacheRevision
+    ) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if state.accepts(revision) {
             let _ = state.put_slot(key.to_vec(), LocalSlot::Missing { revision });
         }
     }
 
-    pub(crate) fn reset_local(&self, revision: CacheRevision) {
+    pub(crate) fn reset_local(
+        &self,
+        revision: CacheRevision
+    ) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if state.accepts(revision) {
             state.advance_floor(revision.sequence);
@@ -254,18 +240,19 @@ impl LocalCache {
 }
 
 impl LocalState {
-    fn accepts(&self, revision: CacheRevision) -> bool {
-        !self
-            .revision_floor
-            .is_some_and(|floor| revision.sequence <= floor)
+    fn accepts(
+        &self,
+        revision: CacheRevision
+    ) -> bool {
+        !self.revision_floor.is_some_and(|floor| revision.sequence <= floor)
     }
 
-    fn put_slot(&mut self, key: Vec<u8>, slot: LocalSlot) -> bool {
-        if self
-            .slots
-            .peek(&key)
-            .is_some_and(|current| current.revision() >= slot.revision())
-        {
+    fn put_slot(
+        &mut self,
+        key: Vec<u8>,
+        slot: LocalSlot
+    ) -> bool {
+        if self.slots.peek(&key).is_some_and(|current| current.revision() >= slot.revision()) {
             return false;
         }
         let inserted_key = key.clone();
@@ -283,10 +270,11 @@ impl LocalState {
         }
     }
 
-    fn advance_floor(&mut self, revision: u64) {
-        let floor = self
-            .revision_floor
-            .map_or(revision, |current| current.max(revision));
+    fn advance_floor(
+        &mut self,
+        revision: u64
+    ) {
+        let floor = self.revision_floor.map_or(revision, |current| current.max(revision));
         self.revision_floor = Some(floor);
         let stale_keys = self
             .slots

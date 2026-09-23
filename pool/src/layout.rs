@@ -43,11 +43,15 @@ pub(crate) struct Header {
     pub(crate) flags: u8,
     _reserved: [u8; 5],
     pub(crate) epoch: AtomicU64,
-    _reserved2: [u8; 24],
+    _reserved2: [u8; 24]
 }
 
 impl Header {
-    pub(crate) fn new(fleet_capacity: u16, geometry: &Geometry, epoch: u64) -> Self {
+    pub(crate) fn new(
+        fleet_capacity: u16,
+        geometry: &Geometry,
+        epoch: u64
+    ) -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
@@ -60,14 +64,18 @@ impl Header {
             flags: u8::from(geometry.fleet_availability),
             _reserved: [0; 5],
             epoch: AtomicU64::new(epoch),
-            _reserved2: [0; 24],
+            _reserved2: [0; 24]
         }
     }
 
     /// The spec a peer built its side with is part of the wire contract:
     /// a segment opened under one kind answers only to that kind's
     /// capacities.
-    pub(crate) fn compatible(&self, fleet_capacity: u16, geometry: &Geometry) -> bool {
+    pub(crate) fn compatible(
+        &self,
+        fleet_capacity: u16,
+        geometry: &Geometry
+    ) -> bool {
         self.magic == MAGIC
             && self.version == VERSION
             && usize::from(self.header_size) == size_of::<Self>()
@@ -85,7 +93,7 @@ pub(crate) struct Doorbell {
     pub(crate) generation: AtomicU32,
     pub(crate) listening: AtomicU32,
     pub(crate) incarnation: AtomicU64,
-    _padding: [u8; 48],
+    _padding: [u8; 48]
 }
 
 /// One key: what resources are usable for, and the fleet-wide creation
@@ -109,11 +117,15 @@ pub(crate) struct KeySlot {
     /// availability; it lives in former padding so default table geometry is
     /// unchanged.
     pub(crate) available: AtomicU32,
-    _padding: [u8; 20],
+    _padding: [u8; 20]
 }
 
 impl KeySlot {
-    pub(crate) fn holds(&self, lo: u64, hi: u64) -> bool {
+    pub(crate) fn holds(
+        &self,
+        lo: u64,
+        hi: u64
+    ) -> bool {
         self.state.load(Ordering::Acquire) == KEY_LIVE
             && self.key_lo.load(Ordering::Relaxed) == lo
             && self.key_hi.load(Ordering::Relaxed) == hi
@@ -125,7 +137,10 @@ pub(crate) const fn unpack_counts(counts: u64) -> (u32, u32) {
     ((counts >> 32) as u32, counts as u32)
 }
 
-pub(crate) const fn pack_counts(live: u32, creating: u32) -> u64 {
+pub(crate) const fn pack_counts(
+    live: u32,
+    creating: u32
+) -> u64 {
     ((live as u64) << 32) | creating as u64
 }
 
@@ -159,7 +174,7 @@ pub(crate) struct ResourceSlot {
     /// accept, or one arriving after the owner aged the entry out, is
     /// refused. Bounded: a resource with this many unaccepted
     /// reservations refuses further ones until the owner catches up.
-    pub(crate) pending: [Reservation; PENDING_RESERVATIONS],
+    pub(crate) pending: [Reservation; PENDING_RESERVATIONS]
 }
 
 /// One reservation the owner has not seen yet. `since_ms` is written
@@ -168,7 +183,7 @@ pub(crate) struct ResourceSlot {
 #[repr(C)]
 pub(crate) struct Reservation {
     pub(crate) fence: AtomicU64,
-    pub(crate) since_ms: AtomicU64,
+    pub(crate) since_ms: AtomicU64
 }
 
 /// Unaccepted reservations one resource can hold at once. Part of the
@@ -177,7 +192,10 @@ pub(crate) struct Reservation {
 pub const PENDING_RESERVATIONS: usize = 16;
 
 impl ResourceSlot {
-    pub(crate) fn is(&self, generation: u32) -> bool {
+    pub(crate) fn is(
+        &self,
+        generation: u32
+    ) -> bool {
         let state = self.state.load(Ordering::Acquire);
         (state == RESOURCE_LIVE || state == RESOURCE_DRAINING)
             && self.generation.load(Ordering::Relaxed) == generation
@@ -191,7 +209,7 @@ impl ResourceSlot {
         key: (u64, u64),
         key_index: u32,
         capacity: u32,
-        now_ms: u64,
+        now_ms: u64
     ) -> Option<u32> {
         let generation = self.generation.load(Ordering::Relaxed);
         if generation >= GENERATION_LIMIT {
@@ -242,11 +260,14 @@ pub(crate) struct Geometry {
     pub(crate) claims_offset: usize,
     pub(crate) keys_offset: usize,
     pub(crate) resources_offset: usize,
-    pub(crate) segment_size: usize,
+    pub(crate) segment_size: usize
 }
 
 impl Geometry {
-    pub(crate) fn new(fleet_capacity: u16, spec: PoolSpec) -> Self {
+    pub(crate) fn new(
+        fleet_capacity: u16,
+        spec: PoolSpec
+    ) -> Self {
         let PoolSpec { key_capacity, lane_capacity, fleet_availability, .. } = spec;
         let fleet_capacity = usize::from(fleet_capacity);
         let total_resources = fleet_capacity * lane_capacity;
@@ -278,7 +299,7 @@ impl Geometry {
             claims_offset,
             keys_offset,
             resources_offset,
-            segment_size,
+            segment_size
         }
     }
 }

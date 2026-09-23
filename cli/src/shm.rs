@@ -1,8 +1,7 @@
 use std::ffi::CString;
-use std::fs;
-use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::{fs, io};
 
 use orbit_core::shm::ring_segment_name_for_uid;
 
@@ -10,7 +9,7 @@ use orbit_core::shm::ring_segment_name_for_uid;
 pub struct Segment {
     pub kind: u8,
     pub name: String,
-    pub size: u64,
+    pub size: u64
 }
 
 pub fn effective_uid() -> u32 {
@@ -18,7 +17,11 @@ pub fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-pub fn discover(fleet: &str, uid: u32, kind: Option<u8>) -> io::Result<Vec<Segment>> {
+pub fn discover(
+    fleet: &str,
+    uid: u32,
+    kind: Option<u8>
+) -> io::Result<Vec<Segment>> {
     validate_fleet(fleet)?;
 
     let mut segments = Vec::new();
@@ -52,11 +55,15 @@ pub fn unlink(segment: &Segment) -> io::Result<()> {
     match fs::remove_file(&lock_path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(context(&lock_path.display().to_string(), error)),
+        Err(error) => Err(context(&lock_path.display().to_string(), error))
     }
 }
 
-fn inspect(fleet: &str, uid: u32, kind: u8) -> io::Result<Option<Segment>> {
+fn inspect(
+    fleet: &str,
+    uid: u32,
+    kind: u8
+) -> io::Result<Option<Segment>> {
     let name = ring_segment_name_for_uid(fleet, kind, uid);
     let c_name = c_name(&name)?;
 
@@ -91,7 +98,7 @@ fn inspect(fleet: &str, uid: u32, kind: u8) -> io::Result<Option<Segment>> {
     let size = u64::try_from(size).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("SHM object {name} reported a negative size"),
+            format!("SHM object {name} reported a negative size")
         )
     })?;
 
@@ -100,15 +107,12 @@ fn inspect(fleet: &str, uid: u32, kind: u8) -> io::Result<Option<Segment>> {
 
 fn validate_fleet(fleet: &str) -> io::Result<()> {
     if fleet.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "fleet name must not be empty",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "fleet name must not be empty"));
     }
     if fleet.contains('/') || fleet.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "fleet name must not contain '/' or a NUL byte",
+            "fleet name must not contain '/' or a NUL byte"
         ));
     }
     Ok(())
@@ -123,7 +127,10 @@ fn lock_path(shm_name: &str) -> PathBuf {
     PathBuf::from("/tmp").join(format!("{}.lock", shm_name.trim_start_matches('/')))
 }
 
-fn context(target: &str, error: io::Error) -> io::Error {
+fn context(
+    target: &str,
+    error: io::Error
+) -> io::Error {
     io::Error::new(error.kind(), format!("{target}: {error}"))
 }
 
@@ -140,10 +147,7 @@ mod tests {
 
     #[test]
     fn follows_the_orbit_name_contract() {
-        assert_eq!(
-            ring_segment_name_for_uid("web", 231, 501),
-            "/orbit-web-231-501"
-        );
+        assert_eq!(ring_segment_name_for_uid("web", 231, 501), "/orbit-web-231-501");
     }
 
     #[test]
@@ -156,11 +160,7 @@ mod tests {
 
         // SAFETY: `c_name` and flags form a valid exclusive SHM create call.
         let raw_fd = unsafe {
-            libc::shm_open(
-                c_name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            )
+            libc::shm_open(c_name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600)
         };
         assert!(raw_fd >= 0, "failed to create {name}: {}", io_error());
         // SAFETY: `raw_fd` was returned by `shm_open` and is uniquely owned.
@@ -178,9 +178,7 @@ mod tests {
 
         unlink(&found[0]).expect("unlink must succeed");
         assert!(
-            discover(&fleet, uid, Some(kind))
-                .expect("second discovery must succeed")
-                .is_empty()
+            discover(&fleet, uid, Some(kind)).expect("second discovery must succeed").is_empty()
         );
     }
 
@@ -193,17 +191,9 @@ mod tests {
 
         // SAFETY: `c_name` and flags form a valid exclusive SHM create call.
         let raw_fd = unsafe {
-            libc::shm_open(
-                c_name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            )
+            libc::shm_open(c_name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600)
         };
-        assert!(
-            raw_fd >= 0,
-            "failed to create {similar_name}: {}",
-            io_error()
-        );
+        assert!(raw_fd >= 0, "failed to create {similar_name}: {}", io_error());
         // SAFETY: `raw_fd` was returned by `shm_open` and is uniquely owned.
         drop(unsafe { OwnedFd::from_raw_fd(raw_fd) });
 

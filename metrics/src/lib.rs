@@ -69,7 +69,7 @@ pub trait OrbitMetricKeyedSnapshot: OrbitMetricSnapshot {
 #[derive(Clone, Debug)]
 pub struct OrbitMetricSample<T> {
     pub id: NetId64,
-    pub snapshot: T,
+    pub snapshot: T
 }
 
 impl<T: OrbitMetricSnapshot> OrbitMetricSample<T> {
@@ -81,11 +81,18 @@ impl<T: OrbitMetricSnapshot> OrbitMetricSample<T> {
         self.snapshot.captured_at_unix_secs()
     }
 
-    pub fn age_secs(&self, now_unix_secs: u64) -> u64 {
+    pub fn age_secs(
+        &self,
+        now_unix_secs: u64
+    ) -> u64 {
         now_unix_secs.saturating_sub(self.captured_at_unix_secs())
     }
 
-    pub fn is_fresh(&self, now_unix_secs: u64, max_age_secs: u64) -> bool {
+    pub fn is_fresh(
+        &self,
+        now_unix_secs: u64,
+        max_age_secs: u64
+    ) -> bool {
         self.age_secs(now_unix_secs) <= max_age_secs
     }
 }
@@ -94,27 +101,20 @@ impl<T: OrbitMetricSnapshot> OrbitMetricSample<T> {
 #[derive(Clone)]
 pub struct OrbitMetricFamily<T: OrbitMetricSnapshot> {
     fleet: Arc<Fleet>,
-    _t: std::marker::PhantomData<T>,
+    _t: std::marker::PhantomData<T>
 }
 
 impl<T: OrbitMetricSnapshot> OrbitMetricFamily<T> {
     pub fn new(fleet: Arc<Fleet>) -> Self {
-        Self {
-            fleet,
-            _t: std::marker::PhantomData,
-        }
+        Self { fleet, _t: std::marker::PhantomData }
     }
 
     pub fn publisher(&self) -> OrbitMetricPublisher<T> {
-        OrbitMetricPublisher {
-            family: self.clone(),
-        }
+        OrbitMetricPublisher { family: self.clone() }
     }
 
     pub fn collector(&self) -> OrbitMetricCollector<T> {
-        OrbitMetricCollector {
-            family: self.clone(),
-        }
+        OrbitMetricCollector { family: self.clone() }
     }
 }
 
@@ -122,20 +122,21 @@ impl<T: OrbitMetricSnapshot> OrbitMetricFamily<T> {
 /// worker/background publisher task.
 #[derive(Clone)]
 pub struct OrbitMetricPublisher<T: OrbitMetricSnapshot> {
-    family: OrbitMetricFamily<T>,
+    family: OrbitMetricFamily<T>
 }
 
 impl<T: OrbitMetricSnapshot> OrbitMetricPublisher<T> {
     pub fn new(fleet: Arc<Fleet>) -> Self {
-        Self {
-            family: OrbitMetricFamily::new(fleet),
-        }
+        Self { family: OrbitMetricFamily::new(fleet) }
     }
 
     /// Publish one captured snapshot. The ring frame version mirrors
     /// the snapshot timestamp so low-level tools can inspect freshness
     /// without decoding.
-    pub fn publish(&self, snapshot: &T) -> Result<NetId64, String> {
+    pub fn publish(
+        &self,
+        snapshot: &T
+    ) -> Result<NetId64, String> {
         let payload = snapshot.encode()?;
         if payload.len() > T::RING_SPEC.payload_capacity {
             return Err(format!(
@@ -148,7 +149,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricPublisher<T> {
         Ok(self.family.fleet.publish::<T>(
             0,
             snapshot.captured_at_unix_secs(),
-            Bytes::from(payload),
+            Bytes::from(payload)
         ))
     }
 }
@@ -157,14 +158,12 @@ impl<T: OrbitMetricSnapshot> OrbitMetricPublisher<T> {
 /// master/aggregator path.
 #[derive(Clone)]
 pub struct OrbitMetricCollector<T: OrbitMetricSnapshot> {
-    family: OrbitMetricFamily<T>,
+    family: OrbitMetricFamily<T>
 }
 
 impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
     pub fn new(fleet: Arc<Fleet>) -> Self {
-        Self {
-            family: OrbitMetricFamily::new(fleet),
-        }
+        Self { family: OrbitMetricFamily::new(fleet) }
     }
 
     /// Walk the ring backwards and return the newest decodable sample
@@ -200,10 +199,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
             };
             samples
                 .entry(snapshot.node_id())
-                .or_insert(OrbitMetricSample {
-                    id: frame.id,
-                    snapshot,
-                });
+                .or_insert(OrbitMetricSample { id: frame.id, snapshot });
             if expected_nodes > 0 && samples.len() >= expected_nodes {
                 break;
             }
@@ -220,7 +216,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
     pub fn latest_by_key<K>(&self) -> HashMap<K, OrbitMetricSample<T>>
     where
         T: OrbitMetricKeyedSnapshot<Key = K>,
-        K: Eq + Hash,
+        K: Eq + Hash
     {
         if T::RING_SPEC.topology == RingTopology::PerNode {
             return self.latest_by_key_lanes();
@@ -250,10 +246,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
             };
             samples
                 .entry(snapshot.metric_key())
-                .or_insert(OrbitMetricSample {
-                    id: frame.id,
-                    snapshot,
-                });
+                .or_insert(OrbitMetricSample { id: frame.id, snapshot });
             if counter == 0 {
                 break;
             }
@@ -281,13 +274,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
                 if snapshot.node_id() != node {
                     continue;
                 }
-                samples.insert(
-                    snapshot.node_id(),
-                    OrbitMetricSample {
-                        id: frame.id,
-                        snapshot,
-                    },
-                );
+                samples.insert(snapshot.node_id(), OrbitMetricSample { id: frame.id, snapshot });
                 break;
             }
         }
@@ -298,7 +285,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
     fn latest_by_key_lanes<K>(&self) -> HashMap<K, OrbitMetricSample<T>>
     where
         T: OrbitMetricKeyedSnapshot<Key = K>,
-        K: Eq + Hash,
+        K: Eq + Hash
     {
         let capacity = self.family.fleet.ring_capacity::<T>() as u64;
         let mut samples = HashMap::new();
@@ -316,10 +303,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
                     continue;
                 };
                 let key = snapshot.metric_key();
-                let candidate = OrbitMetricSample {
-                    id: frame.id,
-                    snapshot,
-                };
+                let candidate = OrbitMetricSample { id: frame.id, snapshot };
                 match samples.entry(key) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(candidate);
@@ -342,11 +326,11 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
     pub fn fresh_by_key<K>(
         &self,
         now_unix_secs: u64,
-        max_age_secs: u64,
+        max_age_secs: u64
     ) -> HashMap<K, OrbitMetricSample<T>>
     where
         T: OrbitMetricKeyedSnapshot<Key = K>,
-        K: Eq + Hash,
+        K: Eq + Hash
     {
         self.latest_by_key()
             .into_iter()
@@ -359,7 +343,7 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
     pub fn fresh_by_node(
         &self,
         now_unix_secs: u64,
-        max_age_secs: u64,
+        max_age_secs: u64
     ) -> HashMap<u16, OrbitMetricSample<T>> {
         self.latest_by_node()
             .into_iter()
@@ -370,17 +354,10 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
 
 fn sample_is_newer<T: OrbitMetricSnapshot>(
     candidate: &OrbitMetricSample<T>,
-    current: &OrbitMetricSample<T>,
+    current: &OrbitMetricSample<T>
 ) -> bool {
-    (
-        candidate.captured_at_unix_secs(),
-        candidate.id.node(),
-        candidate.id.counter(),
-    ) > (
-        current.captured_at_unix_secs(),
-        current.id.node(),
-        current.id.counter(),
-    )
+    (candidate.captured_at_unix_secs(), candidate.id.node(), candidate.id.counter())
+        > (current.captured_at_unix_secs(), current.id.node(), current.id.counter())
 }
 
 #[cfg(test)]
@@ -391,7 +368,7 @@ mod tests {
     struct TestSnapshot {
         node: u16,
         captured_at: u64,
-        value: u64,
+        value: u64
     }
 
     impl OrbitTyped for TestSnapshot {
@@ -425,11 +402,7 @@ mod tests {
             let node = u16::from_le_bytes(bytes[0..2].try_into().expect("node bytes"));
             let captured_at = u64::from_le_bytes(bytes[2..10].try_into().expect("time bytes"));
             let value = u64::from_le_bytes(bytes[10..18].try_into().expect("value bytes"));
-            Ok(Self {
-                node,
-                captured_at,
-                value,
-            })
+            Ok(Self { node, captured_at, value })
         }
     }
 
@@ -440,27 +413,9 @@ mod tests {
         let publisher = family.publisher();
         let collector = family.collector();
 
-        publisher
-            .publish(&TestSnapshot {
-                node: 1,
-                captured_at: 10,
-                value: 100,
-            })
-            .unwrap();
-        publisher
-            .publish(&TestSnapshot {
-                node: 2,
-                captured_at: 11,
-                value: 200,
-            })
-            .unwrap();
-        publisher
-            .publish(&TestSnapshot {
-                node: 1,
-                captured_at: 12,
-                value: 101,
-            })
-            .unwrap();
+        publisher.publish(&TestSnapshot { node: 1, captured_at: 10, value: 100 }).unwrap();
+        publisher.publish(&TestSnapshot { node: 2, captured_at: 11, value: 200 }).unwrap();
+        publisher.publish(&TestSnapshot { node: 1, captured_at: 12, value: 101 }).unwrap();
 
         let latest = collector.latest_by_node();
         assert_eq!(latest.len(), 2);
@@ -503,32 +458,20 @@ mod tests {
         let collector_fleet = Arc::new(Fleet::join_shm_as(name, 3, NodeId::new(0)).unwrap());
         collector_fleet.reset_ring::<PerNodeSnapshot>().unwrap();
         let node_one = OrbitMetricPublisher::<PerNodeSnapshot>::new(Arc::new(
-            Fleet::join_shm_as(name, 3, NodeId::new(1)).unwrap(),
+            Fleet::join_shm_as(name, 3, NodeId::new(1)).unwrap()
         ));
         let node_two = OrbitMetricPublisher::<PerNodeSnapshot>::new(Arc::new(
-            Fleet::join_shm_as(name, 3, NodeId::new(2)).unwrap(),
+            Fleet::join_shm_as(name, 3, NodeId::new(2)).unwrap()
         ));
 
         node_one
-            .publish(&PerNodeSnapshot(TestSnapshot {
-                node: 1,
-                captured_at: 10,
-                value: 100,
-            }))
+            .publish(&PerNodeSnapshot(TestSnapshot { node: 1, captured_at: 10, value: 100 }))
             .unwrap();
         node_two
-            .publish(&PerNodeSnapshot(TestSnapshot {
-                node: 2,
-                captured_at: 11,
-                value: 200,
-            }))
+            .publish(&PerNodeSnapshot(TestSnapshot { node: 2, captured_at: 11, value: 200 }))
             .unwrap();
         node_one
-            .publish(&PerNodeSnapshot(TestSnapshot {
-                node: 1,
-                captured_at: 12,
-                value: 101,
-            }))
+            .publish(&PerNodeSnapshot(TestSnapshot { node: 1, captured_at: 12, value: 101 }))
             .unwrap();
 
         let latest =
@@ -537,11 +480,7 @@ mod tests {
         assert_eq!(latest[&1].snapshot.0.value, 101);
         assert_eq!(latest[&2].snapshot.0.value, 200);
 
-        collector_fleet
-            .shm_ring::<PerNodeSnapshot>()
-            .unwrap()
-            .unlink()
-            .unwrap();
+        collector_fleet.shm_ring::<PerNodeSnapshot>().unwrap().unlink().unwrap();
     }
 
     #[test]
@@ -551,20 +490,8 @@ mod tests {
         let publisher = family.publisher();
         let collector = family.collector();
 
-        publisher
-            .publish(&TestSnapshot {
-                node: 1,
-                captured_at: 10,
-                value: 100,
-            })
-            .unwrap();
-        publisher
-            .publish(&TestSnapshot {
-                node: 2,
-                captured_at: 20,
-                value: 200,
-            })
-            .unwrap();
+        publisher.publish(&TestSnapshot { node: 1, captured_at: 10, value: 100 }).unwrap();
+        publisher.publish(&TestSnapshot { node: 2, captured_at: 20, value: 200 }).unwrap();
 
         let fresh = collector.fresh_by_node(25, 10);
         assert_eq!(fresh.len(), 1);
@@ -576,7 +503,7 @@ mod tests {
         node: u16,
         key: &'static str,
         captured_at: u64,
-        value: u64,
+        value: u64
     }
 
     impl OrbitTyped for KeyedSnapshot {
@@ -621,14 +548,9 @@ mod tests {
             let key = match key {
                 "alpha" => "alpha",
                 "beta" => "beta",
-                _ => return Err(format!("unknown key {key}")),
+                _ => return Err(format!("unknown key {key}"))
             };
-            Ok(Self {
-                node,
-                key,
-                captured_at,
-                value,
-            })
+            Ok(Self { node, key, captured_at, value })
         }
     }
 
@@ -648,28 +570,13 @@ mod tests {
         let collector = family.collector();
 
         publisher
-            .publish(&KeyedSnapshot {
-                node: 0,
-                key: "alpha",
-                captured_at: 10,
-                value: 100,
-            })
+            .publish(&KeyedSnapshot { node: 0, key: "alpha", captured_at: 10, value: 100 })
             .unwrap();
         publisher
-            .publish(&KeyedSnapshot {
-                node: 0,
-                key: "beta",
-                captured_at: 11,
-                value: 200,
-            })
+            .publish(&KeyedSnapshot { node: 0, key: "beta", captured_at: 11, value: 200 })
             .unwrap();
         publisher
-            .publish(&KeyedSnapshot {
-                node: 0,
-                key: "alpha",
-                captured_at: 12,
-                value: 101,
-            })
+            .publish(&KeyedSnapshot { node: 0, key: "alpha", captured_at: 12, value: 101 })
             .unwrap();
 
         let latest = collector.latest_by_key();

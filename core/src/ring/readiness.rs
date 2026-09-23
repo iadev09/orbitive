@@ -9,12 +9,11 @@
 
 #![cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 
-use std::fmt;
-use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::{fmt, io};
 
 use super::shm::ShmRing;
 use crate::readiness::{Readiness, Signal};
@@ -33,7 +32,7 @@ pub struct RingEventFd {
     fd: Readiness,
     ring: Arc<ShmRing>,
     stop: Arc<AtomicBool>,
-    driver: Option<JoinHandle<()>>,
+    driver: Option<JoinHandle<()>>
 }
 
 impl RingEventFd {
@@ -52,9 +51,7 @@ impl RingEventFd {
             .name(format!("orbit-ring-{}-eventfd", ring.kind()))
             .spawn(move || {
                 while !driver_stop.load(Ordering::Acquire) {
-                    let current = driver_ring
-                        .notification_generation()
-                        .load(Ordering::Acquire);
+                    let current = driver_ring.notification_generation().load(Ordering::Acquire);
                     if current != observed {
                         observed = current;
                         if driver_fd.signal().is_err() {
@@ -70,17 +67,11 @@ impl RingEventFd {
                 }
             })?;
 
-        Ok(Self {
-            fd,
-            ring,
-            stop,
-            driver: Some(driver),
-        })
+        Ok(Self { fd, ring, stop, driver: Some(driver) })
     }
 
     pub(crate) fn notify(ring: &ShmRing) -> io::Result<()> {
-        ring.notification_generation()
-            .fetch_add(1, Ordering::Release);
+        ring.notification_generation().fetch_add(1, Ordering::Release);
         crate::sync::wake_word(ring.notification_generation())
     }
 
@@ -106,7 +97,10 @@ impl AsFd for RingEventFd {
 }
 
 impl fmt::Debug for RingEventFd {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         f.debug_struct("RingEventFd")
             .field("fd", &self.fd.as_raw_fd())
             .field("ring_kind", &self.ring.kind())
@@ -120,9 +114,7 @@ impl Drop for RingEventFd {
         // Change the generation before waking. If the driver passed its stop
         // check but has not entered the platform wait yet, the atomic compare
         // prevents it from parking after our wake and deadlocking join.
-        self.ring
-            .notification_generation()
-            .fetch_add(1, Ordering::Release);
+        self.ring.notification_generation().fetch_add(1, Ordering::Release);
         let _ = crate::sync::wake_word(self.ring.notification_generation());
         if let Some(driver) = self.driver.take() {
             let _ = driver.join();
@@ -142,7 +134,7 @@ fn local_notification_pair() -> io::Result<(Readiness, Signal)> {
     if crate::sync::macos::api().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Orbit native readiness requires macOS 14.4 or later",
+            "Orbit native readiness requires macOS 14.4 or later"
         ));
     }
     crate::readiness::pair()

@@ -694,7 +694,8 @@ impl Pool {
             return Err(Error::Busy(id));
         }
         let capacity = slot.capacity.load(Ordering::Relaxed);
-        if slot.units
+        if slot
+            .units
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
                 let (reserved, active) = unpack_counts(units);
                 (reserved + active < capacity).then(|| pack_counts(reserved + 1, active))
@@ -888,7 +889,10 @@ impl Pool {
     }
 
     /// Fleet-wide free resource units for specs that opted into availability.
-    pub fn available(&self, key: Key) -> Result<u32> {
+    pub fn available(
+        &self,
+        key: Key
+    ) -> Result<u32> {
         if !self.table.geometry().fleet_availability {
             return Err(Error::AvailabilityDisabled);
         }
@@ -1152,7 +1156,10 @@ impl Execution {
 
     /// Finish this use and retain the resource idle only if the fleet-wide
     /// idle ceiling still has room. `false` means the owner must retire it.
-    pub fn complete_idle(mut self, max_idle: u32) -> Result<bool> {
+    pub fn complete_idle(
+        mut self,
+        max_idle: u32
+    ) -> Result<bool> {
         if !self.table.geometry().fleet_availability {
             return Err(Error::AvailabilityDisabled);
         }
@@ -1161,7 +1168,10 @@ impl Execution {
         Ok(retained)
     }
 
-    fn finish(&self, max_idle: Option<u32>) -> bool {
+    fn finish(
+        &self,
+        max_idle: Option<u32>
+    ) -> bool {
         let index = usize::from(self.lease.id.node()) * self.table.geometry().lane_capacity
             + self.lease.id.slot() as usize;
         let slot = &self.table.resources()[index];
@@ -1565,9 +1575,8 @@ mod tests {
                 let sent = sent.clone();
                 std::thread::spawn(move || {
                     let started = std::time::Instant::now();
-                    let changed = pool
-                        .wait_capacity_timeout(KEY, since, Duration::from_millis(500))
-                        .unwrap();
+                    let changed =
+                        pool.wait_capacity_timeout(KEY, since, Duration::from_millis(500)).unwrap();
                     sent.send((changed, started.elapsed())).unwrap();
                 })
             })

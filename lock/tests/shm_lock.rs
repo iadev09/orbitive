@@ -39,18 +39,14 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(other) => panic!("unexpected child status: {other:?}"),
-            Err(error) => panic!("waitpid failed: {error}"),
+            Err(error) => panic!("waitpid failed: {error}")
         }
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn wait_until_readable(fd: &impl AsRawFd) -> bool {
-    let mut poll_fd = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
+    let mut poll_fd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
     let ready = unsafe { libc::poll(&mut poll_fd, 1, 2_000) };
     ready == 1 && poll_fd.revents & libc::POLLIN != 0
 }
@@ -72,11 +68,11 @@ fn processes_contending_for_one_key_produce_one_owner() {
             }
             let fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(12),
+                Err(_) => std::process::exit(12)
             };
             let locks = match Lock::new(fleet) {
                 Ok(locks) => locks,
-                Err(_) => std::process::exit(13),
+                Err(_) => std::process::exit(13)
             };
             let key = LockKey::from_parts("test.pool", Bytes::from_static(b"pool:queue:1"));
             let acquired = matches!(
@@ -97,14 +93,9 @@ fn processes_contending_for_one_key_produce_one_owner() {
                 LockAcquire::Acquired(_)
             );
             let mut child_result = [0; 1];
-            parent_pipe
-                .read_exact(&mut child_result)
-                .expect("child result");
+            parent_pipe.read_exact(&mut child_result).expect("child result");
             assert_eq!(wait_child(child), 0);
-            assert_eq!(
-                usize::from(parent_acquired) + usize::from(child_result[0]),
-                1
-            );
+            assert_eq!(usize::from(parent_acquired) + usize::from(child_result[0]), 1);
             assert!(parent.current(&key).expect("current").is_some());
             parent.unlink().expect("unlink lock transport");
         }
@@ -124,11 +115,11 @@ fn child_transition_wakes_parent_eventfd() {
         ForkResult::Child => {
             let fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(21),
+                Err(_) => std::process::exit(21)
             };
             let locks = match Lock::new(fleet) {
                 Ok(locks) => locks,
-                Err(_) => std::process::exit(22),
+                Err(_) => std::process::exit(22)
             };
             let key = LockKey::from_parts("test.pool", Bytes::from_static(b"pool:queue:1"));
             if !matches!(

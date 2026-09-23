@@ -23,9 +23,7 @@ fn report(line: &str) {
 }
 
 fn pattern(len: usize) -> Vec<u8> {
-    (0..len as u32)
-        .map(|i| (i.wrapping_mul(2654435761) >> 9) as u8)
-        .collect()
+    (0..len as u32).map(|i| (i.wrapping_mul(2654435761) >> 9) as u8).collect()
 }
 
 /// The peer. Runs only when the parent test exec'd us with the fleet name.
@@ -68,7 +66,7 @@ fn stream_peer() {
                 drop(endpoint);
             }
             "drop" => break,
-            command => panic!("unknown command {command}"),
+            command => panic!("unknown command {command}")
         }
     }
     report("dropped");
@@ -76,7 +74,7 @@ fn stream_peer() {
 
 struct Peer {
     child: Child,
-    lines: Receiver<String>,
+    lines: Receiver<String>
 }
 
 impl Peer {
@@ -103,7 +101,10 @@ impl Peer {
         peer
     }
 
-    fn expect(&self, message: &str) -> String {
+    fn expect(
+        &self,
+        message: &str
+    ) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let line = self
@@ -118,7 +119,10 @@ impl Peer {
         }
     }
 
-    fn send(&mut self, command: &str) {
+    fn send(
+        &mut self,
+        command: &str
+    ) {
         writeln!(self.child.stdin.as_mut().unwrap(), "{command}").unwrap();
         self.child.stdin.as_mut().unwrap().flush().unwrap();
     }
@@ -153,7 +157,7 @@ impl Drop for Peer {
 
 struct Owner {
     streams: Streams,
-    name: &'static str,
+    name: &'static str
 }
 
 impl Owner {
@@ -205,10 +209,7 @@ fn bytes_cross_between_two_processes_and_the_writer_waits_on_a_full_ring() {
     assert_eq!(peer.expect("echoed"), format!("echoed {}", expected.len()));
 
     // The peer released its side when the echo finished; ours is the last.
-    assert!(matches!(
-        owner.streams.open(ticket),
-        Err(Error::AlreadyClaimed(_))
-    ));
+    assert!(matches!(owner.streams.open(ticket), Err(Error::AlreadyClaimed(_))));
     drop(a_read);
     assert!(!owner.streams.is_live(ticket.id));
     peer.finish();
@@ -236,16 +237,11 @@ fn a_killed_peer_is_reported_dead_and_the_survivor_ends_cleanly() {
     // Death alone changes nothing in the segment: the reader is still
     // parked. The supervisor's report is what ends the peer's side.
     assert!(owner.streams.is_live(ticket.id));
-    owner
-        .streams
-        .node_dead(NodeId::new(1), Incarnation::new(PEER_INCARNATION));
+    owner.streams.node_dead(NodeId::new(1), Incarnation::new(PEER_INCARNATION));
     let (a, outcome) = reader.join().unwrap();
     assert!(matches!(outcome, Err(Error::Reset)), "{outcome:?}");
     assert!(matches!(a.try_write(b"x"), Err(Error::PeerGone)));
-    assert!(matches!(
-        owner.streams.open(ticket),
-        Err(Error::AlreadyClaimed(_))
-    ));
+    assert!(matches!(owner.streams.open(ticket), Err(Error::AlreadyClaimed(_))));
     assert!(owner.streams.is_live(ticket.id));
     drop(a);
     assert!(!owner.streams.is_live(ticket.id));

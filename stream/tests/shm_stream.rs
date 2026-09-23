@@ -4,10 +4,10 @@
 #![cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use orbit_core::{Fleet, NodeId};
 use orbit_stream::{Error, Incarnation, STREAM_BUFFER_BYTES, StreamSpec, Streams};
-use std::time::Duration;
 
 fn fleet_name(tag: &str) -> &'static str {
     Box::leak(format!("st{tag}{:x}", std::process::id()).into_boxed_str())
@@ -18,7 +18,7 @@ fn a_second_mapping_holds_the_other_end() {
     let name = fleet_name("a");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
@@ -28,14 +28,12 @@ fn a_second_mapping_holds_the_other_end() {
 
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
     let b = peer.open(text.parse().expect("ticket")).expect("open");
 
-    let body = (0..3 * STREAM_BUFFER_BYTES + 17)
-        .map(|i| (i % 251) as u8)
-        .collect::<Vec<_>>();
+    let body = (0..3 * STREAM_BUFFER_BYTES + 17).map(|i| (i % 251) as u8).collect::<Vec<_>>();
     let expected = body.clone();
     let writer = std::thread::spawn(move || {
         a.blocking_write_all(&body).expect("write");
@@ -65,13 +63,13 @@ fn the_peer_lane_allocates_independently() {
     let name = fleet_name("b");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 3, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 3, NodeId::new(2)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -89,13 +87,13 @@ fn a_dead_peer_ends_its_side_and_the_survivor_keeps_the_slot_until_it_lets_go() 
     let name = fleet_name("c");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -132,13 +130,13 @@ fn an_offer_reaches_the_other_node() {
     let name = fleet_name("o");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -154,10 +152,7 @@ fn an_offer_reaches_the_other_node() {
     let b = peer.open(offered).expect("open");
     a.blocking_write_all(b"via offer").expect("write");
     a.finish().expect("finish");
-    assert_eq!(
-        b.blocking_read_chunk(32).expect("read").as_ref(),
-        b"via offer"
-    );
+    assert_eq!(b.blocking_read_chunk(32).expect("read").as_ref(), b"via offer");
     owner.unlink().expect("unlink");
 }
 
@@ -242,13 +237,13 @@ fn a_foreign_runtime_parks_on_a_descriptor_instead_of_a_waker() {
     let name = fleet_name("f");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -281,12 +276,11 @@ fn a_foreign_runtime_parks_on_a_descriptor_instead_of_a_waker() {
     let _ = owner.unlink();
 }
 
-fn poll_readable(fd: std::os::fd::RawFd, millis: i32) -> bool {
-    let mut watched = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
+fn poll_readable(
+    fd: std::os::fd::RawFd,
+    millis: i32
+) -> bool {
+    let mut watched = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
     // SAFETY: one descriptor this test owns, and a timeout.
     let ready = unsafe { libc::poll(&mut watched, 1, millis) };
     ready > 0 && watched.revents & libc::POLLIN != 0
@@ -301,13 +295,13 @@ fn a_wait_can_be_bounded_without_losing_the_stream() {
     let name = fleet_name("t");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -321,10 +315,7 @@ fn a_wait_can_be_bounded_without_losing_the_stream() {
     // And when one arrives, the same call answers with it.
     let (a, ticket) = owner.create().expect("create");
     owner.offer(ticket, NodeId::new(1)).expect("offer");
-    let taken = peer
-        .take_offer_timeout(Duration::from_secs(5))
-        .expect("wait")
-        .expect("the offer");
+    let taken = peer.take_offer_timeout(Duration::from_secs(5)).expect("wait").expect("the offer");
     let (b_read, _b_write) = peer.open(taken).expect("open").split();
 
     // The same for readability: empty until it is not.
@@ -344,13 +335,13 @@ fn the_table_says_which_generations_hold_a_side() {
     let name = fleet_name("o");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
     assert!(owner.owners().is_empty());
@@ -360,10 +351,7 @@ fn the_table_says_which_generations_hold_a_side() {
     let b = peer.open(ticket).expect("open");
     assert_eq!(
         peer.owners(),
-        vec![
-            (NodeId::ZERO, Incarnation::new(10)),
-            (NodeId::new(1), Incarnation::new(11)),
-        ]
+        vec![(NodeId::ZERO, Incarnation::new(10)), (NodeId::new(1), Incarnation::new(11)),]
     );
 
     drop((a, b));

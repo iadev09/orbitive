@@ -37,7 +37,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(other) => panic!("unexpected child status: {other:?}"),
-            Err(error) => panic!("waitpid failed: {error}"),
+            Err(error) => panic!("waitpid failed: {error}")
         }
     }
 }
@@ -57,11 +57,11 @@ fn stateful_tickets_have_one_cross_process_take_winner() {
             drop(parent_pipe);
             let fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(11),
+                Err(_) => std::process::exit(11)
             };
             let sessions = match FleetServerSessions::open(fleet) {
                 Ok(sessions) => sessions,
-                Err(_) => std::process::exit(12),
+                Err(_) => std::process::exit(12)
             };
             let storage = sessions.storage(SessionDomain::new("quic-public").expect("domain"));
             for ticket in 0_u64..128 {
@@ -89,9 +89,7 @@ fn stateful_tickets_have_one_cross_process_take_winner() {
                 parent_pipe.write_all(&[1]).expect("start child");
                 let parent_won = parent_storage.take(&key).is_some();
                 let mut child_result = [0; 1];
-                parent_pipe
-                    .read_exact(&mut child_result)
-                    .expect("child result");
+                parent_pipe.read_exact(&mut child_result).expect("child result");
 
                 assert_eq!(
                     usize::from(parent_won) + usize::from(child_result[0]),

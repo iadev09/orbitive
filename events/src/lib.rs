@@ -14,7 +14,6 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
-
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use orbit_core::RingEventFd;
 use orbit_core::fleet::FleetLaneCursor;
@@ -25,7 +24,7 @@ mod layout;
 use layout::EventRecord;
 pub use layout::{
     DefaultEventLayout, EVENT_PAYLOAD_MAX, EVENT_RING_CAPACITY, EVENT_RING_KIND,
-    EVENT_RING_PAYLOAD_CAPACITY, EVENT_RING_SPEC, EventLayout,
+    EVENT_RING_PAYLOAD_CAPACITY, EVENT_RING_SPEC, EventLayout
 };
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -34,30 +33,25 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug)]
 pub enum Error {
     /// A topic and payload envelope cannot fit in one configured event frame.
-    FrameTooLarge {
-        topic_len: usize,
-        payload_len: usize,
-        max_payload: usize,
-    },
+    FrameTooLarge { topic_len: usize, payload_len: usize, max_payload: usize },
     /// The underlying Orbit ring operation failed.
     Io(std::io::Error),
     /// A custom [`EventLayout`] names a ring this bus cannot use.
-    InvalidLayout(&'static str),
+    InvalidLayout(&'static str)
 }
 
 impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>
+    ) -> std::fmt::Result {
         match self {
-            Self::FrameTooLarge {
-                topic_len,
-                payload_len,
-                max_payload,
-            } => write!(
+            Self::FrameTooLarge { topic_len, payload_len, max_payload } => write!(
                 f,
                 "orbit event frame too large: topic_len={topic_len} payload_len={payload_len} max_payload={max_payload}"
             ),
             Self::Io(error) => write!(f, "orbit event io error: {error}"),
-            Self::InvalidLayout(reason) => write!(f, "orbit event layout invalid: {reason}"),
+            Self::InvalidLayout(reason) => write!(f, "orbit event layout invalid: {reason}")
         }
     }
 }
@@ -66,7 +60,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::FrameTooLarge { .. } | Self::InvalidLayout(_) => None,
+            Self::FrameTooLarge { .. } | Self::InvalidLayout(_) => None
         }
     }
 }
@@ -80,23 +74,19 @@ const FRAME_KIND_EVENT: u8 = 1;
 /// caller-owned so different consumers can advance independently.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FleetEventCursor {
-    inner: FleetLaneCursor,
+    inner: FleetLaneCursor
 }
 
 impl FleetEventCursor {
     /// Start from the beginning of the ring history that is still
     /// available.
     pub const fn from_start() -> Self {
-        Self {
-            inner: FleetLaneCursor::from_counter(0),
-        }
+        Self { inner: FleetLaneCursor::from_counter(0) }
     }
 
     /// Start from a known next counter.
     pub const fn from_counter(next_counter: u64) -> Self {
-        Self {
-            inner: FleetLaneCursor::from_counter(next_counter),
-        }
+        Self { inner: FleetLaneCursor::from_counter(next_counter) }
     }
 
     /// The lowest next counter among the node lanes.
@@ -111,7 +101,7 @@ pub struct FleetEvent {
     pub id: NetId64,
     pub topic: String,
     pub payload: Vec<u8>,
-    pub timestamp_ms: u64,
+    pub timestamp_ms: u64
 }
 
 /// Result of polling an event cursor.
@@ -121,7 +111,7 @@ pub struct FleetEventPoll {
     /// Number of counters that could not be delivered because the
     /// subscriber lagged past the ring capacity, a slot was empty, or a
     /// slot had already wrapped to another counter.
-    pub lagged: u64,
+    pub lagged: u64
 }
 
 impl FleetEventPoll {
@@ -133,25 +123,19 @@ impl FleetEventPoll {
 /// Fleet-shared raw event bus over the ring named by `L`. Cheap to clone.
 pub struct FleetEventBus<L: EventLayout = DefaultEventLayout> {
     fleet: Arc<Fleet>,
-    _layout: PhantomData<L>,
+    _layout: PhantomData<L>
 }
 
 impl<L: EventLayout> Clone for FleetEventBus<L> {
     fn clone(&self) -> Self {
-        Self {
-            fleet: Arc::clone(&self.fleet),
-            _layout: PhantomData,
-        }
+        Self { fleet: Arc::clone(&self.fleet), _layout: PhantomData }
     }
 }
 
 impl FleetEventBus<DefaultEventLayout> {
     /// A bus over the fleet's default event ring.
     pub fn new(fleet: Arc<Fleet>) -> Self {
-        Self {
-            fleet,
-            _layout: PhantomData,
-        }
+        Self { fleet, _layout: PhantomData }
     }
 }
 
@@ -163,10 +147,7 @@ impl<L: EventLayout> FleetEventBus<L> {
     /// A bus over the ring named by `L`.
     pub fn with_layout(fleet: Arc<Fleet>) -> Result<Self> {
         layout::validate::<L>()?;
-        Ok(Self {
-            fleet,
-            _layout: PhantomData,
-        })
+        Ok(Self { fleet, _layout: PhantomData })
     }
 
     pub fn node_id(&self) -> NodeId {
@@ -176,9 +157,7 @@ impl<L: EventLayout> FleetEventBus<L> {
     /// Cursor that starts after all events currently in the ring.
     /// Useful for subscribers that only want future events.
     pub fn cursor_at_head(&self) -> FleetEventCursor {
-        FleetEventCursor {
-            inner: self.fleet.lane_cursor_at_head::<EventRecord<L>>(),
-        }
+        FleetEventCursor { inner: self.fleet.lane_cursor_at_head::<EventRecord<L>>() }
     }
 
     /// Cursor that starts at counter 0 and replays whatever history has
@@ -206,13 +185,15 @@ impl<L: EventLayout> FleetEventBus<L> {
     /// Drain the fd, then poll the ring with this subscriber's cursor.
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
-        self.fleet
-            .ring_event_fd::<EventRecord<L>>()
-            .map_err(Error::Io)
+        self.fleet.ring_event_fd::<EventRecord<L>>().map_err(Error::Io)
     }
 
     /// Publish one event under `topic`.
-    pub fn publish(&self, topic: &str, payload: &[u8]) -> Result<NetId64> {
+    pub fn publish(
+        &self,
+        topic: &str,
+        payload: &[u8]
+    ) -> Result<NetId64> {
         let timestamp = OrbitEpoch::now();
         let frame = encode_frame(topic.as_bytes(), payload, timestamp, Self::PAYLOAD_MAX)?;
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
@@ -222,15 +203,17 @@ impl<L: EventLayout> FleetEventBus<L> {
             .map_err(Error::Io)?;
         #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
         let id =
-            self.fleet
-                .publish::<EventRecord<L>>(FRAME_KIND_EVENT, timestamp.as_unix_ms(), frame);
+            self.fleet.publish::<EventRecord<L>>(FRAME_KIND_EVENT, timestamp.as_unix_ms(), frame);
         Ok(id)
     }
 
     /// Poll all events since `cursor`, advancing the cursor to the
     /// current ring head. If the cursor has fallen behind the ring
     /// capacity, older overwritten counters are reported as `lagged`.
-    pub fn poll(&self, cursor: &mut FleetEventCursor) -> FleetEventPoll {
+    pub fn poll(
+        &self,
+        cursor: &mut FleetEventCursor
+    ) -> FleetEventPoll {
         let ring_poll = self.fleet.poll_lanes::<EventRecord<L>>(&mut cursor.inner);
         let mut lagged = ring_poll.loss.total();
         let mut events = Vec::new();
@@ -243,7 +226,7 @@ impl<L: EventLayout> FleetEventBus<L> {
                 id: frame.id,
                 topic: String::from_utf8_lossy(decoded.topic).into_owned(),
                 payload: decoded.payload.to_vec(),
-                timestamp_ms: decoded.timestamp.as_unix_ms(),
+                timestamp_ms: decoded.timestamp.as_unix_ms()
             });
         }
 
@@ -254,7 +237,11 @@ impl<L: EventLayout> FleetEventBus<L> {
     ///
     /// The cursor still advances past all events, including filtered
     /// topics. Use separate cursors for independent consumers.
-    pub fn poll_topic(&self, cursor: &mut FleetEventCursor, topic: &str) -> FleetEventPoll {
+    pub fn poll_topic(
+        &self,
+        cursor: &mut FleetEventCursor,
+        topic: &str
+    ) -> FleetEventPoll {
         let mut poll = self.poll(cursor);
         poll.events.retain(|event| event.topic == topic);
         poll
@@ -264,21 +251,21 @@ impl<L: EventLayout> FleetEventBus<L> {
 struct DecodedFrame<'a> {
     topic: &'a [u8],
     payload: &'a [u8],
-    timestamp: OrbitEpoch,
+    timestamp: OrbitEpoch
 }
 
 fn encode_frame(
     topic: &[u8],
     payload: &[u8],
     timestamp: OrbitEpoch,
-    max_payload: usize,
+    max_payload: usize
 ) -> Result<Bytes> {
     let total = HEADER_LEN + topic.len() + payload.len();
     if topic.len() > u16::MAX as usize || payload.len() > u16::MAX as usize || total > max_payload {
         return Err(Error::FrameTooLarge {
             topic_len: topic.len(),
             payload_len: payload.len(),
-            max_payload,
+            max_payload
         });
     }
 
@@ -309,7 +296,7 @@ fn decode_frame(payload: &Bytes) -> Option<DecodedFrame<'_>> {
     Some(DecodedFrame {
         topic: &payload[topic_start..topic_end],
         payload: &payload[topic_end..payload_end],
-        timestamp,
+        timestamp
     })
 }
 
@@ -317,8 +304,9 @@ fn decode_frame(payload: &Bytes) -> Option<DecodedFrame<'_>> {
 mod tests {
     use std::sync::Arc;
 
-    use super::{EventLayout, FleetEventBus};
     use orbit_core::{Fleet, OrbitEpoch, RingSpec};
+
+    use super::{EventLayout, FleetEventBus};
 
     struct WideLayout;
 
@@ -380,7 +368,7 @@ mod tests {
     fn event_frame_contract_uses_the_compile_time_geometry() {
         let expected = orbit_core::compile::usize_from_env(
             option_env!("ORBIT_EVENT_RING_PAYLOAD_CAPACITY"),
-            512,
+            512
         );
         assert_eq!(super::EVENT_PAYLOAD_MAX, expected);
 
@@ -406,8 +394,7 @@ mod tests {
         let mut cursor = bus.cursor_from_start();
 
         for value in 0..=super::EVENT_RING_SPEC.capacity {
-            bus.publish("n", value.to_string().as_bytes())
-                .expect("publish event");
+            bus.publish("n", value.to_string().as_bytes()).expect("publish event");
         }
 
         let poll = bus.poll(&mut cursor);
@@ -426,9 +413,7 @@ mod tests {
 
         let wide_payload = vec![7_u8; super::EVENT_PAYLOAD_MAX];
         assert!(fleet_bus.publish("wide", &wide_payload).is_err());
-        wide_bus
-            .publish("wide", &wide_payload)
-            .expect("wide frame fits");
+        wide_bus.publish("wide", &wide_payload).expect("wide frame fits");
         fleet_bus.publish("small", b"1").expect("small frame fits");
 
         let wide = wide_bus.poll(&mut wide_cursor);

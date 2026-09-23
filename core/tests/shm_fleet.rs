@@ -20,7 +20,10 @@ impl OrbitTyped for CrossCounter {
     const RING_SPEC: RingSpec = RingSpec::new(16, size_of::<u64>());
 }
 
-fn publish_counter(fleet: &Fleet, value: CrossCounter) -> NetId64 {
+fn publish_counter(
+    fleet: &Fleet,
+    value: CrossCounter
+) -> NetId64 {
     fleet.publish::<CrossCounter>(0, 0, Bytes::copy_from_slice(&value.0.to_le_bytes()))
 }
 
@@ -64,7 +67,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(other) => panic!("unexpected child status: {:?}", other),
-            Err(e) => panic!("waitpid failed: {e}"),
+            Err(e) => panic!("waitpid failed: {e}")
         }
     }
 }
@@ -91,7 +94,7 @@ fn parent_publishes_child_loads() {
             // Child process: open the same SHM-backed fleet.
             let child_fleet = match Fleet::join_shm(name, 4) {
                 Ok(f) => Arc::new(f),
-                Err(_) => std::process::exit(41),
+                Err(_) => std::process::exit(41)
             };
             match load_counter(&child_fleet) {
                 Some(v) if v.0 == 0xCAFE_F00D => std::process::exit(0),
@@ -99,7 +102,7 @@ fn parent_publishes_child_loads() {
                     eprintln!("child loaded unexpected value: {:#x}", other.0);
                     std::process::exit(42);
                 }
-                None => std::process::exit(43),
+                None => std::process::exit(43)
             }
         }
     }
@@ -130,7 +133,7 @@ fn child_publishes_parent_loads() {
         ForkResult::Child => {
             let child_fleet = match Fleet::join_shm(name, 4) {
                 Ok(f) => Arc::new(f),
-                Err(_) => std::process::exit(51),
+                Err(_) => std::process::exit(51)
             };
             publish_counter(&child_fleet, CrossCounter(0xDEAD_BEEF));
             std::process::exit(0);

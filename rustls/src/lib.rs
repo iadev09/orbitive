@@ -20,5 +20,5 @@ mod session;
 
 #[cfg(unix)]
 pub use session::{
-    DEFAULT_SESSION_TTL, FleetServerSessions, MAX_SESSION_TTL, OrbitSessionStorage, SessionDomain,
+    DEFAULT_SESSION_TTL, FleetServerSessions, MAX_SESSION_TTL, OrbitSessionStorage, SessionDomain
 };

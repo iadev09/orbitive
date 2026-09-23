@@ -70,7 +70,10 @@ impl ChunkGeometry {
 
     /// Effective chunk capacity for a runtime byte target. This is always
     /// `n * slot_payload_bytes` for a valid lane-bounded `n`.
-    pub const fn chunk_bytes_for_target(self, target_bytes: usize) -> Option<usize> {
+    pub const fn chunk_bytes_for_target(
+        self,
+        target_bytes: usize
+    ) -> Option<usize> {
         let slots = match self.slots_for_target(target_bytes) {
             Some(slots) => slots,
             None => return None

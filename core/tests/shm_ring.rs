@@ -48,9 +48,7 @@ fn open_or_create_creates_first_then_attaches() {
 fn write_then_read_returns_same_frame() {
     let name = fresh_name();
     let ring = ShmRing::open_or_create(&name, 7, spec(16)).unwrap();
-    let id = ring
-        .write(NodeId::new(3), 0, 42, Bytes::from_static(b"hello"))
-        .unwrap();
+    let id = ring.write(NodeId::new(3), 0, 42, Bytes::from_static(b"hello")).unwrap();
     assert_eq!(id.kind(), 7);
     assert_eq!(id.node(), 3);
     assert_eq!(id.counter(), 0);
@@ -69,10 +67,8 @@ fn head_advances_with_writes() {
     let name = fresh_name();
     let ring = ShmRing::open_or_create(&name, 5, spec(16)).unwrap();
     assert_eq!(ring.head(), 0);
-    ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"a"))
-        .unwrap();
-    ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"b"))
-        .unwrap();
+    ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"a")).unwrap();
+    ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"b")).unwrap();
     assert_eq!(ring.head(), 2);
     let _ = ring.unlink();
 }
@@ -83,11 +79,8 @@ fn read_head_returns_latest() {
     let ring = ShmRing::open_or_create(&name, 5, spec(16)).unwrap();
     assert!(ring.read_head().is_none());
 
-    ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"first"))
-        .unwrap();
-    let last = ring
-        .write(NodeId::new(0), 0, 0, Bytes::from_static(b"second"))
-        .unwrap();
+    ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"first")).unwrap();
+    let last = ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"second")).unwrap();
 
     let frame = ring.read_head().unwrap();
     assert_eq!(frame.id, last);
@@ -101,9 +94,7 @@ fn wraparound_overwrites_old_slots() {
     let ring = ShmRing::open_or_create(&name, 5, spec(4)).unwrap();
     let mut ids = Vec::new();
     for i in 0..6 {
-        let id = ring
-            .write(NodeId::new(0), 0, 0, Bytes::from(vec![i]))
-            .unwrap();
+        let id = ring.write(NodeId::new(0), 0, 0, Bytes::from(vec![i])).unwrap();
         ids.push(id);
     }
     // First two slots overwritten by writes 4 and 5 (capacity = 4).
@@ -123,9 +114,7 @@ fn two_handles_same_segment_share_state() {
     assert!(writer.created());
     assert!(!reader.created());
 
-    let id = writer
-        .write(NodeId::new(1), 0, 0, Bytes::from_static(b"shared"))
-        .unwrap();
+    let id = writer.write(NodeId::new(1), 0, 0, Bytes::from_static(b"shared")).unwrap();
 
     // Reader sees what writer wrote — the whole point of SHM.
     let frame = reader.read(id).unwrap();
@@ -167,7 +156,7 @@ fn same_kind_rejects_a_different_ring_spec() {
 
     let err = match ShmRing::open_or_create(&name, 14, RingSpec::new(16, 256)) {
         Ok(_) => panic!("same SHM path must reject a different slot layout"),
-        Err(err) => err,
+        Err(err) => err
     };
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 
@@ -179,12 +168,8 @@ fn zero_payload_ring_accepts_only_empty_frames() {
     let name = fresh_name();
     let ring = ShmRing::open_or_create(&name, 15, RingSpec::new(16, 0)).unwrap();
 
-    ring.write(NodeId::ZERO, 1, 0, Bytes::new())
-        .expect("empty heartbeat-like frame");
-    assert!(
-        ring.write(NodeId::ZERO, 1, 0, Bytes::from_static(b"x"))
-            .is_err()
-    );
+    ring.write(NodeId::ZERO, 1, 0, Bytes::new()).expect("empty heartbeat-like frame");
+    assert!(ring.write(NodeId::ZERO, 1, 0, Bytes::from_static(b"x")).is_err());
 
     let _ = ring.unlink();
 }
@@ -236,11 +221,7 @@ fn per_node_batch_is_contiguous_and_addressable() {
             NodeId::new(1),
             3,
             99,
-            vec![
-                Bytes::from_static(b"aa"),
-                Bytes::from_static(b"bb"),
-                Bytes::from_static(b"cc"),
-            ],
+            vec![Bytes::from_static(b"aa"), Bytes::from_static(b"bb"), Bytes::from_static(b"cc")]
         )
         .unwrap();
 

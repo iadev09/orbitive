@@ -32,25 +32,21 @@ pub(crate) fn encode<L: LockLayout>(transition: &LockTransition) -> Result<(u8, 
             namespace_len: key.namespace().len(),
             key_len: key.label().len(),
             owner_len: owner.as_bytes().len(),
-            max_payload,
+            max_payload
         });
     }
 
     let (frame_kind, acquired_at_ms, expires_at_ms) = match transition {
-        LockTransition::Acquired(lease) => (
-            FRAME_KIND_ACQUIRED,
-            lease.acquired_at_ms,
-            lease.expires_at_ms,
-        ),
-        LockTransition::Renewed(lease) => (
-            FRAME_KIND_RENEWED,
-            lease.acquired_at_ms,
-            lease.expires_at_ms,
-        ),
-        LockTransition::Released { .. } => (FRAME_KIND_RELEASED, 0, 0),
+        LockTransition::Acquired(lease) => {
+            (FRAME_KIND_ACQUIRED, lease.acquired_at_ms, lease.expires_at_ms)
+        }
+        LockTransition::Renewed(lease) => {
+            (FRAME_KIND_RENEWED, lease.acquired_at_ms, lease.expires_at_ms)
+        }
+        LockTransition::Released { .. } => (FRAME_KIND_RELEASED, 0, 0)
     };
     let mut out = BytesMut::with_capacity(
-        EVENT_HEADER_LEN + key.namespace().len() + key.label().len() + owner.as_bytes().len(),
+        EVENT_HEADER_LEN + key.namespace().len() + key.label().len() + owner.as_bytes().len()
     );
     out.put_u32_le(MAGIC);
     out.put_u8(VERSION);
@@ -88,9 +84,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<LockEvent> {
         || key_len == 0
         || owner_len == 0
         || owner_end != frame.payload.len()
-        || namespace_len
-            .saturating_add(key_len)
-            .saturating_add(owner_len)
+        || namespace_len.saturating_add(key_len).saturating_add(owner_len)
             > crate::state::LOCK_STATE_PAYLOAD_MAX
         || frame.ver == 0
     {
@@ -98,7 +92,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<LockEvent> {
     }
     let key = LockKey::from_parts(
         frame.payload.slice(EVENT_HEADER_LEN..namespace_end),
-        frame.payload.slice(namespace_end..key_end),
+        frame.payload.slice(namespace_end..key_end)
     );
     let owner = LockOwner::from(frame.payload.slice(key_end..owner_end));
     let transition = match frame.kind {
@@ -111,7 +105,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<LockEvent> {
                 owner,
                 acquired_at_ms,
                 expires_at_ms,
-                state_revision: frame.ver,
+                state_revision: frame.ver
             };
             if frame.kind == FRAME_KIND_ACQUIRED {
                 LockTransition::Acquired(lease)
@@ -120,17 +114,9 @@ pub(crate) fn decode(frame: &Frame) -> Option<LockEvent> {
             }
         }
         FRAME_KIND_RELEASED if acquired_at_ms == 0 && expires_at_ms == 0 => {
-            LockTransition::Released {
-                lock_id,
-                key,
-                owner,
-                state_revision: frame.ver,
-            }
+            LockTransition::Released { lock_id, key, owner, state_revision: frame.ver }
         }
-        _ => return None,
+        _ => return None
     };
-    Some(LockEvent {
-        event_id: frame.id,
-        transition,
-    })
+    Some(LockEvent { event_id: frame.id, transition })
 }

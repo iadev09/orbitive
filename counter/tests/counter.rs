@@ -51,9 +51,6 @@ fn overflow_keeps_previous_value() {
 fn negative_amount_is_rejected() {
     let counter = counter();
 
-    assert!(matches!(
-        counter.increment("bad", -1),
-        Err(Error::NegativeAmount(-1))
-    ));
+    assert!(matches!(counter.increment("bad", -1), Err(Error::NegativeAmount(-1))));
     assert_eq!(counter.get("bad").expect("get"), None);
 }

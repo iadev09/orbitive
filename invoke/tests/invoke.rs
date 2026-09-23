@@ -35,10 +35,7 @@ fn typed_invocation_round_trips_with_origin_identity() {
     assert_eq!(poll.invocations[0].id, id);
     assert_eq!(id.node(), bus.node_id().get());
     assert_ne!(poll.invocations[0].submitted_at, OrbitEpoch::ZERO);
-    assert_eq!(
-        poll.invocations[0].decode::<Ping>().expect("decode"),
-        Ping(b"hello".to_vec())
-    );
+    assert_eq!(poll.invocations[0].decode::<Ping>().expect("decode"), Ping(b"hello".to_vec()));
 }
 
 #[test]
@@ -58,16 +55,10 @@ fn operation_filter_advances_past_other_invocations() {
 #[test]
 fn rejects_invalid_and_oversized_envelopes() {
     let bus = bus("invoke-limits");
-    assert!(matches!(
-        bus.submit(" ", b"payload"),
-        Err(Error::EmptyOperation)
-    ));
+    assert!(matches!(bus.submit(" ", b"payload"), Err(Error::EmptyOperation)));
 
     let payload = vec![0; INVOCATION_PAYLOAD_MAX];
-    assert!(matches!(
-        bus.submit("large.v1", &payload),
-        Err(Error::FrameTooLarge { .. })
-    ));
+    assert!(matches!(bus.submit("large.v1", &payload), Err(Error::FrameTooLarge { .. })));
 }
 
 #[test]
@@ -76,8 +67,7 @@ fn reports_overwritten_invocations_as_lag() {
     let mut cursor = bus.cursor_from_start();
 
     for sequence in 0..=INVOCATION_RING_CAPACITY {
-        bus.submit("sequence.v1", &sequence.to_le_bytes())
-            .expect("submit");
+        bus.submit("sequence.v1", &sequence.to_le_bytes()).expect("submit");
     }
 
     let poll = bus.poll(&mut cursor);
@@ -92,15 +82,11 @@ async fn subscription_keeps_retained_invocations_after_reporting_lag() {
     let mut subscription = bus.clone().subscribe("sequence.v1").expect("subscribe");
 
     for sequence in 0..=INVOCATION_RING_CAPACITY {
-        bus.submit("sequence.v1", &sequence.to_le_bytes())
-            .expect("submit");
+        bus.submit("sequence.v1", &sequence.to_le_bytes()).expect("submit");
     }
 
     assert!(matches!(subscription.receive().await, Err(Error::Lagged(count)) if count > 0));
-    let invocation = subscription
-        .receive()
-        .await
-        .expect("first retained invocation");
+    let invocation = subscription.receive().await.expect("first retained invocation");
     assert_eq!(invocation.operation, "sequence.v1");
     assert_eq!(invocation.payload, 1usize.to_le_bytes());
 }
@@ -120,17 +106,11 @@ async fn shm_subscription_receives_a_peer_notification() {
     let name = Box::leak(format!("ivt{:x}", std::process::id()).into_boxed_str());
     let writer_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("writer fleet"));
     let reader_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("reader fleet"));
-    writer_fleet
-        .shm_ring::<TestInvocationRing>()
-        .expect("invocation ring")
-        .reset();
+    writer_fleet.shm_ring::<TestInvocationRing>().expect("invocation ring").reset();
 
     let writer = InvocationBus::new(writer_fleet);
     let reader = Arc::new(InvocationBus::new(Arc::clone(&reader_fleet)));
-    let mut subscription = reader
-        .clone()
-        .subscribe(Ping::OPERATION)
-        .expect("subscribe");
+    let mut subscription = reader.clone().subscribe(Ping::OPERATION).expect("subscribe");
 
     let id = writer.submit(Ping::OPERATION, b"peer").expect("submit");
     let invocation =

@@ -63,24 +63,16 @@ impl<L: EventLayout> OrbitTyped for EventRecord<L> {
 
 pub(crate) fn validate<L: EventLayout>() -> Result<()> {
     if L::RING_SPEC.topology != RingTopology::PerNode {
-        return Err(Error::InvalidLayout(
-            "the event ring must use per-node lanes",
-        ));
+        return Err(Error::InvalidLayout("the event ring must use per-node lanes"));
     }
     if L::RING_SPEC.capacity == 0 || !L::RING_SPEC.capacity.is_power_of_two() {
-        return Err(Error::InvalidLayout(
-            "event-ring capacity must be a non-zero power of two",
-        ));
+        return Err(Error::InvalidLayout("event-ring capacity must be a non-zero power of two"));
     }
     if L::RING_SPEC.payload_capacity < HEADER_LEN {
-        return Err(Error::InvalidLayout(
-            "event-ring payload cannot fit an event header",
-        ));
+        return Err(Error::InvalidLayout("event-ring payload cannot fit an event header"));
     }
     if L::RING_SPEC.payload_capacity > u32::MAX as usize {
-        return Err(Error::InvalidLayout(
-            "event-ring payload exceeds the frame length field",
-        ));
+        return Err(Error::InvalidLayout("event-ring payload exceeds the frame length field"));
     }
     Ok(())
 }

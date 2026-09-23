@@ -23,23 +23,27 @@ fn fleet_name(tag: &str) -> &'static str {
 }
 
 /// Which of the two descriptors became readable within `millis`.
-fn poll_two(first: &Readiness, second: &Readiness, millis: i32) -> (bool, bool) {
+fn poll_two(
+    first: &Readiness,
+    second: &Readiness,
+    millis: i32
+) -> (bool, bool) {
     let mut watched = [
         libc::pollfd { fd: first.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: second.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: second.as_raw_fd(), events: libc::POLLIN, revents: 0 }
     ];
     // SAFETY: two descriptors this test owns, and a timeout.
     let ready = unsafe { libc::poll(watched.as_mut_ptr(), 2, millis) };
     if ready <= 0 {
         return (false, false);
     }
-    (
-        watched[0].revents & libc::POLLIN != 0,
-        watched[1].revents & libc::POLLIN != 0,
-    )
+    (watched[0].revents & libc::POLLIN != 0, watched[1].revents & libc::POLLIN != 0)
 }
 
-fn quieten(first: &Readiness, second: &Readiness) {
+fn quieten(
+    first: &Readiness,
+    second: &Readiness
+) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let (a, b) = poll_two(first, second, 50);
@@ -79,10 +83,7 @@ fn a_worker_waits_for_a_request_and_for_capacity_in_one_poll_set() {
     // creation in progress, both on the other node.
     let _id = owner_pool.register(KEY, 1).expect("register");
     let permit = owner_pool.claim_create(KEY, MAX_LIVE).expect("the last unit");
-    assert!(matches!(
-        worker_pool.claim_create(KEY, MAX_LIVE),
-        Err(Error::CreationBudget { .. })
-    ));
+    assert!(matches!(worker_pool.claim_create(KEY, MAX_LIVE), Err(Error::CreationBudget { .. })));
 
     quieten(&requests, &capacity);
 
@@ -124,10 +125,7 @@ fn a_worker_waits_for_a_request_and_for_capacity_in_one_poll_set() {
         }
     }
     assert!(freed, "the released claim never reached the descriptor");
-    worker_pool
-        .claim_create(KEY, MAX_LIVE)
-        .expect("capacity came back")
-        .finish();
+    worker_pool.claim_create(KEY, MAX_LIVE).expect("capacity came back").finish();
 
     let _ = owner_pool.unlink();
     let _ = owner_streams.unlink();

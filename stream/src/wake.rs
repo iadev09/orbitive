@@ -18,7 +18,7 @@ use crate::lock_unpoisoned;
 #[derive(Clone, Copy)]
 pub(crate) struct Interest {
     pub(crate) direction: usize,
-    pub(crate) writer: bool,
+    pub(crate) writer: bool
 }
 
 impl Interest {
@@ -29,48 +29,57 @@ impl Interest {
 
 #[derive(Default)]
 struct SlotWakers {
-    wakers: [Option<Waker>; 4],
+    wakers: [Option<Waker>; 4]
 }
 
 /// One entry per slot in the table, sized once at open, plus the one task
 /// waiting for a stream to be offered to this node.
 pub(crate) struct Registry {
     slots: Box<[Mutex<SlotWakers>]>,
-    offer: Mutex<Option<Waker>>,
+    offer: Mutex<Option<Waker>>
 }
 
 impl Registry {
     pub(crate) fn new(total_slots: usize) -> Self {
         Self {
-            slots: (0..total_slots)
-                .map(|_| Mutex::new(SlotWakers::default()))
-                .collect(),
-            offer: Mutex::new(None),
+            slots: (0..total_slots).map(|_| Mutex::new(SlotWakers::default())).collect(),
+            offer: Mutex::new(None)
         }
     }
 
     /// Remember `waker` for one task; a second registration by the same
     /// task replaces the first, which is the `AsyncRead` contract.
-    pub(crate) fn register(&self, slot: usize, interest: Interest, waker: &Waker) {
+    pub(crate) fn register(
+        &self,
+        slot: usize,
+        interest: Interest,
+        waker: &Waker
+    ) {
         let mut entry = lock_unpoisoned(&self.slots[slot]);
         let place = &mut entry.wakers[interest.index()];
         match place {
             Some(existing) if existing.will_wake(waker) => {}
-            _ => *place = Some(waker.clone()),
+            _ => *place = Some(waker.clone())
         }
     }
 
-    pub(crate) fn register_offer(&self, waker: &Waker) {
+    pub(crate) fn register_offer(
+        &self,
+        waker: &Waker
+    ) {
         let mut place = lock_unpoisoned(&self.offer);
         match &*place {
             Some(existing) if existing.will_wake(waker) => {}
-            _ => *place = Some(waker.clone()),
+            _ => *place = Some(waker.clone())
         }
     }
 
     /// Wake every task parked on the slot. They re-check; a wake nobody
     /// needed costs one poll.
-    pub(crate) fn wake(&self, slot: usize) {
+    pub(crate) fn wake(
+        &self,
+        slot: usize
+    ) {
         let taken = {
             let mut entry = lock_unpoisoned(&self.slots[slot]);
             std::mem::take(&mut entry.wakers)
@@ -100,7 +109,10 @@ pub(crate) trait Doorstep: Send + Sync + 'static {
     /// The generation word of this process's node.
     fn generation(&self) -> &AtomicU32;
     /// Called once when the driver starts and once when it stops.
-    fn listening(&self, delta: i32);
+    fn listening(
+        &self,
+        delta: i32
+    );
     /// Swap out every pending bit for this node and wake the local tasks;
     /// wake the offer waiter if an offer is pending.
     fn drain(&self);
@@ -111,14 +123,17 @@ pub(crate) struct Driver {
     thread: Option<JoinHandle<()>>,
     /// The process that spawned the thread; a forked child inherits this
     /// struct and no thread, and must not try to join one.
-    pid: u32,
+    pid: u32
 }
 
 impl Driver {
     /// Start the thread. `target` is a raw pointer only because the table
     /// that owns the driver also owns everything the pointer reaches, and
     /// stops the thread before any of it is freed.
-    pub(crate) fn start<T: Doorstep>(target: *const T, name: String) -> std::io::Result<Self> {
+    pub(crate) fn start<T: Doorstep>(
+        target: *const T,
+        name: String
+    ) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let target = SendPtr(target);
@@ -129,14 +144,13 @@ impl Driver {
             let table = unsafe { &*target.0 };
             run(table, &thread_stop);
         })?;
-        Ok(Self {
-            stop,
-            thread: Some(thread),
-            pid: std::process::id(),
-        })
+        Ok(Self { stop, thread: Some(thread), pid: std::process::id() })
     }
 
-    pub(crate) fn stop(&mut self, generation: &AtomicU32) {
+    pub(crate) fn stop(
+        &mut self,
+        generation: &AtomicU32
+    ) {
         self.stop.store(true, Ordering::Release);
         // Change the word before waking, as the ring bridge does: a driver
         // between its stop check and its park then fails the compare and
@@ -156,7 +170,10 @@ struct SendPtr<T>(*const T);
 // SAFETY: the pointee is `Sync` and outlives the thread (see `Driver::start`).
 unsafe impl<T: Sync> Send for SendPtr<T> {}
 
-fn run<T: Doorstep>(table: &T, stop: &AtomicBool) {
+fn run<T: Doorstep>(
+    table: &T,
+    stop: &AtomicBool
+) {
     let generation = table.generation();
     table.listening(1);
     let mut seen = generation.load(Ordering::SeqCst);

@@ -21,9 +21,7 @@ fn missing_observation_does_not_create_a_segment() {
     let kind = 246;
     let observer = FleetObserver::attach_existing(&fleet).expect("observer namespace");
 
-    let error = observer
-        .ring(kind)
-        .expect_err("missing ring must stay missing");
+    let error = observer.ring(kind).expect_err("missing ring must stay missing");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert_eq!(
         ShmRegion::validate_existing(&ring_segment_name(&fleet, kind), 1).unwrap(),
@@ -37,12 +35,10 @@ fn observer_reads_persisted_geometry_and_each_lane() {
     let kind = 247;
     let spec = RingSpec::per_node(4, 16);
     let ring = ShmRing::open_or_create_for_fleet(&fleet, kind, spec, 2).expect("create ring");
-    let first = ring
-        .write(NodeId::new(0), 11, 101, Bytes::from_static(b"first"))
-        .expect("write lane zero");
-    let second = ring
-        .write(NodeId::new(1), 12, 102, Bytes::from_static(b"second"))
-        .expect("write lane one");
+    let first =
+        ring.write(NodeId::new(0), 11, 101, Bytes::from_static(b"first")).expect("write lane zero");
+    let second =
+        ring.write(NodeId::new(1), 12, 102, Bytes::from_static(b"second")).expect("write lane one");
 
     let observer = FleetObserver::attach_existing(&fleet).expect("observer namespace");
     let view = observer.ring(kind).expect("attach existing ring");
@@ -62,12 +58,7 @@ fn observer_reads_persisted_geometry_and_each_lane() {
     assert_eq!(poll.frames[0].payload.as_ref(), b"second");
 
     drop(view);
-    assert_eq!(
-        ring.read(second)
-            .expect("writer survives observer drop")
-            .ver,
-        102
-    );
+    assert_eq!(ring.read(second).expect("writer survives observer drop").ver, 102);
     ring.unlink().expect("cleanup ring");
 }
 

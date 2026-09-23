@@ -18,10 +18,11 @@ fn fleet_name(tag: &str) -> &'static str {
     Box::leak(format!("sk{tag}{:x}", std::process::id()).into_boxed_str())
 }
 
-fn pattern(len: usize, seed: u32) -> Vec<u8> {
-    (0..len as u32)
-        .map(|i| (i.wrapping_mul(2654435761).wrapping_add(seed) >> 11) as u8)
-        .collect()
+fn pattern(
+    len: usize,
+    seed: u32
+) -> Vec<u8> {
+    (0..len as u32).map(|i| (i.wrapping_mul(2654435761).wrapping_add(seed) >> 11) as u8).collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -29,13 +30,13 @@ async fn duplex_copies_across_two_nodes() {
     let name = fleet_name("d");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -79,13 +80,13 @@ async fn a_parked_reader_is_woken_by_the_peer_node() {
     let name = fleet_name("w");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -112,10 +113,7 @@ async fn a_parked_reader_is_woken_by_the_peer_node() {
     let filler = vec![1_u8; STREAM_BUFFER_BYTES];
     a_write.write_all(&filler).await.expect("fill");
     let writer = tokio::spawn(async move {
-        a_write
-            .write_all(b"after")
-            .await
-            .expect("write after drain");
+        a_write.write_all(b"after").await.expect("write after drain");
         a_write.shutdown().await.expect("shutdown");
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -139,13 +137,13 @@ async fn a_dropped_pending_operation_does_not_lose_the_next_wake() {
     let name = fleet_name("x");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 
@@ -200,13 +198,13 @@ async fn a_body_behind_a_header_wakes_a_reader_that_parked_between_the_two() {
     let name = fleet_name("h");
     let owner = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer streams");
 

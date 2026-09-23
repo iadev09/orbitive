@@ -39,7 +39,7 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
         .map(|node| {
             Arc::new(
                 Fleet::join_shm_as(fleet_name, WRITER_COUNT as u16, NodeId::new(node as u16))
-                    .expect("join benchmark fleet"),
+                    .expect("join benchmark fleet")
             )
         })
         .collect::<Vec<_>>();
@@ -54,25 +54,19 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
         .map(|fleet| {
             let cache = Cache::<DefaultCacheLayout>::new(fleet.clone())
                 .expect("create writer cache connection");
-            Arc::new(
-                cache
-                    .open_store(b"default", l1_capacity)
-                    .expect("create writer store"),
-            )
+            Arc::new(cache.open_store(b"default", l1_capacity).expect("create writer store"))
         })
         .collect::<Vec<_>>();
     let observer_cache =
         Cache::<DefaultCacheLayout>::new(fleets[0].clone()).expect("create observer cache");
-    let observer = observer_cache
-        .open_store(b"default", l1_capacity)
-        .expect("create observer store");
+    let observer =
+        observer_cache.open_store(b"default", l1_capacity).expect("create observer store");
     let mutation_observer =
         CacheTransport::<DefaultCacheLayout>::new(fleets[0].clone()).expect("create observer");
     let mut mutation_cursor = mutation_observer.cursor_at_head();
 
-    let values = (0..WRITER_COUNT)
-        .map(|writer| vec![b'a' + writer as u8; VALUE_LEN])
-        .collect::<Vec<_>>();
+    let values =
+        (0..WRITER_COUNT).map(|writer| vec![b'a' + writer as u8; VALUE_LEN]).collect::<Vec<_>>();
     let writes_per_batch = (WRITER_COUNT * WRITES_PER_WRITER) as u64;
 
     let mut group = criterion.benchmark_group("cache_shm");
@@ -89,9 +83,7 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
                     let handles = writers.iter().zip(&values).map(|(cache, value)| {
                         scope.spawn(move || {
                             for _ in 0..WRITES_PER_WRITER {
-                                cache
-                                    .put(HOT_KEY, value, None)
-                                    .expect("publish benchmark value");
+                                cache.put(HOT_KEY, value, None).expect("publish benchmark value");
                             }
                         })
                     });
@@ -113,11 +105,8 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
                         .all(|pair| { pair[0].revision().sequence < pair[1].revision().sequence }),
                     "fleet-wide cache sequences must be unique"
                 );
-                let CacheMutation::Put {
-                    revision: expected_revision,
-                    payload,
-                    ..
-                } = mutations.mutations.last().expect("at least one mutation")
+                let CacheMutation::Put { revision: expected_revision, payload, .. } =
+                    mutations.mutations.last().expect("at least one mutation")
                 else {
                     panic!("benchmark only publishes put mutations");
                 };
@@ -146,10 +135,7 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
     });
     group.finish();
 
-    observer_cache
-        .transport()
-        .unlink_rings()
-        .expect("unlink benchmark rings");
+    observer_cache.transport().unlink_rings().expect("unlink benchmark rings");
 }
 
 #[cfg(not(unix))]

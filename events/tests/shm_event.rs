@@ -6,15 +6,14 @@
 
 #![cfg(unix)]
 
-use std::sync::Arc;
-use std::time::Duration;
-
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use std::io::{Read, Write};
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use std::os::fd::AsRawFd;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::time::Duration;
 
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
@@ -53,7 +52,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(other) => panic!("unexpected child status: {:?}", other),
-            Err(e) => panic!("waitpid failed: {e}"),
+            Err(e) => panic!("waitpid failed: {e}")
         }
     }
 }
@@ -66,11 +65,7 @@ fn cleanup_event_ring(name: &str) {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn wait_until_readable(fd: &impl AsRawFd) -> bool {
-    let mut poll_fd = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
+    let mut poll_fd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
     let ready = unsafe { libc::poll(&mut poll_fd, 1, 2_000) };
     ready == 1 && poll_fd.revents & libc::POLLIN != 0
 }
@@ -82,9 +77,7 @@ fn two_nodes_publish_into_independent_lanes() {
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
     let parent_bus = FleetEventBus::new(parent_fleet);
     let mut cursor = parent_bus.cursor_at_head();
-    parent_bus
-        .publish("test.parent_also", b"hello-from-parent")
-        .expect("parent publish");
+    parent_bus.publish("test.parent_also", b"hello-from-parent").expect("parent publish");
 
     match unsafe { fork() }.expect("fork") {
         ForkResult::Parent { child } => {
@@ -107,13 +100,10 @@ fn two_nodes_publish_into_independent_lanes() {
         ForkResult::Child => {
             let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(11),
+                Err(_) => std::process::exit(11)
             };
             let child_bus = FleetEventBus::new(child_fleet);
-            if child_bus
-                .publish("test.child_published", b"hello-from-child")
-                .is_err()
-            {
+            if child_bus.publish("test.child_published", b"hello-from-child").is_err() {
                 std::process::exit(12);
             }
             std::process::exit(0);
@@ -127,9 +117,7 @@ fn parent_publishes_child_polls_event() {
     let parent_fleet =
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
     let parent_bus = FleetEventBus::new(parent_fleet);
-    let id = parent_bus
-        .publish("test.parent_published", b"hello-from-parent")
-        .expect("publish");
+    let id = parent_bus.publish("test.parent_published", b"hello-from-parent").expect("publish");
 
     match unsafe { fork() }.expect("fork") {
         ForkResult::Parent { child } => {
@@ -141,7 +129,7 @@ fn parent_publishes_child_polls_event() {
         ForkResult::Child => {
             let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(21),
+                Err(_) => std::process::exit(21)
             };
             let child_bus = FleetEventBus::new(child_fleet);
             let mut cursor = child_bus.cursor_from_start();
@@ -178,12 +166,8 @@ fn cross_process_publish_wakes_process_local_event_fd() {
         ForkResult::Parent { child } => {
             drop(child_ready);
             let mut ready = [0u8; 1];
-            parent_ready
-                .read_exact(&mut ready)
-                .expect("child listener ready");
-            parent_bus
-                .publish("test.eventfd", b"wake-child")
-                .expect("publish event");
+            parent_ready.read_exact(&mut ready).expect("child listener ready");
+            parent_bus.publish("test.eventfd", b"wake-child").expect("publish event");
 
             let code = wait_child(child);
             cleanup_event_ring(name);
@@ -193,12 +177,12 @@ fn cross_process_publish_wakes_process_local_event_fd() {
             drop(parent_ready);
             let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(31),
+                Err(_) => std::process::exit(31)
             };
             let child_bus = FleetEventBus::new(child_fleet);
             let event_fd = match child_bus.event_fd() {
                 Ok(event_fd) => event_fd,
-                Err(_) => std::process::exit(32),
+                Err(_) => std::process::exit(32)
             };
             let mut cursor = child_bus.cursor_at_head();
             if child_ready.write_all(&[1]).is_err() {
@@ -229,18 +213,16 @@ fn cross_process_publish_wakes_process_local_event_fd() {
 fn one_publish_wakes_each_process_local_event_fd() {
     let name = fresh_name();
     let bus_a = FleetEventBus::new(Arc::new(
-        Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("node zero join_shm"),
+        Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("node zero join_shm")
     ));
     let bus_b = FleetEventBus::new(Arc::new(
-        Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("node one join_shm"),
+        Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("node one join_shm")
     ));
     bus_a.reset_ring().expect("reset event ring");
 
     let event_fd_a = bus_a.event_fd().expect("node zero eventfd");
     let event_fd_b = bus_b.event_fd().expect("node one eventfd");
-    bus_a
-        .publish("test.broadcast", b"wake-every-listener")
-        .expect("publish event");
+    bus_a.publish("test.broadcast", b"wake-every-listener").expect("publish event");
 
     assert!(wait_until_readable(&event_fd_a));
     assert!(wait_until_readable(&event_fd_b));

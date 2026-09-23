@@ -10,15 +10,15 @@
 ///
 /// Underscores are accepted as visual separators. Invalid or overflowing
 /// values fail constant evaluation and therefore stop the build.
-pub const fn usize_from_env(value: Option<&str>, default: usize) -> usize {
+pub const fn usize_from_env(
+    value: Option<&str>,
+    default: usize
+) -> usize {
     let Some(value) = value else {
         return default;
     };
     let bytes = value.as_bytes();
-    assert!(
-        !bytes.is_empty(),
-        "Orbit compile-time value cannot be empty"
-    );
+    assert!(!bytes.is_empty(), "Orbit compile-time value cannot be empty");
 
     let mut parsed = 0_usize;
     let mut index = 0;
@@ -35,24 +35,15 @@ pub const fn usize_from_env(value: Option<&str>, default: usize) -> usize {
             index += 1;
             continue;
         }
-        assert!(
-            byte >= b'0' && byte <= b'9',
-            "Orbit compile-time value must be a decimal usize"
-        );
+        assert!(byte >= b'0' && byte <= b'9', "Orbit compile-time value must be a decimal usize");
         let digit = (byte - b'0') as usize;
-        assert!(
-            parsed <= (usize::MAX - digit) / 10,
-            "Orbit compile-time value overflows usize"
-        );
+        assert!(parsed <= (usize::MAX - digit) / 10, "Orbit compile-time value overflows usize");
         parsed = parsed * 10 + digit;
         saw_digit = true;
         previous_was_separator = false;
         index += 1;
     }
-    assert!(
-        !previous_was_separator,
-        "Orbit compile-time value cannot end with a separator"
-    );
+    assert!(!previous_was_separator, "Orbit compile-time value cannot end with a separator");
     parsed
 }
 

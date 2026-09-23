@@ -31,7 +31,7 @@ const KEY: Key = Key::new(0x10AD);
 struct Usage {
     cpu: Duration,
     voluntary: i64,
-    involuntary: i64,
+    involuntary: i64
 }
 
 fn usage() -> Usage {
@@ -43,7 +43,7 @@ fn usage() -> Usage {
     Usage {
         cpu: seconds(rusage.ru_utime) + seconds(rusage.ru_stime),
         voluntary: rusage.ru_nvcsw as i64,
-        involuntary: rusage.ru_nivcsw as i64,
+        involuntary: rusage.ru_nivcsw as i64
     }
 }
 
@@ -57,7 +57,7 @@ struct Report {
     p50: Duration,
     p99: Duration,
     max: Duration,
-    shares: Vec<usize>,
+    shares: Vec<usize>
 }
 
 impl Report {
@@ -91,10 +91,15 @@ fn percentiles(mut samples: Vec<Duration>) -> (Duration, Duration, Duration) {
     (at(0.5), at(0.99), *samples.last().unwrap())
 }
 
-async fn run<F, Fut>(name: &'static str, ops: usize, tasks: usize, op: F) -> Report
+async fn run<F, Fut>(
+    name: &'static str,
+    ops: usize,
+    tasks: usize,
+    op: F
+) -> Report
 where
     F: Fn(usize) -> Fut + Clone + Send + 'static,
-    Fut: std::future::Future<Output = Duration> + Send,
+    Fut: std::future::Future<Output = Duration> + Send
 {
     let before = usage();
     let start = Instant::now();
@@ -131,13 +136,16 @@ where
         p50,
         p99,
         max,
-        shares,
+        shares
     }
 }
 
 /// Reserve with a bounded wait on the key: what a consumer's acquire loop
 /// does when the resource is busy.
-async fn reserve_waiting(pool: &Pool, id: ResourceId) -> Lease {
+async fn reserve_waiting(
+    pool: &Pool,
+    id: ResourceId
+) -> Lease {
     loop {
         // The version comes before the attempt, so a completion between
         // the two is seen by the wait instead of being missed.
@@ -147,15 +155,13 @@ async fn reserve_waiting(pool: &Pool, id: ResourceId) -> Lease {
             Err(Error::Busy(_)) => {
                 let _ = poll_fn(|cx| pool.poll_capacity(KEY, since, cx)).await;
             }
-            Err(error) => panic!("{error}"),
+            Err(error) => panic!("{error}")
         }
     }
 }
 
 fn main() {
-    let mut args = std::env::args()
-        .skip(1)
-        .filter(|arg| !arg.starts_with("--"));
+    let mut args = std::env::args().skip(1).filter(|arg| !arg.starts_with("--"));
     let ops: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
     let tasks: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(8);
     // Third argument: how many bytes one exchange carries. The ring is 64 KiB
@@ -175,11 +181,8 @@ fn main() {
     owner_streams.reset_all();
     let caller_streams = Streams::new(caller_fleet, orbit_stream::Incarnation::new(11)).unwrap();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
 
     println!(
         "orbit-pool load: ops={ops} tasks={tasks} payload={payload}B capacity={capacity} (two nodes in one process)"
@@ -203,7 +206,7 @@ fn main() {
                         Err(Error::CreationBudget { .. }) => {
                             let _ = poll_fn(|cx| pool.poll_capacity(KEY, since, cx)).await;
                         }
-                        Err(error) => panic!("{error}"),
+                        Err(error) => panic!("{error}")
                     }
                 }
                 start.elapsed()
@@ -240,9 +243,7 @@ fn main() {
             let bytes = payload;
             tokio::spawn(async move {
                 loop {
-                    let ticket = poll_fn(|cx| owner_streams.poll_take_offer(cx))
-                        .await
-                        .unwrap();
+                    let ticket = poll_fn(|cx| owner_streams.poll_take_offer(cx)).await.unwrap();
                     // The lease is read and accepted exactly once here,
                     // before any of this bench's own bytes.
                     let Ok((execution, mut read, mut write)) =

@@ -17,7 +17,7 @@ pub enum RingRead {
     /// A cursor must stay on this counter and retry later.
     Pending,
     /// The counter can no longer be read from this slot.
-    Unavailable,
+    Unavailable
 }
 
 /// Read-only source that can be walked by [`RingCursor`].
@@ -37,7 +37,10 @@ pub trait RingFrameSource {
     fn capacity(&self) -> usize;
 
     /// Read the frame currently occupying `counter % capacity`.
-    fn read_at(&self, counter: u64) -> Option<Frame>;
+    fn read_at(
+        &self,
+        counter: u64
+    ) -> Option<Frame>;
 
     /// Classify the logical counter currently addressed by
     /// `counter % capacity`.
@@ -45,9 +48,11 @@ pub trait RingFrameSource {
     /// Sources that can distinguish an in-flight claim should override
     /// this method. The compatibility default preserves the previous
     /// `read_at` behavior for external implementations.
-    fn read_state_at(&self, counter: u64) -> RingRead {
-        self.read_at(counter)
-            .map_or(RingRead::Unavailable, RingRead::Ready)
+    fn read_state_at(
+        &self,
+        counter: u64
+    ) -> RingRead {
+        self.read_at(counter).map_or(RingRead::Unavailable, RingRead::Ready)
     }
 }
 
@@ -57,7 +62,7 @@ pub trait RingFrameSource {
 /// subscribers keep independent cursors over the same ring.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RingCursor {
-    next_counter: u64,
+    next_counter: u64
 }
 
 impl RingCursor {
@@ -77,7 +82,10 @@ impl RingCursor {
         self.next_counter
     }
 
-    pub(crate) fn set_next_counter(&mut self, next_counter: u64) {
+    pub(crate) fn set_next_counter(
+        &mut self,
+        next_counter: u64
+    ) {
         self.next_counter = next_counter;
     }
 }
@@ -89,7 +97,7 @@ pub struct RingLoss {
     pub overwritten: u64,
     /// Counters inside the readable window whose slot was definitively
     /// unavailable, wrapped, corrupt, or carried an unexpected frame id.
-    pub unavailable: u64,
+    pub unavailable: u64
 }
 
 impl RingLoss {
@@ -108,7 +116,7 @@ pub struct RingPoll {
     pub frames: Vec<Frame>,
     pub loss: RingLoss,
     pub from_counter: u64,
-    pub to_counter: u64,
+    pub to_counter: u64
 }
 
 impl RingPoll {
@@ -123,17 +131,16 @@ impl RingPoll {
 /// the oldest available counter, the skipped counters are recorded as
 /// overwritten and the walk resumes at the window floor. An in-flight
 /// counter stops the walk without advancing past it.
-pub fn poll_ring<S: RingFrameSource>(source: &S, cursor: &mut RingCursor) -> RingPoll {
+pub fn poll_ring<S: RingFrameSource>(
+    source: &S,
+    cursor: &mut RingCursor
+) -> RingPoll {
     let head = source.head();
     let from_counter = cursor.next_counter();
 
     if from_counter >= head {
         cursor.set_next_counter(head);
-        return RingPoll {
-            from_counter,
-            to_counter: head,
-            ..RingPoll::default()
-        };
+        return RingPoll { from_counter, to_counter: head, ..RingPoll::default() };
     }
 
     let capacity = source.capacity() as u64;
@@ -167,10 +174,5 @@ pub fn poll_ring<S: RingFrameSource>(source: &S, cursor: &mut RingCursor) -> Rin
     }
 
     cursor.set_next_counter(next);
-    RingPoll {
-        frames,
-        loss,
-        from_counter,
-        to_counter: next,
-    }
+    RingPoll { frames, loss, from_counter, to_counter: next }
 }

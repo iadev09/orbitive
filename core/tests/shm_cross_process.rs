@@ -75,7 +75,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(other) => panic!("unexpected child status: {:?}", other),
-            Err(e) => panic!("waitpid failed: {e}"),
+            Err(e) => panic!("waitpid failed: {e}")
         }
     }
 }
@@ -88,12 +88,7 @@ fn parent_writes_child_reads() {
     // mapping is already populated when the child opens it.
     let ring = ShmRing::open_or_create(&name, 7, spec()).expect("parent open_or_create");
     let id = ring
-        .write(
-            NodeId::new(0),
-            0,
-            99,
-            Bytes::from_static(b"hello-from-parent"),
-        )
+        .write(NodeId::new(0), 0, 99, Bytes::from_static(b"hello-from-parent"))
         .expect("parent write");
 
     match unsafe { fork() }.expect("fork failed") {
@@ -107,11 +102,11 @@ fn parent_writes_child_reads() {
             // Child has its own address space; open the SAME named segment.
             let child_ring = match ShmRing::open_or_create(&name, 7, spec()) {
                 Ok(r) => r,
-                Err(_) => std::process::exit(11),
+                Err(_) => std::process::exit(11)
             };
             let frame = match child_ring.read(id) {
                 Some(f) => f,
-                None => std::process::exit(12),
+                None => std::process::exit(12)
             };
             if frame.id != id {
                 std::process::exit(13);
@@ -142,9 +137,7 @@ fn child_writes_parent_reads() {
             assert_eq!(code, 0, "child reported failure (exit code {code})");
 
             // Now read what the child wrote.
-            let frame = parent_ring
-                .read_head()
-                .expect("parent should see child's write");
+            let frame = parent_ring.read_head().expect("parent should see child's write");
             assert_eq!(frame.kind, 0);
             assert_eq!(frame.ver, 7);
             assert_eq!(&frame.payload[..], b"hello-from-child");
@@ -154,18 +147,14 @@ fn child_writes_parent_reads() {
         ForkResult::Child => {
             let child_ring = match ShmRing::open_or_create(&name, 11, spec()) {
                 Ok(r) => r,
-                Err(_) => std::process::exit(21),
+                Err(_) => std::process::exit(21)
             };
             if child_ring.created() {
                 // We expected the parent to have created the segment.
                 std::process::exit(22);
             }
-            let result = child_ring.write(
-                NodeId::new(2),
-                0,
-                7,
-                Bytes::from_static(b"hello-from-child"),
-            );
+            let result =
+                child_ring.write(NodeId::new(2), 0, 7, Bytes::from_static(b"hello-from-child"));
             if result.is_err() {
                 std::process::exit(23);
             }
@@ -179,9 +168,8 @@ fn ping_pong_two_writes_one_each_side() {
     let name = fresh_name("ping-pong");
 
     let parent_ring = ShmRing::open_or_create(&name, 13, spec()).expect("parent create");
-    let parent_id = parent_ring
-        .write(NodeId::new(0), 0, 1, Bytes::from_static(b"ping"))
-        .expect("parent write");
+    let parent_id =
+        parent_ring.write(NodeId::new(0), 0, 1, Bytes::from_static(b"ping")).expect("parent write");
 
     match unsafe { fork() }.expect("fork failed") {
         ForkResult::Parent { child } => {
@@ -204,21 +192,18 @@ fn ping_pong_two_writes_one_each_side() {
         ForkResult::Child => {
             let child_ring = match ShmRing::open_or_create(&name, 13, spec()) {
                 Ok(r) => r,
-                Err(_) => std::process::exit(31),
+                Err(_) => std::process::exit(31)
             };
             // Child should see parent's write.
             let frame = match child_ring.read(parent_id) {
                 Some(f) => f,
-                None => std::process::exit(32),
+                None => std::process::exit(32)
             };
             if &frame.payload[..] != b"ping" {
                 std::process::exit(33);
             }
             // Child writes back.
-            if child_ring
-                .write(NodeId::new(2), 0, 2, Bytes::from_static(b"pong"))
-                .is_err()
-            {
+            if child_ring.write(NodeId::new(2), 0, 2, Bytes::from_static(b"pong")).is_err() {
                 std::process::exit(34);
             }
             std::process::exit(0);

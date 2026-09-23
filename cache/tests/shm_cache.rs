@@ -2,13 +2,12 @@
 
 #![cfg(unix)]
 
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use std::io::{Read, Write};
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
@@ -41,18 +40,14 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(other) => panic!("unexpected child status: {other:?}"),
-            Err(error) => panic!("waitpid failed: {error}"),
+            Err(error) => panic!("waitpid failed: {error}")
         }
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn wait_until_readable(fd: &impl AsRawFd) -> bool {
-    let mut poll_fd = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
+    let mut poll_fd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
     let ready = unsafe { libc::poll(&mut poll_fd, 1, 2_000) };
     ready == 1 && poll_fd.revents & libc::POLLIN != 0
 }
@@ -63,10 +58,7 @@ fn child_put_wakes_and_populates_parent_l1() {
     let parent_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent fleet"));
     let parent_cache = Cache::<DefaultCacheLayout>::new(parent_fleet).expect("parent cache");
     let parent = parent_cache.open_default_store().expect("parent store");
-    parent_cache
-        .transport()
-        .reset_rings()
-        .expect("reset cache rings");
+    parent_cache.transport().reset_rings().expect("reset cache rings");
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     let event_fd = parent_cache.event_fd().expect("cache mutation eventfd");
 
@@ -74,15 +66,15 @@ fn child_put_wakes_and_populates_parent_l1() {
         ForkResult::Child => {
             let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(11),
+                Err(_) => std::process::exit(11)
             };
             let child_cache = match Cache::<DefaultCacheLayout>::new(child_fleet) {
                 Ok(cache) => cache,
-                Err(_) => std::process::exit(12),
+                Err(_) => std::process::exit(12)
             };
             let child = match child_cache.open_default_store() {
                 Ok(store) => store,
-                Err(_) => std::process::exit(12),
+                Err(_) => std::process::exit(12)
             };
             let value = vec![b'x'; 5_000];
             if child.put(b"cross-process", &value, None).is_err() {
@@ -100,10 +92,7 @@ fn child_put_wakes_and_populates_parent_l1() {
             let child_code = wait_child(child);
             let poll = parent_cache.poll();
             let observed = parent.read(b"cross-process");
-            parent_cache
-                .transport()
-                .unlink_rings()
-                .expect("unlink cache rings");
+            parent_cache.transport().unlink_rings().expect("unlink cache rings");
 
             assert_eq!(child_code, 0, "child reported failure");
             assert_eq!(poll.observed, 1);
@@ -124,10 +113,7 @@ fn writers_in_different_lanes_converge_by_shared_revision() {
     let parent_cache =
         Cache::<DefaultCacheLayout>::new(parent_fleet.clone()).expect("parent cache");
     let parent = parent_cache.open_default_store().expect("parent store");
-    parent_cache
-        .transport()
-        .reset_rings()
-        .expect("reset cache rings");
+    parent_cache.transport().reset_rings().expect("reset cache rings");
     let observer =
         CacheTransport::<DefaultCacheLayout>::new(parent_fleet).expect("observer transport");
     let mut observer_cursor = observer.cursor_at_head();
@@ -142,15 +128,15 @@ fn writers_in_different_lanes_converge_by_shared_revision() {
             }
             let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
-                Err(_) => std::process::exit(22),
+                Err(_) => std::process::exit(22)
             };
             let child_cache = match Cache::<DefaultCacheLayout>::new(child_fleet) {
                 Ok(cache) => cache,
-                Err(_) => std::process::exit(23),
+                Err(_) => std::process::exit(23)
             };
             let child = match child_cache.open_default_store() {
                 Ok(store) => store,
-                Err(_) => std::process::exit(23),
+                Err(_) => std::process::exit(23)
             };
             if child.put(b"same-key", b"child", None).is_err() {
                 std::process::exit(24);
@@ -160,9 +146,7 @@ fn writers_in_different_lanes_converge_by_shared_revision() {
         ForkResult::Parent { child } => {
             drop(child_start);
             parent_start.write_all(&[1]).expect("release child writer");
-            parent
-                .put(b"same-key", b"parent", None)
-                .expect("parent put");
+            parent.put(b"same-key", b"parent", None).expect("parent put");
             let child_code = wait_child(child);
 
             let observed = observer.poll(&mut observer_cursor);
@@ -180,10 +164,7 @@ fn writers_in_different_lanes_converge_by_shared_revision() {
             let CacheRead::Hit(actual) = parent.read(b"same-key") else {
                 panic!("parent must retain the winning write");
             };
-            parent_cache
-                .transport()
-                .unlink_rings()
-                .expect("unlink cache rings");
+            parent_cache.transport().unlink_rings().expect("unlink cache rings");
 
             assert_eq!(child_code, 0, "child reported failure");
             assert_eq!(poll.observed, 2);

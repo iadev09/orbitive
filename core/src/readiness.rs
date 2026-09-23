@@ -17,19 +17,18 @@
 
 #![cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 
-use std::fmt;
-use std::io;
 use std::mem::size_of;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::{fmt, io};
 
 /// The consumer's end: put it in a poll set, drain it, re-read your state.
 pub struct Readiness {
-    fd: OwnedFd,
+    fd: OwnedFd
 }
 
 /// The signaller's end, held by whoever watches the shared word.
 pub struct Signal {
-    fd: OwnedFd,
+    fd: OwnedFd
 }
 
 impl Readiness {
@@ -46,11 +45,7 @@ impl Readiness {
             // SAFETY: a nonblocking descriptor this type owns, and a u64
             // of our own to read into.
             let read = unsafe {
-                libc::read(
-                    self.fd.as_raw_fd(),
-                    (&mut value as *mut u64).cast(),
-                    size_of::<u64>(),
-                )
+                libc::read(self.fd.as_raw_fd(), (&mut value as *mut u64).cast(), size_of::<u64>())
             };
             if read == size_of::<u64>() as isize {
                 total = total.saturating_add(value);
@@ -59,7 +54,7 @@ impl Readiness {
             if read == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    "Orbit readiness closed while draining",
+                    "Orbit readiness closed while draining"
                 ));
             }
             if read < 0 {
@@ -67,12 +62,12 @@ impl Readiness {
                 return match error.raw_os_error() {
                     Some(libc::EINTR) => continue,
                     Some(libc::EAGAIN) => Ok(total),
-                    _ => Err(error),
+                    _ => Err(error)
                 };
             }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Orbit readiness returned a partial counter",
+                "Orbit readiness returned a partial counter"
             ));
         }
     }
@@ -87,11 +82,7 @@ impl Signal {
             // SAFETY: a nonblocking descriptor this type owns, and a u64
             // of our own to write from.
             let written = unsafe {
-                libc::write(
-                    self.fd.as_raw_fd(),
-                    (&value as *const u64).cast(),
-                    size_of::<u64>(),
-                )
+                libc::write(self.fd.as_raw_fd(), (&value as *const u64).cast(), size_of::<u64>())
             };
             if written == size_of::<u64>() as isize {
                 return Ok(());
@@ -101,12 +92,12 @@ impl Signal {
                 return match error.raw_os_error() {
                     Some(libc::EINTR) => continue,
                     Some(libc::EAGAIN) => Ok(()),
-                    _ => Err(error),
+                    _ => Err(error)
                 };
             }
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
-                "Orbit readiness accepted a partial token",
+                "Orbit readiness accepted a partial token"
             ));
         }
     }
@@ -131,18 +122,20 @@ impl AsRawFd for Signal {
 }
 
 impl fmt::Debug for Readiness {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Readiness")
-            .field("fd", &self.fd.as_raw_fd())
-            .finish_non_exhaustive()
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
+        f.debug_struct("Readiness").field("fd", &self.fd.as_raw_fd()).finish_non_exhaustive()
     }
 }
 
 impl fmt::Debug for Signal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Signal")
-            .field("fd", &self.fd.as_raw_fd())
-            .finish_non_exhaustive()
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
+        f.debug_struct("Signal").field("fd", &self.fd.as_raw_fd()).finish_non_exhaustive()
     }
 }
 
@@ -173,12 +166,7 @@ pub fn pair() -> io::Result<(Readiness, Signal)> {
     }
     // Own both ends before any fallible setup, so neither leaks.
     // SAFETY: two fresh descriptors this call owns.
-    let (read, write) = unsafe {
-        (
-            OwnedFd::from_raw_fd(raw[0]),
-            OwnedFd::from_raw_fd(raw[1]),
-        )
-    };
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(raw[0]), OwnedFd::from_raw_fd(raw[1])) };
     for fd in [&read, &write] {
         // SAFETY: descriptors this call owns.
         let set = unsafe {
@@ -215,24 +203,15 @@ mod pipe_tests {
     fn a_full_pipe_coalesces_and_rearms() {
         let (read, write) = pair().unwrap();
         for fd in [read.as_raw_fd(), write.as_raw_fd()] {
-            assert_ne!(
-                unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK,
-                0
-            );
-            assert_ne!(
-                unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
-                0
-            );
+            assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK, 0);
+            assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
         }
         // Fill the pipe deliberately, then exercise the bridge's EAGAIN path.
         let token = 1u64;
         loop {
             let n = unsafe { libc::write(write.as_raw_fd(), (&token as *const u64).cast(), 8) };
             if n < 0 {
-                assert_eq!(
-                    io::Error::last_os_error().raw_os_error(),
-                    Some(libc::EAGAIN)
-                );
+                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN));
                 break;
             }
             assert_eq!(n, 8);
@@ -241,27 +220,17 @@ mod pipe_tests {
         let mut buffer = [0u64; 128];
         loop {
             let n = unsafe {
-                libc::read(
-                    read.as_raw_fd(),
-                    buffer.as_mut_ptr().cast(),
-                    size_of_val(&buffer),
-                )
+                libc::read(read.as_raw_fd(), buffer.as_mut_ptr().cast(), size_of_val(&buffer))
             };
             if n < 0 {
-                assert_eq!(
-                    io::Error::last_os_error().raw_os_error(),
-                    Some(libc::EAGAIN)
-                );
+                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN));
                 break;
             }
             assert!(n > 0);
         }
         write.signal().unwrap();
         let mut value = 0u64;
-        assert_eq!(
-            unsafe { libc::read(read.as_raw_fd(), (&mut value as *mut u64).cast(), 8) },
-            8
-        );
+        assert_eq!(unsafe { libc::read(read.as_raw_fd(), (&mut value as *mut u64).cast(), 8) }, 8);
         assert_eq!(value, 1);
     }
 }

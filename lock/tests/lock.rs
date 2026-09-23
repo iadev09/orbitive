@@ -30,15 +30,13 @@ fn only_key_determines_contention_and_owner_identifies_the_holder() {
     let owner_a = LockOwner::from("worker-a");
     let owner_b = LockOwner::from("worker-b");
 
-    let LockAcquire::Acquired(lease) = first
-        .try_acquire(&slot, &owner_a, Duration::from_secs(30))
-        .expect("acquire")
+    let LockAcquire::Acquired(lease) =
+        first.try_acquire(&slot, &owner_a, Duration::from_secs(30)).expect("acquire")
     else {
         panic!("first owner must acquire");
     };
-    let LockAcquire::Occupied(holder) = second
-        .try_acquire(&slot, &owner_b, Duration::from_secs(30))
-        .expect("contended acquire")
+    let LockAcquire::Occupied(holder) =
+        second.try_acquire(&slot, &owner_b, Duration::from_secs(30)).expect("contended acquire")
     else {
         panic!("second owner must observe contention");
     };
@@ -55,11 +53,7 @@ fn namespaces_keep_unrelated_domains_independent() {
 
     assert!(matches!(
         locks
-            .try_acquire(
-                &key::<PoolSlot>(b"same-label"),
-                &owner,
-                Duration::from_secs(30)
-            )
+            .try_acquire(&key::<PoolSlot>(b"same-label"), &owner, Duration::from_secs(30))
             .expect("pool lock"),
         LockAcquire::Acquired(_)
     ));
@@ -88,19 +82,10 @@ fn release_requires_the_current_owner_or_exact_lease() {
         .acquired()
         .expect("winner");
 
-    assert!(
-        !locks
-            .release_owned(&slot, &other)
-            .expect("wrong owner release")
-    );
+    assert!(!locks.release_owned(&slot, &other).expect("wrong owner release"));
     assert_eq!(locks.current(&slot).expect("current"), Some(lease.clone()));
     assert!(locks.release(&lease).expect("exact release"));
-    assert!(
-        locks
-            .current(&slot)
-            .expect("current after release")
-            .is_none()
-    );
+    assert!(locks.current(&slot).expect("current after release").is_none());
 }
 
 #[test]
@@ -124,11 +109,7 @@ fn stale_lease_cannot_release_a_successor() {
     let locks = Lock::new(fleet).expect("locks");
     let slot = key::<PoolSlot>(b"queue:1");
     let first = locks
-        .try_acquire(
-            &slot,
-            &LockOwner::from("worker-a"),
-            Duration::from_millis(1),
-        )
+        .try_acquire(&slot, &LockOwner::from("worker-a"), Duration::from_millis(1))
         .expect("first acquire")
         .acquired()
         .expect("first winner");
@@ -156,16 +137,8 @@ fn restore_and_renew_use_the_caller_owner() {
         .acquired()
         .expect("winner");
 
-    assert_eq!(
-        locks.restore(&slot, &owner).expect("restore"),
-        Some(lease.clone())
-    );
-    assert!(
-        locks
-            .restore(&slot, &LockOwner::from("other"))
-            .expect("wrong restore")
-            .is_none()
-    );
+    assert_eq!(locks.restore(&slot, &owner).expect("restore"), Some(lease.clone()));
+    assert!(locks.restore(&slot, &LockOwner::from("other")).expect("wrong restore").is_none());
     let renewed = locks
         .renew_owned(&slot, &owner, Duration::from_secs(2))
         .expect("renew")
@@ -187,26 +160,14 @@ fn transitions_are_published_in_state_revision_order() {
         .expect("acquire")
         .acquired()
         .expect("winner");
-    let renewed = actor
-        .renew(&lease, Duration::from_secs(60))
-        .expect("renew")
-        .expect("renewed");
+    let renewed = actor.renew(&lease, Duration::from_secs(60)).expect("renew").expect("renewed");
     assert!(actor.release(&renewed).expect("release"));
 
     let poll = observer.poll();
     assert_eq!(poll.events.len(), 3);
-    assert!(matches!(
-        poll.events[0].transition,
-        LockTransition::Acquired(_)
-    ));
-    assert!(matches!(
-        poll.events[1].transition,
-        LockTransition::Renewed(_)
-    ));
-    assert!(matches!(
-        poll.events[2].transition,
-        LockTransition::Released { .. }
-    ));
+    assert!(matches!(poll.events[0].transition, LockTransition::Acquired(_)));
+    assert!(matches!(poll.events[1].transition, LockTransition::Renewed(_)));
+    assert!(matches!(poll.events[2].transition, LockTransition::Released { .. }));
     assert!(poll.events.windows(2).all(
         |events| events[0].transition.state_revision() < events[1].transition.state_revision()
     ));
@@ -242,10 +203,7 @@ fn event_ring_wrap_does_not_erase_current_lock_state() {
         assert!(locks.release(&lease).expect("other release"));
     }
 
-    assert_eq!(
-        locks.current(&retained).expect("current"),
-        Some(retained_lease)
-    );
+    assert_eq!(locks.current(&retained).expect("current"), Some(retained_lease));
 }
 
 #[test]
@@ -262,9 +220,7 @@ fn concurrent_threads_produce_one_winner() {
             let owner = LockOwner::from(format!("worker-{index}"));
             barrier.wait();
             matches!(
-                locks
-                    .try_acquire(&slot, &owner, Duration::from_secs(30))
-                    .expect("acquire"),
+                locks.try_acquire(&slot, &owner, Duration::from_secs(30)).expect("acquire"),
                 LockAcquire::Acquired(_)
             )
         }));

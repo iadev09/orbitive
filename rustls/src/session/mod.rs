@@ -32,7 +32,7 @@ impl SessionDomain {
         if value.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "rustls session domain must not be empty",
+                "rustls session domain must not be empty"
             ));
         }
         if value.len() > DOMAIN_MAX {
@@ -41,7 +41,7 @@ impl SessionDomain {
                 format!(
                     "rustls session domain is too long: {} bytes (maximum {DOMAIN_MAX})",
                     value.len()
-                ),
+                )
             ));
         }
         Ok(Self(Arc::from(value)))
@@ -53,11 +53,11 @@ impl SessionDomain {
 }
 
 impl fmt::Debug for SessionDomain {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("SessionDomain")
-            .field(&String::from_utf8_lossy(&self.0))
-            .finish()
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
+        formatter.debug_tuple("SessionDomain").field(&String::from_utf8_lossy(&self.0)).finish()
     }
 }
 
@@ -65,7 +65,7 @@ impl fmt::Debug for SessionDomain {
 #[derive(Clone)]
 pub struct FleetServerSessions {
     primitive: Arc<SessionPrimitive>,
-    ttl_ms: Arc<AtomicU64>,
+    ttl_ms: Arc<AtomicU64>
 }
 
 impl FleetServerSessions {
@@ -73,15 +73,21 @@ impl FleetServerSessions {
         Self::with_ttl(fleet, DEFAULT_SESSION_TTL)
     }
 
-    pub fn with_ttl(fleet: Arc<Fleet>, ttl: Duration) -> io::Result<Self> {
+    pub fn with_ttl(
+        fleet: Arc<Fleet>,
+        ttl: Duration
+    ) -> io::Result<Self> {
         let ttl_ms = validate_ttl(ttl)?;
         Ok(Self {
             primitive: Arc::new(SessionPrimitive::open(&fleet)?),
-            ttl_ms: Arc::new(AtomicU64::new(ttl_ms)),
+            ttl_ms: Arc::new(AtomicU64::new(ttl_ms))
         })
     }
 
-    pub fn set_ttl(&self, ttl: Duration) -> io::Result<()> {
+    pub fn set_ttl(
+        &self,
+        ttl: Duration
+    ) -> io::Result<()> {
         self.ttl_ms.store(validate_ttl(ttl)?, Ordering::Release);
         Ok(())
     }
@@ -91,11 +97,14 @@ impl FleetServerSessions {
     }
 
     /// Create a rustls storage view isolated by `domain`.
-    pub fn storage(&self, domain: SessionDomain) -> Arc<OrbitSessionStorage> {
+    pub fn storage(
+        &self,
+        domain: SessionDomain
+    ) -> Arc<OrbitSessionStorage> {
         Arc::new(OrbitSessionStorage {
             primitive: self.primitive.clone(),
             domain,
-            ttl_ms: self.ttl_ms.clone(),
+            ttl_ms: self.ttl_ms.clone()
         })
     }
 
@@ -114,7 +123,10 @@ impl FleetServerSessions {
 }
 
 impl fmt::Debug for FleetServerSessions {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         formatter
             .debug_struct("FleetServerSessions")
             .field("ttl", &self.ttl())
@@ -125,24 +137,28 @@ impl fmt::Debug for FleetServerSessions {
 pub struct OrbitSessionStorage {
     primitive: Arc<SessionPrimitive>,
     domain: SessionDomain,
-    ttl_ms: Arc<AtomicU64>,
+    ttl_ms: Arc<AtomicU64>
 }
 
 impl fmt::Debug for OrbitSessionStorage {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         formatter
             .debug_struct("OrbitSessionStorage")
             .field("domain", &self.domain)
-            .field(
-                "ttl",
-                &Duration::from_millis(self.ttl_ms.load(Ordering::Acquire)),
-            )
+            .field("ttl", &Duration::from_millis(self.ttl_ms.load(Ordering::Acquire)))
             .finish_non_exhaustive()
     }
 }
 
 impl OrbitSessionStorage {
-    fn put_bytes(&self, key: &[u8], value: &[u8]) -> bool {
+    fn put_bytes(
+        &self,
+        key: &[u8],
+        value: &[u8]
+    ) -> bool {
         let ttl = Duration::from_millis(self.ttl_ms.load(Ordering::Acquire));
         match self.primitive.put(self.domain.as_bytes(), key, value, ttl) {
             Ok(cached) => {
@@ -174,7 +190,10 @@ impl OrbitSessionStorage {
         }
     }
 
-    fn get_bytes(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn get_bytes(
+        &self,
+        key: &[u8]
+    ) -> Option<Vec<u8>> {
         match self.primitive.get(self.domain.as_bytes(), key) {
             Ok(value) => {
                 tracing::trace!(
@@ -202,7 +221,10 @@ impl OrbitSessionStorage {
         }
     }
 
-    fn take_bytes(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn take_bytes(
+        &self,
+        key: &[u8]
+    ) -> Option<Vec<u8>> {
         match self.primitive.take(self.domain.as_bytes(), key) {
             Ok(value) => {
                 tracing::trace!(
@@ -235,7 +257,7 @@ fn validate_ttl(ttl: Duration) -> io::Result<u64> {
     if ttl.is_zero() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "rustls session TTL must be greater than zero",
+            "rustls session TTL must be greater than zero"
         ));
     }
     if ttl > MAX_SESSION_TTL {
@@ -243,14 +265,11 @@ fn validate_ttl(ttl: Duration) -> io::Result<u64> {
             io::ErrorKind::InvalidInput,
             format!(
                 "rustls session TTL {ttl:?} exceeds rustls' stateful lifetime {MAX_SESSION_TTL:?}"
-            ),
+            )
         ));
     }
     u64::try_from(ttl.as_millis().max(1)).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "rustls session TTL does not fit milliseconds",
-        )
+        io::Error::new(io::ErrorKind::InvalidInput, "rustls session TTL does not fit milliseconds")
     })
 }
 
@@ -289,9 +308,7 @@ mod tests {
     fn existing_views_observe_ttl_updates() {
         let sessions = sessions();
         let storage = sessions.storage(SessionDomain::new("tcp-public").expect("domain"));
-        sessions
-            .set_ttl(Duration::from_millis(1))
-            .expect("TTL update");
+        sessions.set_ttl(Duration::from_millis(1)).expect("TTL update");
 
         assert!(storage.put_bytes(b"short", b"secret"));
         std::thread::sleep(Duration::from_millis(5));

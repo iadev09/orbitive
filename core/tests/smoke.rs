@@ -23,13 +23,7 @@ fn join_single_member_succeeds() {
 #[test]
 fn node_must_fit_inside_the_declared_fleet() {
     let err = Fleet::join_as("test", 2, NodeId::new(2)).unwrap_err();
-    assert!(matches!(
-        err,
-        orbit_core::Error::NodeOutsideFleet {
-            node_id: 2,
-            fleet_capacity: 2
-        }
-    ));
+    assert!(matches!(err, orbit_core::Error::NodeOutsideFleet { node_id: 2, fleet_capacity: 2 }));
 }
 
 #[test]

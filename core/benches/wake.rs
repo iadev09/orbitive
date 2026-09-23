@@ -15,10 +15,11 @@
 //! `orbit-pool` is worth the ten seconds: on one guest measured here it came
 //! back at 22 µs a wake against another's 1.2 µs on the same hardware, which
 //! is most of what a relayed request costs there and none of it ours.
-use orbit_core::sync as crate_sync;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
+
+use orbit_core::sync as crate_sync;
 
 fn parks() -> i64 {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };

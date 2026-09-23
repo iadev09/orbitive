@@ -19,13 +19,13 @@ fn pair(tag: &str) -> (Pool, Pool) {
     let name = fleet_name(tag);
     let owner = Pool::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10),
+        Incarnation::new(10)
     )
     .expect("owner pool");
     owner.reset_all();
     let peer = Pool::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11),
+        Incarnation::new(11)
     )
     .expect("peer pool");
     (owner, peer)
@@ -35,10 +35,7 @@ fn pair(tag: &str) -> (Pool, Pool) {
 fn a_remote_reservation_is_accepted_and_completed_by_the_owner() {
     let (owner, peer) = pair("a");
     let id = owner.register(KEY, 1).expect("register");
-    let limits = Limits {
-        max_live: 1,
-        attempts: 2,
-    };
+    let limits = Limits { max_live: 1, attempts: 2 };
 
     let Plan::RemoteReuse(lease) = peer.acquire(KEY, &limits, &LocalFirst).expect("acquire") else {
         panic!("the peer must see the owner's resource as remote");
@@ -48,10 +45,7 @@ fn a_remote_reservation_is_accepted_and_completed_by_the_owner() {
     assert!(matches!(peer.accept(lease), Err(Error::NotOwner(_))));
     let execution = owner.accept(lease).expect("accept");
     assert!(matches!(peer.reserve(id), Err(Error::Busy(_))));
-    assert!(matches!(
-        peer.acquire(KEY, &limits, &LocalFirst).expect("acquire"),
-        Plan::Wait(_)
-    ));
+    assert!(matches!(peer.acquire(KEY, &limits, &LocalFirst).expect("acquire"), Plan::Wait(_)));
 
     let since = peer.version(KEY).expect("version");
     let waiter = {
@@ -142,9 +136,11 @@ fn two_specs_are_two_pools_in_one_fleet_and_one_process() {
 fn one_kind_has_one_geometry_in_a_process() {
     let name = fleet_name("g");
     let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("fleet"));
-    let first = Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(242, 64, 32))
-        .expect("first pool");
-    let second = Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(242, 8, 8));
+    let first =
+        Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(242, 64, 32))
+            .expect("first pool");
+    let second =
+        Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(242, 8, 8));
     assert!(matches!(second, Err(Error::Malformed(_))));
     let odd = Pool::with_spec(Arc::clone(&fleet), Incarnation::new(10), PoolSpec::new(243, 3, 8));
     assert!(matches!(odd, Err(Error::Malformed(_))));
@@ -166,9 +162,7 @@ fn waiting_for_capacity_can_be_bounded() {
     assert!(matches!(peer.reserve(id), Err(Error::Busy(_))));
     let started = std::time::Instant::now();
     assert!(
-        peer.wait_capacity_timeout(KEY, since, Duration::from_millis(150))
-            .expect("wait")
-            .is_none()
+        peer.wait_capacity_timeout(KEY, since, Duration::from_millis(150)).expect("wait").is_none()
     );
     let waited = started.elapsed();
     assert!(waited >= Duration::from_millis(100), "gave up after {waited:?}");

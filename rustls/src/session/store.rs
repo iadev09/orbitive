@@ -18,7 +18,7 @@ pub(super) const KEY_MAX: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_KEY_CAPACITY"), 64);
 pub(super) const VALUE_MAX: usize = orbit_core::compile::usize_from_env(
     option_env!("ORBIT_RUSTLS_SESSION_VALUE_CAPACITY"),
-    16 * 1024,
+    16 * 1024
 );
 
 const SESSION_STATE_KIND: u8 = 231;
@@ -36,12 +36,12 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 pub(super) struct SessionPrimitive {
-    backing: Backing,
+    backing: Backing
 }
 
 enum Backing {
     Memory(Mutex<MemoryTable>),
-    Shm(ShmTable),
+    Shm(ShmTable)
 }
 
 impl SessionPrimitive {
@@ -49,7 +49,7 @@ impl SessionPrimitive {
         let backing = if fleet.is_shm() {
             Backing::Shm(ShmTable::open_or_create(&ring_segment_name(
                 fleet.name(),
-                SESSION_STATE_KIND,
+                SESSION_STATE_KIND
             ))?)
         } else {
             Backing::Memory(Mutex::new(MemoryTable::new()))
@@ -62,7 +62,7 @@ impl SessionPrimitive {
         domain: &[u8],
         key: &[u8],
         value: &[u8],
-        ttl: Duration,
+        ttl: Duration
     ) -> io::Result<bool> {
         if !entry_fits(domain, key, value) || ttl.is_zero() {
             return Ok(false);
@@ -96,15 +96,28 @@ impl SessionPrimitive {
         })
     }
 
-    pub(super) fn get(&self, domain: &[u8], key: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    pub(super) fn get(
+        &self,
+        domain: &[u8],
+        key: &[u8]
+    ) -> io::Result<Option<Vec<u8>>> {
         self.read(domain, key, false)
     }
 
-    pub(super) fn take(&self, domain: &[u8], key: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    pub(super) fn take(
+        &self,
+        domain: &[u8],
+        key: &[u8]
+    ) -> io::Result<Option<Vec<u8>>> {
         self.read(domain, key, true)
     }
 
-    fn read(&self, domain: &[u8], key: &[u8], consume: bool) -> io::Result<Option<Vec<u8>>> {
+    fn read(
+        &self,
+        domain: &[u8],
+        key: &[u8],
+        consume: bool
+    ) -> io::Result<Option<Vec<u8>>> {
         if domain.is_empty() || domain.len() > DOMAIN_MAX || key.is_empty() || key.len() > KEY_MAX {
             return Ok(None);
         }
@@ -140,36 +153,37 @@ impl SessionPrimitive {
     pub(super) fn unlink(&self) -> io::Result<()> {
         match &self.backing {
             Backing::Memory(_) => self.reset(),
-            Backing::Shm(table) => table.region.unlink(),
+            Backing::Shm(table) => table.region.unlink()
         }
     }
 
-    fn with_slots<T>(&self, operation: impl FnOnce(&mut [SessionSlot]) -> T) -> io::Result<T> {
+    fn with_slots<T>(
+        &self,
+        operation: impl FnOnce(&mut [SessionSlot]) -> T
+    ) -> io::Result<T> {
         match &self.backing {
             Backing::Memory(table) => {
                 let mut table = lock_unpoisoned(table);
                 Ok(operation(&mut table.slots))
             }
-            Backing::Shm(table) => table.with_slots(operation),
+            Backing::Shm(table) => table.with_slots(operation)
         }
     }
 }
 
 struct MemoryTable {
-    slots: Vec<SessionSlot>,
+    slots: Vec<SessionSlot>
 }
 
 impl MemoryTable {
     fn new() -> Self {
-        Self {
-            slots: (0..CAPACITY).map(|_| SessionSlot::empty()).collect(),
-        }
+        Self { slots: (0..CAPACITY).map(|_| SessionSlot::empty()).collect() }
     }
 }
 
 struct ShmTable {
     region: ShmRegion,
-    local_lock: Mutex<()>,
+    local_lock: Mutex<()>
 }
 
 impl ShmTable {
@@ -178,23 +192,20 @@ impl ShmTable {
             ShmRegion::open_or_create_locked(name, segment_size())?;
         if region.created() {
             unsafe {
-                ptr::write(
-                    region.as_ptr().cast::<SessionHeader>(),
-                    SessionHeader::new(),
-                );
+                ptr::write(region.as_ptr().cast::<SessionHeader>(), SessionHeader::new());
                 let slots = region.as_ptr().add(std::mem::size_of::<SessionHeader>());
                 ptr::write_bytes(slots, 0, CAPACITY * std::mem::size_of::<SessionSlot>());
             }
         } else {
             validate_header(name, unsafe { &*region.as_ptr().cast::<SessionHeader>() })?;
         }
-        Ok(Self {
-            region,
-            local_lock: Mutex::new(()),
-        })
+        Ok(Self { region, local_lock: Mutex::new(()) })
     }
 
-    fn with_slots<T>(&self, operation: impl FnOnce(&mut [SessionSlot]) -> T) -> io::Result<T> {
+    fn with_slots<T>(
+        &self,
+        operation: impl FnOnce(&mut [SessionSlot]) -> T
+    ) -> io::Result<T> {
         let _local = lock_unpoisoned(&self.local_lock);
         let _process = self.region.lock_exclusive()?;
         let slots = unsafe {
@@ -203,7 +214,7 @@ impl ShmTable {
                     .as_ptr()
                     .add(std::mem::size_of::<SessionHeader>())
                     .cast::<SessionSlot>(),
-                CAPACITY,
+                CAPACITY
             )
         };
         Ok(operation(slots))
@@ -222,7 +233,7 @@ struct SessionHeader {
     domain_max: u16,
     key_max: u16,
     value_max: u32,
-    _reserved: [u8; 36],
+    _reserved: [u8; 36]
 }
 
 impl SessionHeader {
@@ -238,7 +249,7 @@ impl SessionHeader {
             domain_max: DOMAIN_MAX as u16,
             key_max: KEY_MAX as u16,
             value_max: VALUE_MAX as u32,
-            _reserved: [0; 36],
+            _reserved: [0; 36]
         }
     }
 }
@@ -255,7 +266,7 @@ struct SessionSlot {
     expires_at_ms: u64,
     domain: [u8; DOMAIN_MAX],
     key: [u8; KEY_MAX],
-    value: [u8; VALUE_MAX],
+    value: [u8; VALUE_MAX]
 }
 
 impl SessionSlot {
@@ -271,7 +282,7 @@ impl SessionSlot {
             expires_at_ms: 0,
             domain: [0; DOMAIN_MAX],
             key: [0; KEY_MAX],
-            value: [0; VALUE_MAX],
+            value: [0; VALUE_MAX]
         }
     }
 
@@ -279,7 +290,12 @@ impl SessionSlot {
         self.state.load(Ordering::Acquire)
     }
 
-    fn matches(&self, hash: u64, domain: &[u8], key: &[u8]) -> bool {
+    fn matches(
+        &self,
+        hash: u64,
+        domain: &[u8],
+        key: &[u8]
+    ) -> bool {
         self.state() == SLOT_OCCUPIED
             && self.key_hash == hash
             && self.domain_len as usize == domain.len()
@@ -299,7 +315,7 @@ impl SessionSlot {
         key: &[u8],
         value: &[u8],
         inserted_at_ms: u64,
-        expires_at_ms: u64,
+        expires_at_ms: u64
     ) {
         self.clear();
         self.state.store(SLOT_WRITING, Ordering::Release);
@@ -330,14 +346,17 @@ impl SessionSlot {
     }
 }
 
-fn validate_header(name: &str, header: &SessionHeader) -> io::Result<()> {
+fn validate_header(
+    name: &str,
+    header: &SessionHeader
+) -> io::Result<()> {
     if header.magic != MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{MAGIC:08X})",
                 header.magic
-            ),
+            )
         ));
     }
     if header.version != VERSION
@@ -352,13 +371,17 @@ fn validate_header(name: &str, header: &SessionHeader) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("SHM segment {name} has an incompatible TLS-session layout"),
+            format!("SHM segment {name} has an incompatible TLS-session layout")
         ));
     }
     Ok(())
 }
 
-fn entry_fits(domain: &[u8], key: &[u8], value: &[u8]) -> bool {
+fn entry_fits(
+    domain: &[u8],
+    key: &[u8],
+    value: &[u8]
+) -> bool {
     !domain.is_empty()
         && domain.len() <= DOMAIN_MAX
         && !key.is_empty()
@@ -367,7 +390,10 @@ fn entry_fits(domain: &[u8], key: &[u8], value: &[u8]) -> bool {
         && value.len() <= VALUE_MAX
 }
 
-fn entry_hash(domain: &[u8], key: &[u8]) -> u64 {
+fn entry_hash(
+    domain: &[u8],
+    key: &[u8]
+) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;
     for byte in domain.iter().chain(key) {
         hash ^= u64::from(*byte);
@@ -376,7 +402,10 @@ fn entry_hash(domain: &[u8], key: &[u8]) -> u64 {
     hash
 }
 
-fn set_slots_mut(slots: &mut [SessionSlot], hash: u64) -> &mut [SessionSlot] {
+fn set_slots_mut(
+    slots: &mut [SessionSlot],
+    hash: u64
+) -> &mut [SessionSlot] {
     let start = set_index(hash) * WAYS;
     &mut slots[start..start + WAYS]
 }
@@ -404,9 +433,7 @@ fn monotonic_ms() -> io::Result<u64> {
         .map_err(|_| io::Error::other("negative monotonic clock seconds"))?;
     let nanos = u64::try_from(value.tv_nsec)
         .map_err(|_| io::Error::other("negative monotonic clock nanoseconds"))?;
-    Ok(seconds
-        .saturating_mul(1_000)
-        .saturating_add(nanos / 1_000_000))
+    Ok(seconds.saturating_mul(1_000).saturating_add(nanos / 1_000_000))
 }
 
 const _: () = assert!(SET_COUNT.is_power_of_two());
@@ -440,12 +467,7 @@ mod tests {
         );
         assert!(
             !primitive
-                .put(
-                    domain,
-                    b"oversized-value",
-                    &vec![7; VALUE_MAX + 1],
-                    Duration::from_secs(1)
-                )
+                .put(domain, b"oversized-value", &vec![7; VALUE_MAX + 1], Duration::from_secs(1))
                 .expect("oversized value")
         );
 
@@ -484,10 +506,7 @@ mod tests {
             .put(domain, b"short-lived", b"secret", Duration::from_millis(1))
             .expect("short put");
         std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(
-            primitive.get(domain, b"short-lived").expect("expired get"),
-            None
-        );
+        assert_eq!(primitive.get(domain, b"short-lived").expect("expired get"), None);
     }
 
     #[test]
@@ -506,11 +525,7 @@ mod tests {
         }
 
         for key in &keys[..WAYS] {
-            assert!(
-                primitive
-                    .put(domain, key, b"secret", Duration::from_secs(1))
-                    .expect("put")
-            );
+            assert!(primitive.put(domain, key, b"secret", Duration::from_secs(1)).expect("put"));
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(
@@ -521,14 +536,8 @@ mod tests {
 
         assert_eq!(primitive.get(domain, &keys[0]).expect("oldest get"), None);
         for key in &keys[1..WAYS] {
-            assert_eq!(
-                primitive.get(domain, key).expect("retained get"),
-                Some(b"secret".to_vec())
-            );
+            assert_eq!(primitive.get(domain, key).expect("retained get"), Some(b"secret".to_vec()));
         }
-        assert_eq!(
-            primitive.get(domain, &keys[WAYS]).expect("new get"),
-            Some(b"new".to_vec())
-        );
+        assert_eq!(primitive.get(domain, &keys[WAYS]).expect("new get"), Some(b"new".to_vec()));
     }
 }

@@ -8,29 +8,29 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
+use orbit_core::readiness::{Readiness, Signal};
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 use orbit_core::{Fleet, OrbitEpoch};
 
 use crate::layout::{
     Direction, Doorbell, FLAG_READER_GONE, FLAG_RESET, Geometry, Header, SIDE_CLAIMED, SIDE_DEAD,
-    SLOT_EMPTY, SLOT_LIVE, Slot,
+    SLOT_EMPTY, SLOT_LIVE, Slot
 };
 use crate::wake::{Doorstep, Driver, Interest, Registry};
-use orbit_core::readiness::{Readiness, Signal};
 use crate::{Error, Incarnation, Result, StreamSpec, lock_unpoisoned};
 
 enum Backing {
     Memory(AlignedBytes),
     #[cfg(unix)]
-    Shm(ShmRegion),
+    Shm(ShmRegion)
 }
 
 /// Heap bytes aligned like the mapping, so slots keep their cache lines in
 /// the standalone backend too.
 struct AlignedBytes {
     ptr: *mut u8,
-    layout: std::alloc::Layout,
+    layout: std::alloc::Layout
 }
 
 impl AlignedBytes {
@@ -74,7 +74,7 @@ pub(crate) struct Table {
     /// The driver's end of this process's readiness descriptor, once
     /// somebody has asked for one. Read on every drain, so it is a
     /// `OnceLock` rather than a lock.
-    readiness: std::sync::OnceLock<Signal>,
+    readiness: std::sync::OnceLock<Signal>
 }
 
 impl Table {
@@ -82,7 +82,7 @@ impl Table {
         match &self.backing {
             Backing::Memory(bytes) => bytes.ptr,
             #[cfg(unix)]
-            Backing::Shm(region) => region.as_ptr(),
+            Backing::Shm(region) => region.as_ptr()
         }
     }
 
@@ -90,7 +90,7 @@ impl Table {
         match &self.backing {
             Backing::Memory(_) => false,
             #[cfg(unix)]
-            Backing::Shm(_) => true,
+            Backing::Shm(_) => true
         }
     }
 
@@ -120,7 +120,10 @@ impl Table {
         self.header().epoch.load(Ordering::Acquire)
     }
 
-    fn doorbell(&self, node: usize) -> &Doorbell {
+    fn doorbell(
+        &self,
+        node: usize
+    ) -> &Doorbell {
         debug_assert!(node < self.geometry.fleet_capacity);
         // SAFETY: `fleet_capacity` doorbells follow the header, zeroed at
         // creation; every field is atomic.
@@ -132,7 +135,12 @@ impl Table {
         }
     }
 
-    fn bitmap_word(&self, offset: usize, node: usize, word: usize) -> &AtomicU64 {
+    fn bitmap_word(
+        &self,
+        offset: usize,
+        node: usize,
+        word: usize
+    ) -> &AtomicU64 {
         debug_assert!(node < self.geometry.fleet_capacity && word < self.geometry.bitmap_words);
         // SAFETY: both bitmaps sit between the doorbells and the slots;
         // atomic words only.
@@ -144,11 +152,19 @@ impl Table {
         }
     }
 
-    fn pending_word(&self, node: usize, word: usize) -> &AtomicU64 {
+    fn pending_word(
+        &self,
+        node: usize,
+        word: usize
+    ) -> &AtomicU64 {
         self.bitmap_word(self.geometry.pending_offset, node, word)
     }
 
-    fn offer_word(&self, node: usize, word: usize) -> &AtomicU64 {
+    fn offer_word(
+        &self,
+        node: usize,
+        word: usize
+    ) -> &AtomicU64 {
         self.bitmap_word(self.geometry.offers_offset, node, word)
     }
 
@@ -158,19 +174,20 @@ impl Table {
         unsafe {
             std::slice::from_raw_parts(
                 self.base().add(self.geometry.slots_offset).cast::<Slot>(),
-                self.geometry.total_slots,
+                self.geometry.total_slots
             )
         }
     }
 
     /// The bytes of one direction's ring. Only the direction's writer
     /// writes and only its reader reads, at disjoint positions.
-    pub(crate) fn buffer(&self, slot: usize, direction: usize) -> *mut u8 {
+    pub(crate) fn buffer(
+        &self,
+        slot: usize,
+        direction: usize
+    ) -> *mut u8 {
         // SAFETY: inside the segment by construction of `Geometry`.
-        unsafe {
-            self.base()
-                .add(self.geometry.buffer_offset(slot, direction))
-        }
+        unsafe { self.base().add(self.geometry.buffer_offset(slot, direction)) }
     }
 
     /// Take a free slot in this process's lane and install a fresh stream.
@@ -190,9 +207,7 @@ impl Table {
                 return Ok((index, generation));
             }
         }
-        Err(Error::Full {
-            capacity: lane_capacity,
-        })
+        Err(Error::Full { capacity: lane_capacity })
     }
 
     /// After anything changed on `direction` of `slot`: count it for
@@ -200,7 +215,13 @@ impl Table {
     /// task could be waiting for, tell the processes holding the stream's
     /// sides. Blocking waiters are always counted; they park on the word
     /// itself and are woken only when present.
-    pub(crate) fn notify(&self, index: usize, slot: &Slot, direction: &Direction, ring: bool) {
+    pub(crate) fn notify(
+        &self,
+        index: usize,
+        slot: &Slot,
+        direction: &Direction,
+        ring: bool
+    ) {
         direction.changes.fetch_add(1, Ordering::SeqCst);
         if direction.waiters.load(Ordering::SeqCst) > 0 {
             crate::wake_on(&direction.changes);
@@ -225,10 +246,13 @@ impl Table {
 
     /// Set the slot's bit for `node` (when there is one) and ring its
     /// doorbell if a driver or a blocking waiter is listening.
-    fn ring(&self, node: usize, pending: Option<usize>) {
+    fn ring(
+        &self,
+        node: usize,
+        pending: Option<usize>
+    ) {
         if let Some(index) = pending {
-            self.pending_word(node, index / 64)
-                .fetch_or(1 << (index % 64), Ordering::SeqCst);
+            self.pending_word(node, index / 64).fetch_or(1 << (index % 64), Ordering::SeqCst);
         }
         let doorbell = self.doorbell(node);
         doorbell.generation.fetch_add(1, Ordering::SeqCst);
@@ -238,22 +262,19 @@ impl Table {
     }
 
     /// Put the stream in `node`'s offer bitmap and ring it.
-    pub(crate) fn offer(&self, index: usize, node: u16) -> Result<()> {
+    pub(crate) fn offer(
+        &self,
+        index: usize,
+        node: u16
+    ) -> Result<()> {
         let node = usize::from(node);
         if node >= self.geometry.fleet_capacity {
-            return Err(Error::Malformed(format!(
-                "node {node} is outside the fleet"
-            )));
+            return Err(Error::Malformed(format!("node {node} is outside the fleet")));
         }
         // One process holds every node of a memory table: the offer goes to
         // whoever takes offers here, and the local waker is told directly.
-        let node = if self.is_shared() {
-            node
-        } else {
-            usize::from(self.node)
-        };
-        self.offer_word(node, index / 64)
-            .fetch_or(1 << (index % 64), Ordering::SeqCst);
+        let node = if self.is_shared() { node } else { usize::from(self.node) };
+        self.offer_word(node, index / 64).fetch_or(1 << (index % 64), Ordering::SeqCst);
         self.ring(node, None);
         if !self.is_shared() {
             self.registry.wake_offer();
@@ -292,7 +313,10 @@ impl Table {
     /// Park the calling thread until an offer arrives for this node.
     /// The same wait, bounded: `false` is the timeout and nothing else.
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-    pub(crate) fn wait_offer_timeout(&self, timeout: std::time::Duration) -> Result<bool> {
+    pub(crate) fn wait_offer_timeout(
+        &self,
+        timeout: std::time::Duration
+    ) -> Result<bool> {
         let doorbell = self.doorbell(usize::from(self.node));
         if self.has_offer() {
             return Ok(true);
@@ -316,11 +340,8 @@ impl Table {
             }
             doorbell.listening.fetch_add(1, Ordering::SeqCst);
             let seen = doorbell.generation.load(Ordering::SeqCst);
-            let outcome = if self.has_offer() {
-                Ok(())
-            } else {
-                crate::wait_on(&doorbell.generation, seen)
-            };
+            let outcome =
+                if self.has_offer() { Ok(()) } else { crate::wait_on(&doorbell.generation, seen) };
             doorbell.listening.fetch_sub(1, Ordering::SeqCst);
             outcome?;
         }
@@ -332,13 +353,16 @@ impl Table {
         self: &Arc<Self>,
         slot: usize,
         interest: Interest,
-        waker: &std::task::Waker,
+        waker: &std::task::Waker
     ) -> Result<()> {
         self.registry.register(slot, interest, waker);
         self.ensure_driver()
     }
 
-    pub(crate) fn register_offer(self: &Arc<Self>, waker: &std::task::Waker) -> Result<()> {
+    pub(crate) fn register_offer(
+        self: &Arc<Self>,
+        waker: &std::task::Waker
+    ) -> Result<()> {
         self.registry.register_offer(waker);
         self.ensure_driver()
     }
@@ -349,7 +373,7 @@ impl Table {
         let (readiness, signal) = orbit_core::readiness::pair()?;
         self.readiness.set(signal).map_err(|_| {
             Error::Malformed(
-                "this process already took the stream table's readiness descriptor".to_owned(),
+                "this process already took the stream table's readiness descriptor".to_owned()
             )
         })?;
         self.ensure_driver()?;
@@ -370,7 +394,7 @@ impl Table {
             if driver.is_none() {
                 *driver = Some(Driver::start(
                     Arc::as_ptr(self),
-                    format!("orbit-stream-{}-driver", self.node),
+                    format!("orbit-stream-{}-driver", self.node)
                 )?);
             }
         }
@@ -380,7 +404,11 @@ impl Table {
     /// A confirmed death: every side that incarnation of `node` held is
     /// finished. Its writes reset, its reads are gone, the other holder is
     /// woken; the slot itself empties only when nobody holds it any more.
-    pub(crate) fn node_dead(&self, node: u16, incarnation: u64) {
+    pub(crate) fn node_dead(
+        &self,
+        node: u16,
+        incarnation: u64
+    ) {
         for (index, slot) in self.slots().iter().enumerate() {
             if slot.state.load(Ordering::Acquire) != SLOT_LIVE {
                 continue;
@@ -408,16 +436,13 @@ impl Table {
                 self.notify(index, slot, reads, true);
             }
             if touched
-                && slot
-                    .claimed
-                    .iter()
-                    .all(|side| side.load(Ordering::SeqCst) != SIDE_CLAIMED)
+                && slot.claimed.iter().all(|side| side.load(Ordering::SeqCst) != SIDE_CLAIMED)
             {
                 let _ = slot.state.compare_exchange(
                     SLOT_LIVE,
                     SLOT_EMPTY,
                     Ordering::SeqCst,
-                    Ordering::SeqCst,
+                    Ordering::SeqCst
                 );
             }
         }
@@ -460,7 +485,7 @@ impl Table {
                 self.reset_all();
                 Ok(())
             }
-            Backing::Shm(region) => region.unlink().map_err(Error::Io),
+            Backing::Shm(region) => region.unlink().map_err(Error::Io)
         }
     }
 }
@@ -476,12 +501,13 @@ impl Doorstep for Table {
         &self.doorbell(usize::from(self.node)).generation
     }
 
-    fn listening(&self, delta: i32) {
+    fn listening(
+        &self,
+        delta: i32
+    ) {
         let doorbell = self.doorbell(usize::from(self.node));
         if delta > 0 {
-            doorbell
-                .incarnation
-                .store(self.incarnation, Ordering::SeqCst);
+            doorbell.incarnation.store(self.incarnation, Ordering::SeqCst);
             doorbell.listening.fetch_add(1, Ordering::SeqCst);
         } else {
             doorbell.listening.fetch_sub(1, Ordering::SeqCst);
@@ -523,7 +549,7 @@ impl Drop for Table {
 enum Key {
     Memory(usize, u8),
     #[cfg(unix)]
-    Shm(String, u16),
+    Shm(String, u16)
 }
 
 static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
@@ -535,21 +561,18 @@ static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
 pub(crate) fn open(
     fleet: &Arc<Fleet>,
     incarnation: Incarnation,
-    spec: StreamSpec,
+    spec: StreamSpec
 ) -> Result<Arc<Table>> {
     if !crate::waits_supported() {
         return Err(Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "orbit-stream needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later",
+            "orbit-stream needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later"
         )));
     }
     let key = if fleet.is_shm() {
         #[cfg(unix)]
         {
-            Key::Shm(
-                ring_segment_name(fleet.name(), spec.kind),
-                fleet.node_id().get(),
-            )
+            Key::Shm(ring_segment_name(fleet.name(), spec.kind), fleet.node_id().get())
         }
         #[cfg(not(unix))]
         unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -585,13 +608,13 @@ pub(crate) fn open(
             unsafe {
                 std::ptr::write(
                     bytes.ptr.cast::<Header>(),
-                    Header::new(fleet.fleet_capacity(), &geometry, next_epoch(0)),
+                    Header::new(fleet.fleet_capacity(), &geometry, next_epoch(0))
                 )
             };
             Backing::Memory(bytes)
         }
         #[cfg(unix)]
-        Key::Shm(name, _) => Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?),
+        Key::Shm(name, _) => Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?)
     };
     let table = Arc::new(Table {
         _fleet: Arc::clone(fleet),
@@ -603,14 +626,18 @@ pub(crate) fn open(
         allocate: Mutex::new(0),
         registry: Registry::new(geometry.total_slots),
         driver: Mutex::new(None),
-        readiness: std::sync::OnceLock::new(),
+        readiness: std::sync::OnceLock::new()
     });
     tables.insert(key, Arc::downgrade(&table));
     Ok(table)
 }
 
 #[cfg(unix)]
-fn open_shm(name: &str, fleet_capacity: u16, geometry: &Geometry) -> Result<ShmRegion> {
+fn open_shm(
+    name: &str,
+    fleet_capacity: u16,
+    geometry: &Geometry
+) -> Result<ShmRegion> {
     use std::io;
 
     let (region, _initialization_lock) =
@@ -622,14 +649,14 @@ fn open_shm(name: &str, fleet_capacity: u16, geometry: &Geometry) -> Result<ShmR
         unsafe {
             std::ptr::write(
                 region.as_ptr().cast::<Header>(),
-                Header::new(fleet_capacity, geometry, next_epoch(0)),
+                Header::new(fleet_capacity, geometry, next_epoch(0))
             );
         }
     } else {
         if region.len() < geometry.segment_size {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("SHM segment {name} is smaller than the stream table"),
+                format!("SHM segment {name} is smaller than the stream table")
             )));
         }
         // SAFETY: the region is at least a header long.
@@ -641,13 +668,13 @@ fn open_shm(name: &str, fleet_capacity: u16, geometry: &Geometry) -> Result<ShmR
                     "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{:08X})",
                     header.magic,
                     crate::layout::MAGIC
-                ),
+                )
             )));
         }
         if !header.compatible(fleet_capacity, geometry) {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("SHM segment {name} has an incompatible stream-table layout"),
+                format!("SHM segment {name} has an incompatible stream-table layout")
             )));
         }
     }
@@ -661,6 +688,9 @@ pub fn segment_size(fleet_capacity: u16) -> usize {
 }
 
 /// Bytes `spec`'s segment needs for `fleet_capacity` lanes.
-pub fn segment_size_for(fleet_capacity: u16, spec: StreamSpec) -> usize {
+pub fn segment_size_for(
+    fleet_capacity: u16,
+    spec: StreamSpec
+) -> usize {
     Geometry::new(fleet_capacity, spec).segment_size
 }

@@ -66,7 +66,7 @@ fn pool_owner() {
                             taken += 1;
                         }
                         Err(Error::CreationBudget { .. }) => break,
-                        Err(error) => panic!("{error}"),
+                        Err(error) => panic!("{error}")
                     }
                 }
                 report(&format!("claimed {taken}"));
@@ -90,9 +90,7 @@ fn pool_owner() {
                     }
                     input.extend_from_slice(&chunk);
                 }
-                write
-                    .blocking_write_all(&input.to_ascii_uppercase())
-                    .unwrap();
+                write.blocking_write_all(&input.to_ascii_uppercase()).unwrap();
                 write.finish().unwrap();
                 execution.complete();
                 report(&format!("completed {}", input.len()));
@@ -110,7 +108,7 @@ fn pool_owner() {
                         Ok(chunk) if chunk.is_empty() => break "eof",
                         Ok(_) => continue,
                         Err(orbit_stream::Error::Reset) => break "reset",
-                        Err(_) => break "error",
+                        Err(_) => break "error"
                     }
                 };
                 report(&format!("peer {outcome}"));
@@ -126,7 +124,7 @@ fn pool_owner() {
                 report("dropped");
                 return;
             }
-            command => panic!("unknown command {command}"),
+            command => panic!("unknown command {command}")
         }
     }
     // Stdin is not how this process ends. Under a parallel test binary the
@@ -143,7 +141,7 @@ fn pool_owner() {
 struct Owner {
     child: Child,
     lines: Receiver<String>,
-    resource: ResourceId,
+    resource: ResourceId
 }
 
 impl Owner {
@@ -168,18 +166,17 @@ impl Owner {
         let mut owner = Self {
             child,
             lines,
-            resource: ResourceId::from_net_id(orbit_core::NetId64::make(0, 0, 0)),
+            resource: ResourceId::from_net_id(orbit_core::NetId64::make(0, 0, 0))
         };
         let registered = owner.expect("registered");
-        owner.resource = registered
-            .strip_prefix("registered ")
-            .unwrap()
-            .parse()
-            .unwrap();
+        owner.resource = registered.strip_prefix("registered ").unwrap().parse().unwrap();
         owner
     }
 
-    fn expect(&self, message: &str) -> String {
+    fn expect(
+        &self,
+        message: &str
+    ) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let line = self
@@ -194,7 +191,10 @@ impl Owner {
         }
     }
 
-    fn send(&mut self, command: &str) {
+    fn send(
+        &mut self,
+        command: &str
+    ) {
         writeln!(self.child.stdin.as_mut().unwrap(), "{command}").unwrap();
         self.child.stdin.as_mut().unwrap().flush().unwrap();
     }
@@ -224,7 +224,7 @@ impl Drop for Owner {
 struct Peer {
     pool: Pool,
     streams: Streams,
-    name: &'static str,
+    name: &'static str
 }
 
 impl Peer {
@@ -238,21 +238,18 @@ impl Peer {
         let streams =
             Streams::new(fleet, orbit_stream::Incarnation::new(PEER_INCARNATION)).unwrap();
         streams.reset_all();
-        Self {
-            pool,
-            streams,
-            name,
-        }
+        Self { pool, streams, name }
     }
 
     /// Reserve through the pool, reach the owner with the lease, send the
     /// input; `finish` says whether the input is complete. Returns the
     /// lease and the peer's halves.
-    fn dispatch(&self, input: &[u8], finish: bool) -> (Lease, ReadHalf, WriteHalf) {
-        let limits = Limits {
-            max_live: 1,
-            attempts: 2,
-        };
+    fn dispatch(
+        &self,
+        input: &[u8],
+        finish: bool
+    ) -> (Lease, ReadHalf, WriteHalf) {
+        let limits = Limits { max_live: 1, attempts: 2 };
         let Plan::RemoteReuse(lease) = self.pool.acquire(KEY, &limits, &LocalFirst).unwrap() else {
             panic!("the owner's resource is remote to the peer");
         };
@@ -281,10 +278,7 @@ fn a_remote_lease_is_executed_by_the_owner_over_a_stream() {
 
     owner.send("serve");
     let (lease, read, _write) = peer.dispatch(b"hello over the fleet", true);
-    assert_eq!(
-        owner.expect("accepted"),
-        format!("accepted {}", lease.fence)
-    );
+    assert_eq!(owner.expect("accepted"), format!("accepted {}", lease.fence));
     let mut output = Vec::new();
     loop {
         let chunk = read.blocking_read_chunk(64).unwrap();
@@ -312,10 +306,7 @@ fn a_peer_that_gives_up_does_not_free_a_running_resource() {
     // reset, the work is still running there, and the resource stays busy.
     drop((read, write));
     owner.expect("peer reset");
-    assert!(matches!(
-        peer.pool.reserve(owner.resource),
-        Err(Error::Busy(_))
-    ));
+    assert!(matches!(peer.pool.reserve(owner.resource), Err(Error::Busy(_))));
     assert!(!peer.candidates(KEY).is_empty());
     assert_eq!(peer.candidates(KEY)[0].active, 1);
     let _ = lease;
@@ -330,7 +321,10 @@ fn a_peer_that_gives_up_does_not_free_a_running_resource() {
 }
 
 impl Peer {
-    fn candidates(&self, key: Key) -> Vec<orbit_pool::Candidate> {
+    fn candidates(
+        &self,
+        key: Key
+    ) -> Vec<orbit_pool::Candidate> {
         self.pool.candidates(key)
     }
 }
@@ -363,33 +357,17 @@ fn a_dead_owner_ends_the_stream_and_takes_its_resource_with_it() {
 
     // Death alone: the resource still looks busy and the reader is parked.
     assert!(peer.candidates(KEY).len() == 1);
-    assert!(matches!(
-        peer.pool.reserve(owner.resource),
-        Err(Error::Busy(_))
-    ));
+    assert!(matches!(peer.pool.reserve(owner.resource), Err(Error::Busy(_))));
 
-    peer.streams.node_dead(
-        NodeId::ZERO,
-        orbit_stream::Incarnation::new(OWNER_INCARNATION),
-    );
-    peer.pool
-        .node_dead(NodeId::ZERO, Incarnation::new(OWNER_INCARNATION));
+    peer.streams.node_dead(NodeId::ZERO, orbit_stream::Incarnation::new(OWNER_INCARNATION));
+    peer.pool.node_dead(NodeId::ZERO, Incarnation::new(OWNER_INCARNATION));
     let (_read, _write, outcome) = reader.join().unwrap();
-    assert!(
-        matches!(outcome, Err(orbit_stream::Error::Reset)),
-        "{outcome:?}"
-    );
+    assert!(matches!(outcome, Err(orbit_stream::Error::Reset)), "{outcome:?}");
     assert!(!peer.pool.is_current(lease));
     assert!(peer.candidates(KEY).is_empty());
     // The budget is free again: the next acquire would create.
-    let limits = Limits {
-        max_live: 1,
-        attempts: 1,
-    };
-    assert!(matches!(
-        peer.pool.acquire(KEY, &limits, &LocalFirst).unwrap(),
-        Plan::Create(_)
-    ));
+    let limits = Limits { max_live: 1, attempts: 1 };
+    assert!(matches!(peer.pool.acquire(KEY, &limits, &LocalFirst).unwrap(), Plan::Create(_)));
 }
 
 /// The creation budget is the fleet's, not each process's: the ceiling
@@ -412,10 +390,7 @@ fn a_creation_budget_is_fleet_wide_across_processes() {
     // One unit is left for the whole fleet, and this process takes it.
     let permit = peer.pool.claim_create(KEY, MAX_LIVE).expect("the last unit");
     assert_eq!(peer.pool.budget(KEY), (1, 3));
-    assert!(matches!(
-        peer.pool.claim_create(KEY, MAX_LIVE),
-        Err(Error::CreationBudget { .. })
-    ));
+    assert!(matches!(peer.pool.claim_create(KEY, MAX_LIVE), Err(Error::CreationBudget { .. })));
     // The owner is at the same ceiling, from its own side of the segment.
     owner.send(&format!("claim {MAX_LIVE} 1"));
     assert_eq!(owner.expect("claimed"), "claimed 0");
@@ -442,23 +417,16 @@ fn a_dead_holders_creation_claims_come_back() {
     owner.send(&format!("claim {MAX_LIVE} 2"));
     assert_eq!(owner.expect("claimed"), "claimed 2");
     assert_eq!(peer.pool.budget(KEY), (1, 2));
-    assert!(matches!(
-        peer.pool.claim_create(KEY, MAX_LIVE),
-        Err(Error::CreationBudget { .. })
-    ));
+    assert!(matches!(peer.pool.claim_create(KEY, MAX_LIVE), Err(Error::CreationBudget { .. })));
 
     owner.kill();
     // Death alone gives nothing back: the units are still held by a
     // process that no longer exists.
     assert_eq!(peer.pool.budget(KEY), (1, 2));
 
-    peer.pool
-        .node_dead(NodeId::ZERO, Incarnation::new(OWNER_INCARNATION));
+    peer.pool.node_dead(NodeId::ZERO, Incarnation::new(OWNER_INCARNATION));
     assert_eq!(peer.pool.budget(KEY), (0, 0));
-    peer.pool
-        .claim_create(KEY, MAX_LIVE)
-        .expect("the budget is free again")
-        .finish();
+    peer.pool.claim_create(KEY, MAX_LIVE).expect("the budget is free again").finish();
 }
 
 /// The wait path across a process boundary: a caller at the ceiling parks
@@ -474,10 +442,7 @@ fn a_waiter_wakes_when_another_process_gives_its_claim_back() {
     owner.send(&format!("claim {MAX_LIVE} 1"));
     assert_eq!(owner.expect("claimed"), "claimed 1");
     let since = peer.pool.version(KEY).unwrap();
-    assert!(matches!(
-        peer.pool.claim_create(KEY, MAX_LIVE),
-        Err(Error::CreationBudget { .. })
-    ));
+    assert!(matches!(peer.pool.claim_create(KEY, MAX_LIVE), Err(Error::CreationBudget { .. })));
 
     let (woke, parked) = mpsc::channel();
     let pool = peer.pool.clone();
@@ -493,9 +458,6 @@ fn a_waiter_wakes_when_another_process_gives_its_claim_back() {
         .expect("the waiter was left parked")
         .expect("wait_capacity");
     assert!(version > since);
-    peer.pool
-        .claim_create(KEY, MAX_LIVE)
-        .expect("capacity came back")
-        .finish();
+    peer.pool.claim_create(KEY, MAX_LIVE).expect("capacity came back").finish();
     owner.finish();
 }

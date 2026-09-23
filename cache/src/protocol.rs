@@ -21,11 +21,14 @@ pub(crate) const MIN_MUTATION_HEADER_LEN: usize = 1 + 2 + 2 + 8 + 8 + 8 + 4 + 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CacheRevision {
     pub sequence: u64,
-    pub mutation_id: NetId64,
+    pub mutation_id: NetId64
 }
 
 impl Ord for CacheRevision {
-    fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(
+        &self,
+        other: &Self
+    ) -> Ordering {
         self.sequence
             .cmp(&other.sequence)
             .then_with(|| self.mutation_id.raw().cmp(&other.mutation_id.raw()))
@@ -33,7 +36,10 @@ impl Ord for CacheRevision {
 }
 
 impl PartialOrd for CacheRevision {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn partial_cmp(
+        &self,
+        other: &Self
+    ) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -44,7 +50,7 @@ pub struct PayloadRef {
     pub first_id: NetId64,
     pub payload_version: u64,
     pub chunk_count: u32,
-    pub value_len: u64,
+    pub value_len: u64
 }
 
 /// One cache fact decoded from the mutation ring.
@@ -55,17 +61,17 @@ pub enum CacheMutation {
         key: Bytes,
         revision: CacheRevision,
         expires_at_ms: Option<u64>,
-        payload: PayloadRef,
+        payload: PayloadRef
     },
     Delete {
         store: Bytes,
         key: Bytes,
-        revision: CacheRevision,
+        revision: CacheRevision
     },
     Reset {
         store: Bytes,
-        revision: CacheRevision,
-    },
+        revision: CacheRevision
+    }
 }
 
 impl CacheMutation {
@@ -81,7 +87,7 @@ impl CacheMutation {
         match self {
             Self::Put { revision, .. }
             | Self::Delete { revision, .. }
-            | Self::Reset { revision, .. } => *revision,
+            | Self::Reset { revision, .. } => *revision
         }
     }
 }
@@ -107,7 +113,7 @@ pub(crate) fn encode_put<L: CacheLayout>(
     store: &[u8],
     key: &[u8],
     expires_at_ms: Option<u64>,
-    payload: PayloadRef,
+    payload: PayloadRef
 ) -> Result<Bytes> {
     validate_store::<L>(store)?;
     validate_key::<L>(store.len(), key)?;
@@ -125,7 +131,10 @@ pub(crate) fn encode_put<L: CacheLayout>(
     Ok(out.freeze())
 }
 
-pub(crate) fn encode_delete<L: CacheLayout>(store: &[u8], key: &[u8]) -> Result<Bytes> {
+pub(crate) fn encode_delete<L: CacheLayout>(
+    store: &[u8],
+    key: &[u8]
+) -> Result<Bytes> {
     validate_store::<L>(store)?;
     validate_key::<L>(store.len(), key)?;
     let mut out = BytesMut::with_capacity(MIN_MUTATION_HEADER_LEN + store.len() + key.len());
@@ -176,10 +185,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
         return None;
     }
 
-    let revision = CacheRevision {
-        sequence: frame.ver,
-        mutation_id: frame.id,
-    };
+    let revision = CacheRevision { sequence: frame.ver, mutation_id: frame.id };
     let store = frame.payload.slice(MIN_MUTATION_HEADER_LEN..store_end);
     let key = frame.payload.slice(store_end..key_end);
     match frame.kind {
@@ -199,8 +205,8 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
                     first_id: first_payload_id,
                     payload_version,
                     chunk_count,
-                    value_len,
-                },
+                    value_len
+                }
             })
         }
         FRAME_KIND_DELETE
@@ -212,11 +218,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
                 && chunk_count == 0
                 && value_len == 0 =>
         {
-            Some(CacheMutation::Delete {
-                store,
-                key,
-                revision,
-            })
+            Some(CacheMutation::Delete { store, key, revision })
         }
         FRAME_KIND_RESET
             if store_len > 0
@@ -229,7 +231,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
         {
             Some(CacheMutation::Reset { store, revision })
         }
-        _ => None,
+        _ => None
     }
 }
 
@@ -239,24 +241,21 @@ fn validate_store<L: CacheLayout>(store: &[u8]) -> Result<()> {
     }
     let max = max_store_len::<L>();
     if store.len() > max {
-        return Err(Error::StoreTooLarge {
-            store_len: store.len(),
-            max,
-        });
+        return Err(Error::StoreTooLarge { store_len: store.len(), max });
     }
     Ok(())
 }
 
-fn validate_key<L: CacheLayout>(store_len: usize, key: &[u8]) -> Result<()> {
+fn validate_key<L: CacheLayout>(
+    store_len: usize,
+    key: &[u8]
+) -> Result<()> {
     if key.is_empty() {
         return Err(Error::KeyEmpty);
     }
     let max = max_key_len::<L>(store_len);
     if key.len() > max {
-        return Err(Error::KeyTooLarge {
-            key_len: key.len(),
-            max,
-        });
+        return Err(Error::KeyTooLarge { key_len: key.len(), max });
     }
     Ok(())
 }

@@ -57,25 +57,25 @@ pub enum Error {
     /// The record would not fit the ring's record limit; nothing was written.
     TooLarge {
         len: usize,
-        max: usize,
+        max: usize
     },
     /// Every byte the record needs is under a reader's pin; nothing was
     /// written. Transient: pins are held for the length of a response.
     Pinned,
-    Io(std::io::Error),
+    Io(std::io::Error)
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         match self {
             Self::TooLarge { len, max } => {
-                write!(
-                    formatter,
-                    "record of {len} bytes exceeds the arena record limit of {max}"
-                )
+                write!(formatter, "record of {len} bytes exceeds the arena record limit of {max}")
             }
             Self::Pinned => formatter.write_str("the arena has no unpinned room for the record"),
-            Self::Io(error) => write!(formatter, "arena I/O: {error}"),
+            Self::Io(error) => write!(formatter, "arena I/O: {error}")
         }
     }
 }
@@ -126,30 +126,35 @@ pub struct Record<'a> {
     /// A validator the caller reads back — a modification time, say.
     pub stamp: u64,
     /// A second one — a length, a checksum.
-    pub extra: u64,
+    pub extra: u64
 }
 
 impl<'a> Record<'a> {
     pub const fn body(body: &'a [u8]) -> Self {
-        Self {
-            body,
-            encoded: None,
-            stamp: 0,
-            extra: 0,
-        }
+        Self { body, encoded: None, stamp: 0, extra: 0 }
     }
 
-    pub const fn encoded(mut self, encoded: &'a [u8], tag: u8) -> Self {
+    pub const fn encoded(
+        mut self,
+        encoded: &'a [u8],
+        tag: u8
+    ) -> Self {
         self.encoded = Some((encoded, tag));
         self
     }
 
-    pub const fn stamp(mut self, stamp: u64) -> Self {
+    pub const fn stamp(
+        mut self,
+        stamp: u64
+    ) -> Self {
         self.stamp = stamp;
         self
     }
 
-    pub const fn extra(mut self, extra: u64) -> Self {
+    pub const fn extra(
+        mut self,
+        extra: u64
+    ) -> Self {
         self.extra = extra;
         self
     }
@@ -173,7 +178,7 @@ struct Header {
     /// Bumped by every reset, so a reader can tell "emptied since" apart
     /// from "never filled".
     generation: AtomicU32,
-    _reserved: [u8; 28],
+    _reserved: [u8; 28]
 }
 
 impl Header {
@@ -187,7 +192,7 @@ impl Header {
             bytes: ARENA_BYTES as u64,
             cursor: AtomicU64::new(0),
             generation: AtomicU32::new(1),
-            _reserved: [0; 28],
+            _reserved: [0; 28]
         }
     }
 
@@ -221,11 +226,14 @@ struct Slot {
     encoded_len: AtomicU64,
     stamp: AtomicU64,
     extra: AtomicU64,
-    _padding: [u8; 48],
+    _padding: [u8; 48]
 }
 
 impl Slot {
-    fn holds(&self, key: Key) -> bool {
+    fn holds(
+        &self,
+        key: Key
+    ) -> bool {
         self.key_lo.load(Ordering::Relaxed) == key.lo()
             && self.key_hi.load(Ordering::Relaxed) == key.hi()
     }
@@ -252,14 +260,14 @@ const fn segment_size() -> usize {
 enum Backing {
     #[cfg(unix)]
     Shm(ShmRegion),
-    Memory(Box<[u8]>),
+    Memory(Box<[u8]>)
 }
 
 struct Inner {
     backing: Backing,
     /// Serialises this process's writers; the cross-process lock is taken
     /// inside it, so threads never contend for a file lock they cannot share.
-    write: Mutex<()>,
+    write: Mutex<()>
 }
 
 /// Held for a put: this process's writer mutex, and the region's process
@@ -267,7 +275,7 @@ struct Inner {
 struct WriteGuard<'a> {
     _local: MutexGuard<'a, ()>,
     #[cfg(unix)]
-    _shared: Option<ShmRegionLock>,
+    _shared: Option<ShmRegionLock>
 }
 
 impl Inner {
@@ -275,7 +283,7 @@ impl Inner {
         match &self.backing {
             #[cfg(unix)]
             Backing::Shm(region) => region.as_ptr(),
-            Backing::Memory(bytes) => bytes.as_ptr().cast_mut(),
+            Backing::Memory(bytes) => bytes.as_ptr().cast_mut()
         }
     }
 
@@ -291,22 +299,23 @@ impl Inner {
         unsafe {
             std::slice::from_raw_parts(
                 self.base().add(size_of::<Header>()).cast::<Slot>(),
-                ARENA_SLOTS,
+                ARENA_SLOTS
             )
         }
     }
 
     fn ring(&self) -> *mut u8 {
         // SAFETY: the ring follows the slots inside the mapped segment.
-        unsafe {
-            self.base()
-                .add(size_of::<Header>() + ARENA_SLOTS * size_of::<Slot>())
-        }
+        unsafe { self.base().add(size_of::<Header>() + ARENA_SLOTS * size_of::<Slot>()) }
     }
 
     /// The bytes of one span. Only meaningful while the slot that names it is
     /// pinned, which is what [`Entry`] guarantees.
-    fn bytes(&self, offset: u64, len: u64) -> &[u8] {
+    fn bytes(
+        &self,
+        offset: u64,
+        len: u64
+    ) -> &[u8] {
         // SAFETY: offsets come from a published slot and were bounds-checked
         // at allocation; a pinned span is never rewritten.
         unsafe { std::slice::from_raw_parts(self.ring().add(offset as usize), len as usize) }
@@ -317,12 +326,12 @@ impl Inner {
         #[cfg(unix)]
         let shared = match &self.backing {
             Backing::Shm(region) => Some(region.lock_exclusive()?),
-            Backing::Memory(_) => None,
+            Backing::Memory(_) => None
         };
         Ok(WriteGuard {
             _local: local,
             #[cfg(unix)]
-            _shared: shared,
+            _shared: shared
         })
     }
 }
@@ -330,7 +339,7 @@ impl Inner {
 /// The fleet's arena. Cheap to clone.
 #[derive(Clone)]
 pub struct Arena {
-    inner: Arc<Inner>,
+    inner: Arc<Inner>
 }
 
 impl Arena {
@@ -341,10 +350,7 @@ impl Arena {
         let backing = if fleet.is_shm() {
             #[cfg(unix)]
             {
-                Backing::Shm(open_or_create(&ring_segment_name(
-                    fleet.name(),
-                    ARENA_KIND,
-                ))?)
+                Backing::Shm(open_or_create(&ring_segment_name(fleet.name(), ARENA_KIND))?)
             }
             #[cfg(not(unix))]
             unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -352,35 +358,22 @@ impl Arena {
             let mut bytes = vec![0_u8; segment_size() + 64].into_boxed_slice();
             // Align the header on its cache line inside the allocation.
             let misalignment = bytes.as_ptr() as usize % 64;
-            let start = if misalignment == 0 {
-                0
-            } else {
-                64 - misalignment
-            };
+            let start = if misalignment == 0 { 0 } else { 64 - misalignment };
             // SAFETY: start + size_of::<Header>() lies inside the allocation.
             unsafe {
-                std::ptr::write(
-                    bytes.as_mut_ptr().add(start).cast::<Header>(),
-                    Header::new(),
-                )
+                std::ptr::write(bytes.as_mut_ptr().add(start).cast::<Header>(), Header::new())
             };
-            Backing::Memory(if start == 0 {
-                bytes
-            } else {
-                shift(bytes, start)
-            })
+            Backing::Memory(if start == 0 { bytes } else { shift(bytes, start) })
         };
-        Ok(Self {
-            inner: Arc::new(Inner {
-                backing,
-                write: Mutex::new(()),
-            }),
-        })
+        Ok(Self { inner: Arc::new(Inner { backing, write: Mutex::new(()) }) })
     }
 
     /// Borrow the record filed under `key`, pinning its bytes for as long as
     /// the [`Entry`] lives. `None` is a miss: never filed, evicted, or reset.
-    pub fn get(&self, key: Key) -> Option<Entry> {
+    pub fn get(
+        &self,
+        key: Key
+    ) -> Option<Entry> {
         let slots = self.inner.slots();
         let mask = ARENA_SLOTS - 1;
         let start = key.lo() as usize & mask;
@@ -410,13 +403,14 @@ impl Arena {
     /// File `record` under `key`, replacing what was there. Bytes go to the
     /// ring at the cursor; whatever they land on is evicted, unless a reader
     /// holds it, in which case the cursor moves past it.
-    pub fn put(&self, key: Key, record: Record<'_>) -> Result<()> {
+    pub fn put(
+        &self,
+        key: Key,
+        record: Record<'_>
+    ) -> Result<()> {
         let total = record.total();
         if total > ARENA_RECORD_MAX {
-            return Err(Error::TooLarge {
-                len: total,
-                max: ARENA_RECORD_MAX,
-            });
+            return Err(Error::TooLarge { len: total, max: ARENA_RECORD_MAX });
         }
         let _guard = self.inner.lock()?;
         let slots = self.inner.slots();
@@ -438,30 +432,21 @@ impl Arena {
                 std::ptr::copy_nonoverlapping(
                     encoded.as_ptr(),
                     destination.add(record.body.len()),
-                    encoded.len(),
+                    encoded.len()
                 );
             }
         }
 
         let index = self.free_slot_locked(key)?;
         let slot = &slots[index];
-        let generation = slot
-            .generation
-            .load(Ordering::Relaxed)
-            .wrapping_add(1)
-            .max(1);
+        let generation = slot.generation.load(Ordering::Relaxed).wrapping_add(1).max(1);
         slot.key_lo.store(key.lo(), Ordering::Relaxed);
         slot.key_hi.store(key.hi(), Ordering::Relaxed);
         slot.body_offset.store(offset, Ordering::Relaxed);
-        slot.body_len
-            .store(record.body.len() as u64, Ordering::Relaxed);
-        let (encoded_len, tag) = record
-            .encoded
-            .map_or((0, 0), |(bytes, tag)| (bytes.len(), tag));
-        slot.encoded_offset
-            .store(offset + record.body.len() as u64, Ordering::Relaxed);
-        slot.encoded_len
-            .store(encoded_len as u64, Ordering::Relaxed);
+        slot.body_len.store(record.body.len() as u64, Ordering::Relaxed);
+        let (encoded_len, tag) = record.encoded.map_or((0, 0), |(bytes, tag)| (bytes.len(), tag));
+        slot.encoded_offset.store(offset + record.body.len() as u64, Ordering::Relaxed);
+        slot.encoded_len.store(encoded_len as u64, Ordering::Relaxed);
         slot.encoding.store(tag, Ordering::Relaxed);
         slot.stamp.store(record.stamp, Ordering::Relaxed);
         slot.extra.store(record.extra, Ordering::Relaxed);
@@ -473,7 +458,10 @@ impl Arena {
 
     /// Drop the record under `key`. Its bytes stay in the ring until the
     /// cursor reaches them; a reader holding them keeps them until it is done.
-    pub fn forget(&self, key: Key) -> Result<bool> {
+    pub fn forget(
+        &self,
+        key: Key
+    ) -> Result<bool> {
         let _guard = self.inner.lock()?;
         let Some(index) = self.find_locked(key) else {
             return Ok(false);
@@ -495,10 +483,7 @@ impl Arena {
                 evict(slot);
             }
         }
-        self.inner
-            .header()
-            .generation
-            .fetch_add(1, Ordering::AcqRel);
+        self.inner.header().generation.fetch_add(1, Ordering::AcqRel);
         Ok(live)
     }
 
@@ -526,11 +511,14 @@ impl Arena {
         match &self.inner.backing {
             #[cfg(unix)]
             Backing::Shm(region) => region.unlink().map_err(Error::Io),
-            Backing::Memory(_) => Ok(()),
+            Backing::Memory(_) => Ok(())
         }
     }
 
-    fn find_locked(&self, key: Key) -> Option<usize> {
+    fn find_locked(
+        &self,
+        key: Key
+    ) -> Option<usize> {
         let slots = self.inner.slots();
         let mask = ARENA_SLOTS - 1;
         let start = key.lo() as usize & mask;
@@ -547,7 +535,10 @@ impl Arena {
 
     /// The first slot in `key`'s probe chain that can take a record: empty,
     /// or retired with no reader left on it.
-    fn free_slot_locked(&self, key: Key) -> Result<usize> {
+    fn free_slot_locked(
+        &self,
+        key: Key
+    ) -> Result<usize> {
         let slots = self.inner.slots();
         let mask = ARENA_SLOTS - 1;
         let start = key.lo() as usize & mask;
@@ -566,7 +557,10 @@ impl Arena {
     /// Reserve `len` contiguous bytes at the cursor. Every record whose span
     /// meets the reservation is evicted; one a reader is pinning is skipped,
     /// and the reservation restarts past it.
-    fn allocate_locked(&self, len: u64) -> Result<u64> {
+    fn allocate_locked(
+        &self,
+        len: u64
+    ) -> Result<u64> {
         let header = self.inner.header();
         let bytes = ARENA_BYTES as u64;
         let slots = self.inner.slots();
@@ -625,7 +619,10 @@ fn evict(slot: &Slot) {
     }
 }
 
-fn shift(bytes: Box<[u8]>, start: usize) -> Box<[u8]> {
+fn shift(
+    bytes: Box<[u8]>,
+    start: usize
+) -> Box<[u8]> {
     let mut vec = bytes.into_vec();
     vec.drain(..start);
     vec.into_boxed_slice()
@@ -642,7 +639,7 @@ fn open_or_create(name: &str) -> Result<ShmRegion> {
             std::ptr::write_bytes(
                 region.as_ptr().add(size_of::<Header>()),
                 0,
-                ARENA_SLOTS * size_of::<Slot>(),
+                ARENA_SLOTS * size_of::<Slot>()
             );
         }
     } else {
@@ -652,7 +649,7 @@ fn open_or_create(name: &str) -> Result<ShmRegion> {
         if !header.compatible() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("SHM segment {name} has an incompatible arena layout"),
+                format!("SHM segment {name} has an incompatible arena layout")
             )));
         }
     }
@@ -668,35 +665,29 @@ pub struct Entry {
     body: (u64, u64),
     encoded: Option<(u64, u64, u8)>,
     stamp: u64,
-    extra: u64,
+    extra: u64
 }
 
 impl Entry {
-    fn pinned(inner: Arc<Inner>, index: usize, generation: u32) -> Self {
+    fn pinned(
+        inner: Arc<Inner>,
+        index: usize,
+        generation: u32
+    ) -> Self {
         let slot = &inner.slots()[index];
-        let body = (
-            slot.body_offset.load(Ordering::Relaxed),
-            slot.body_len.load(Ordering::Relaxed),
-        );
+        let body =
+            (slot.body_offset.load(Ordering::Relaxed), slot.body_len.load(Ordering::Relaxed));
         let encoded_len = slot.encoded_len.load(Ordering::Relaxed);
         let encoded = (encoded_len > 0).then(|| {
             (
                 slot.encoded_offset.load(Ordering::Relaxed),
                 encoded_len,
-                slot.encoding.load(Ordering::Relaxed),
+                slot.encoding.load(Ordering::Relaxed)
             )
         });
         let stamp = slot.stamp.load(Ordering::Relaxed);
         let extra = slot.extra.load(Ordering::Relaxed);
-        Self {
-            inner,
-            slot: index,
-            generation,
-            body,
-            encoded,
-            stamp,
-            extra,
-        }
+        Self { inner, slot: index, generation, body, encoded, stamp, extra }
     }
 
     pub fn body(&self) -> &[u8] {
@@ -705,8 +696,7 @@ impl Entry {
 
     /// The encoded body and its tag, when one was stored.
     pub fn encoded(&self) -> Option<(&[u8], u8)> {
-        self.encoded
-            .map(|(offset, len, tag)| (self.inner.bytes(offset, len), tag))
+        self.encoded.map(|(offset, len, tag)| (self.inner.bytes(offset, len), tag))
     }
 
     pub fn stamp(&self) -> u64 {
@@ -726,35 +716,26 @@ impl Entry {
     /// The identity body as an owner: something a `bytes::Bytes` can be built
     /// over without copying, holding the pin for as long as it lives.
     pub fn into_body(self) -> View {
-        View {
-            entry: self,
-            encoded: false,
-        }
+        View { entry: self, encoded: false }
     }
 
     /// The encoded body as an owner, or the entry back if there is none.
     pub fn into_encoded(self) -> std::result::Result<View, Self> {
-        if self.encoded.is_some() {
-            Ok(View {
-                entry: self,
-                encoded: true,
-            })
-        } else {
-            Err(self)
-        }
+        if self.encoded.is_some() { Ok(View { entry: self, encoded: true }) } else { Err(self) }
     }
 }
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        self.inner.slots()[self.slot]
-            .pins
-            .fetch_sub(1, Ordering::SeqCst);
+        self.inner.slots()[self.slot].pins.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl fmt::Debug for Entry {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         formatter
             .debug_struct("Entry")
             .field("slot", &self.slot)
@@ -768,7 +749,7 @@ impl fmt::Debug for Entry {
 /// One body of a pinned entry, as a slice owner.
 pub struct View {
     entry: Entry,
-    encoded: bool,
+    encoded: bool
 }
 
 impl View {
@@ -810,12 +791,7 @@ mod tests {
         let key = Key::new(7);
         assert!(arena.get(key).is_none());
 
-        arena
-            .put(
-                key,
-                Record::body(b"hello").encoded(b"h", 1).stamp(42).extra(5),
-            )
-            .unwrap();
+        arena.put(key, Record::body(b"hello").encoded(b"h", 1).stamp(42).extra(5)).unwrap();
         let entry = arena.get(key).unwrap();
         assert_eq!(entry.body(), b"hello");
         assert_eq!(entry.encoded(), Some((&b"h"[..], 1)));
@@ -840,9 +816,7 @@ mod tests {
         let chunk = vec![0xAB_u8; ARENA_RECORD_MAX];
         let records = ARENA_BYTES / ARENA_RECORD_MAX; // fills the ring exactly
         for n in 0..records {
-            arena
-                .put(Key::new(n as u128), Record::body(&chunk))
-                .unwrap();
+            arena.put(Key::new(n as u128), Record::body(&chunk)).unwrap();
         }
         assert_eq!(arena.len(), records);
 
@@ -850,14 +824,8 @@ mod tests {
         let pinned = arena.get(Key::new(0)).unwrap();
         arena.put(Key::new(1_000), Record::body(&chunk)).unwrap();
         assert_eq!(pinned.body().len(), ARENA_RECORD_MAX);
-        assert!(
-            arena.get(Key::new(0)).is_some(),
-            "a pinned record is not evicted"
-        );
-        assert!(
-            arena.get(Key::new(1)).is_none(),
-            "the cursor moved past the pin"
-        );
+        assert!(arena.get(Key::new(0)).is_some(), "a pinned record is not evicted");
+        assert!(arena.get(Key::new(1)).is_none(), "the cursor moved past the pin");
         drop(pinned);
 
         let too_big = vec![0_u8; ARENA_RECORD_MAX + 1];
@@ -890,9 +858,7 @@ mod tests {
     #[test]
     fn a_view_owns_the_pin() {
         let arena = arena();
-        arena
-            .put(Key::new(3), Record::body(b"body").encoded(b"enc", 2))
-            .unwrap();
+        arena.put(Key::new(3), Record::body(b"body").encoded(b"enc", 2)).unwrap();
         let view = arena.get(Key::new(3)).unwrap().into_encoded().ok().unwrap();
         assert_eq!(view.as_ref(), b"enc");
         let view = arena.get(Key::new(3)).unwrap().into_body();

@@ -57,7 +57,7 @@ pub enum ShmValidation {
     /// No object currently exists under the requested name.
     Missing,
     /// The object exists and can safely back at least the requested mapping.
-    Valid { actual_size: usize },
+    Valid { actual_size: usize }
 }
 
 /// A mapped POSIX SHM region. Drop unmaps; `unlink` removes the
@@ -77,7 +77,7 @@ pub struct ShmRegion {
     /// True when this handle was the one that *created* the segment
     /// (so it knows to `shm_unlink` if asked). Other attachers see
     /// `false`.
-    created: bool,
+    created: bool
 }
 
 impl ShmRegion {
@@ -89,7 +89,10 @@ impl ShmRegion {
     /// are accepted because some platforms report page-rounded SHM sizes.
     /// The owning ring or table remains responsible for validating its own
     /// persisted ABI header after mapping.
-    pub fn validate_existing(name: &str, minimum_size: usize) -> io::Result<ShmValidation> {
+    pub fn validate_existing(
+        name: &str,
+        minimum_size: usize
+    ) -> io::Result<ShmValidation> {
         let cname = CString::new(name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
         let raw_fd = loop {
@@ -123,7 +126,10 @@ impl ShmRegion {
     /// It is kept crate-private so callers receive a capability such as a
     /// read-only ring view rather than a [`ShmRegion`] that also exposes
     /// lifecycle and writable-pointer operations.
-    pub(crate) fn open_existing_read_only(name: &str, minimum_size: usize) -> io::Result<Self> {
+    pub(crate) fn open_existing_read_only(
+        name: &str,
+        minimum_size: usize
+    ) -> io::Result<Self> {
         let cname = CString::new(name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
         let raw_fd = loop {
@@ -158,7 +164,7 @@ impl ShmRegion {
                 libc::PROT_READ,
                 libc::MAP_SHARED,
                 fd.as_raw_fd(),
-                0,
+                0
             )
         };
         if ptr == libc::MAP_FAILED {
@@ -173,7 +179,7 @@ impl ShmRegion {
             process_lock: false,
             ptr,
             len: actual_size,
-            created: false,
+            created: false
         })
     }
 
@@ -184,7 +190,10 @@ impl ShmRegion {
     /// later opens verify the existing object before mapping it. Some
     /// platforms report a page-rounded SHM size, so a larger `st_size`
     /// is valid; the owning data structure must verify its own header.
-    pub fn open_or_create(name: &str, size: usize) -> io::Result<Self> {
+    pub fn open_or_create(
+        name: &str,
+        size: usize
+    ) -> io::Result<Self> {
         let (region, initialization_lock) = Self::open_or_create_inner(name, size, false)?;
         debug_assert!(initialization_lock.is_none());
         Ok(region)
@@ -193,36 +202,33 @@ impl ShmRegion {
     /// Open or create a region while holding its process lock through caller
     /// initialization. This prevents a peer from observing the interval
     /// between `shm_open` and the owning data structure's initialized header.
-    pub fn open_or_create_locked(name: &str, size: usize) -> io::Result<(Self, ShmRegionLock)> {
+    pub fn open_or_create_locked(
+        name: &str,
+        size: usize
+    ) -> io::Result<(Self, ShmRegionLock)> {
         let (region, initialization_lock) = Self::open_or_create_inner(name, size, true)?;
         Ok((
             region,
-            initialization_lock.expect("locked SHM open must return its initialization lock"),
+            initialization_lock.expect("locked SHM open must return its initialization lock")
         ))
     }
 
     fn open_or_create_inner(
         name: &str,
         size: usize,
-        process_lock: bool,
+        process_lock: bool
     ) -> io::Result<(Self, Option<ShmRegionLock>)> {
         let cname = CString::new(name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
         let lock_path = lock_file_path(name);
-        let initialization_lock = if process_lock {
-            Some(lock_path_exclusive(&lock_path)?)
-        } else {
-            None
-        };
+        let initialization_lock =
+            if process_lock { Some(lock_path_exclusive(&lock_path)?) } else { None };
 
         // Try create-exclusive first; if it already exists, open.
         let (raw_fd, created) = unsafe {
             // SAFETY: passing a valid C string and well-known POSIX flags.
-            let fd = libc::shm_open(
-                cname.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            );
+            let fd =
+                libc::shm_open(cname.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600);
             if fd >= 0 {
                 (fd, true)
             } else {
@@ -282,7 +288,7 @@ impl ShmRegion {
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
                 fd.as_raw_fd(),
-                0,
+                0
             )
         };
 
@@ -298,15 +304,8 @@ impl ShmRegion {
         let ptr = NonNull::new(ptr.cast::<u8>()).expect("mmap returned non-null on success");
 
         Ok((
-            Self {
-                name: cname,
-                lock_path,
-                process_lock,
-                ptr,
-                len: size,
-                created,
-            },
-            initialization_lock,
+            Self { name: cname, lock_path, process_lock, ptr, len: size, created },
+            initialization_lock
         ))
     }
 
@@ -339,7 +338,7 @@ impl ShmRegion {
         if !self.process_lock {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "SHM region was opened without a process lock",
+                "SHM region was opened without a process lock"
             ));
         }
         lock_path_exclusive(&self.lock_path)
@@ -350,16 +349,12 @@ impl ShmRegion {
         if !self.process_lock {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "SHM region was opened without a process lock",
+                "SHM region was opened without a process lock"
             ));
         }
         let lock_fd = open_lock_file(&self.lock_path)?;
         let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 {
-            Ok(ShmRegionLock { lock_fd })
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        if rc == 0 { Ok(ShmRegionLock { lock_fd }) } else { Err(io::Error::last_os_error()) }
     }
 
     /// Remove the underlying segment name. Existing mappings stay
@@ -371,18 +366,14 @@ impl ShmRegion {
         let shm_error = if rc != 0 {
             let err = io::Error::last_os_error();
             // ENOENT is fine — segment was already unlinked.
-            if err.raw_os_error() == Some(libc::ENOENT) {
-                None
-            } else {
-                Some(err)
-            }
+            if err.raw_os_error() == Some(libc::ENOENT) { None } else { Some(err) }
         } else {
             None
         };
         let lock_error = match std::fs::remove_file(&self.lock_path) {
             Ok(()) => None,
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => Some(error),
+            Err(error) => Some(error)
         };
         if let Some(error) = shm_error.or(lock_error) {
             return Err(error);
@@ -391,7 +382,10 @@ impl ShmRegion {
     }
 }
 
-fn shm_object_size(fd: &OwnedFd, name: &str) -> io::Result<usize> {
+fn shm_object_size(
+    fd: &OwnedFd,
+    name: &str
+) -> io::Result<usize> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `fd` is valid and `stat` points to writable storage.
     let stat_rc = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
@@ -403,18 +397,22 @@ fn shm_object_size(fd: &OwnedFd, name: &str) -> io::Result<usize> {
     usize::try_from(actual_size).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("SHM segment {name} reported invalid size {actual_size}"),
+            format!("SHM segment {name} reported invalid size {actual_size}")
         )
     })
 }
 
-fn validate_minimum_size(name: &str, actual_size: usize, minimum_size: usize) -> io::Result<()> {
+fn validate_minimum_size(
+    name: &str,
+    actual_size: usize,
+    minimum_size: usize
+) -> io::Result<()> {
     if actual_size < minimum_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "SHM segment {name} size {actual_size} is smaller than requested mapping {minimum_size}"
-            ),
+            )
         ));
     }
     Ok(())
@@ -425,7 +423,7 @@ fn validate_minimum_size(name: &str, actual_size: usize, minimum_size: usize) ->
 /// Semantic crates use this when a current-state transition must be atomic
 /// across fleet processes. Dropping the guard releases the kernel lock.
 pub struct ShmRegionLock {
-    lock_fd: OwnedFd,
+    lock_fd: OwnedFd
 }
 
 impl Drop for ShmRegionLock {
@@ -461,10 +459,7 @@ fn open_lock_file(lock_path: &Path) -> io::Result<OwnedFd> {
     if owner != uid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!(
-                "{} is owned by uid {owner} rather than {uid}",
-                lock_path.display()
-            ),
+            format!("{} is owned by uid {owner} rather than {uid}", lock_path.display())
         ));
     }
 
@@ -500,7 +495,10 @@ unsafe impl Send for ShmRegion {}
 unsafe impl Sync for ShmRegion {}
 
 /// Build the conventional name for an Orbit ring segment.
-pub fn ring_segment_name(fleet_name: &str, kind: u8) -> String {
+pub fn ring_segment_name(
+    fleet_name: &str,
+    kind: u8
+) -> String {
     // SAFETY: `geteuid` always returns a value; no error path.
     let uid = unsafe { libc::geteuid() };
     ring_segment_name_for_uid(fleet_name, kind, uid)
@@ -510,7 +508,11 @@ pub fn ring_segment_name(fleet_name: &str, kind: u8) -> String {
 ///
 /// This form is intended for inspection and lifecycle tools that need to
 /// address a user other than their own effective uid.
-pub fn ring_segment_name_for_uid(fleet_name: &str, kind: u8, uid: u32) -> String {
+pub fn ring_segment_name_for_uid(
+    fleet_name: &str,
+    kind: u8,
+    uid: u32
+) -> String {
     format!("/{SHM_NAMESPACE}-{fleet_name}-{kind}-{uid}")
 }
 
@@ -521,7 +523,10 @@ pub fn fleet_lock_path(fleet_name: &str) -> PathBuf {
 
 /// The same for another user's fleet, for lifecycle tools that address a uid
 /// other than their own.
-pub fn fleet_lock_path_for_uid(fleet_name: &str, uid: u32) -> PathBuf {
+pub fn fleet_lock_path_for_uid(
+    fleet_name: &str,
+    uid: u32
+) -> PathBuf {
     lock_dir_for_uid(uid).join(format!("{SHM_NAMESPACE}-{fleet_name}.fleet"))
 }
 
@@ -531,7 +536,7 @@ pub fn fleet_lock_path_for_uid(fleet_name: &str, uid: u32) -> PathBuf {
 /// contends with, so a tool that removes the fleet's segments cannot do so
 /// while any member is alive.
 pub struct FleetMembership {
-    lock_fd: OwnedFd,
+    lock_fd: OwnedFd
 }
 
 impl Drop for FleetMembership {
@@ -558,7 +563,10 @@ pub fn join_fleet_membership(fleet_name: &str) -> io::Result<FleetMembership> {
 /// there is deliberately no way to force past it. `Ok(Some(_))` keeps the
 /// fleet closed to new members until the guard is dropped, so a removal
 /// cannot interleave with a start. Never waits.
-pub fn try_lock_fleet_exclusive(fleet_name: &str, uid: u32) -> io::Result<Option<ShmRegionLock>> {
+pub fn try_lock_fleet_exclusive(
+    fleet_name: &str,
+    uid: u32
+) -> io::Result<Option<ShmRegionLock>> {
     // Creating the file when no member ever joined is right: the guard then
     // keeps a first member from starting in the middle of a removal.
     let lock_fd = open_lock_file(&fleet_lock_path_for_uid(fleet_name, uid))?;
@@ -627,7 +635,7 @@ fn ensure_lock_dir(dir: &Path) -> io::Result<()> {
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
+        Err(error) => return Err(error)
     }
 
     ensure_private_dir(dir, uid)
@@ -638,15 +646,17 @@ fn ensure_lock_dir(dir: &Path) -> io::Result<()> {
 /// `symlink_metadata` rather than `metadata`: a symlink pointing at a directory
 /// we do own would otherwise pass while the lock files landed somewhere the
 /// attacker chose.
-fn ensure_private_dir(dir: &Path, uid: u32) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    use std::os::unix::fs::PermissionsExt;
+fn ensure_private_dir(
+    dir: &Path,
+    uid: u32
+) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let metadata = std::fs::symlink_metadata(dir)?;
     if !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{} is not a directory", dir.display()),
+            format!("{} is not a directory", dir.display())
         ));
     }
     if metadata.uid() != uid {
@@ -657,7 +667,7 @@ fn ensure_private_dir(dir: &Path, uid: u32) -> io::Result<()> {
                  another user controls",
                 dir.display(),
                 metadata.uid()
-            ),
+            )
         ));
     }
     if metadata.permissions().mode() & 0o077 != 0 {
@@ -667,7 +677,7 @@ fn ensure_private_dir(dir: &Path, uid: u32) -> io::Result<()> {
                 "{} is mode {:o}; refusing to lock in a directory others can write to",
                 dir.display(),
                 metadata.permissions().mode() & 0o777
-            ),
+            )
         ));
     }
 
@@ -686,11 +696,7 @@ mod fleet_lock_tests {
         let uid = unsafe { libc::geteuid() };
 
         let member = join_fleet_membership(&fleet).expect("join");
-        assert!(
-            try_lock_fleet_exclusive(&fleet, uid)
-                .expect("try")
-                .is_none()
-        );
+        assert!(try_lock_fleet_exclusive(&fleet, uid).expect("try").is_none());
 
         drop(member);
         let exclusive = try_lock_fleet_exclusive(&fleet, uid).expect("try");

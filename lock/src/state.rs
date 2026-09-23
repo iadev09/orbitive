@@ -34,14 +34,14 @@ pub(crate) struct LockStateStore<L: LockLayout> {
     backend: StateBacking,
     state_kind: u8,
     node_id: NodeId,
-    _layout: PhantomData<L>,
+    _layout: PhantomData<L>
 }
 
 #[derive(Clone)]
 enum StateBacking {
     InMemory(Arc<Mutex<MemoryTable>>),
     #[cfg(unix)]
-    Shm(Arc<ShmStateStore>),
+    Shm(Arc<ShmStateStore>)
 }
 
 impl<L: LockLayout> LockStateStore<L> {
@@ -51,7 +51,7 @@ impl<L: LockLayout> LockStateStore<L> {
             {
                 StateBacking::Shm(Arc::new(ShmStateStore::new(&ring_segment_name(
                     fleet.name(),
-                    L::STATE_KIND,
+                    L::STATE_KIND
                 ))))
             }
             #[cfg(not(unix))]
@@ -63,7 +63,7 @@ impl<L: LockLayout> LockStateStore<L> {
             backend,
             state_kind: L::STATE_KIND,
             node_id: fleet.node_id(),
-            _layout: PhantomData,
+            _layout: PhantomData
         }
     }
 
@@ -73,7 +73,7 @@ impl<L: LockLayout> LockStateStore<L> {
         owner: &LockOwner,
         now_ms: u64,
         expires_at_ms: u64,
-        publish: impl FnOnce(&LockTransition) -> Result<()>,
+        publish: impl FnOnce(&LockTransition) -> Result<()>
     ) -> Result<LockAcquire> {
         validate_entry(key, owner)?;
         self.with_table(|header, slots| {
@@ -101,16 +101,14 @@ impl<L: LockLayout> LockStateStore<L> {
                 }
             }
 
-            let index = insertion.ok_or(Error::StateFull {
-                capacity: slots.len(),
-            })?;
+            let index = insertion.ok_or(Error::StateFull { capacity: slots.len() })?;
             let lease = LockLease {
                 lock_id: mint_lock_id(header, self.state_kind, self.node_id)?,
                 key: key.clone(),
                 owner: owner.clone(),
                 acquired_at_ms: now_ms,
                 expires_at_ms,
-                state_revision: mint_revision(header)?,
+                state_revision: mint_revision(header)?
             };
             publish(&LockTransition::Acquired(lease.clone()))?;
             slots[index].write(hash, &lease);
@@ -123,7 +121,7 @@ impl<L: LockLayout> LockStateStore<L> {
         lease: &LockLease,
         now_ms: u64,
         requested_expires_at_ms: u64,
-        publish: impl FnOnce(&LockTransition) -> Result<()>,
+        publish: impl FnOnce(&LockTransition) -> Result<()>
     ) -> Result<Option<LockLease>> {
         validate_entry(&lease.key, &lease.owner)?;
         self.with_table(|header, slots| {
@@ -143,7 +141,7 @@ impl<L: LockLayout> LockStateStore<L> {
         owner: &LockOwner,
         now_ms: u64,
         requested_expires_at_ms: u64,
-        publish: impl FnOnce(&LockTransition) -> Result<()>,
+        publish: impl FnOnce(&LockTransition) -> Result<()>
     ) -> Result<Option<LockLease>> {
         validate_entry(key, owner)?;
         self.with_table(|header, slots| {
@@ -161,7 +159,7 @@ impl<L: LockLayout> LockStateStore<L> {
         &self,
         lease: &LockLease,
         now_ms: u64,
-        publish: impl FnOnce(&LockTransition) -> Result<()>,
+        publish: impl FnOnce(&LockTransition) -> Result<()>
     ) -> Result<bool> {
         validate_entry(&lease.key, &lease.owner)?;
         self.with_table(|header, slots| {
@@ -180,7 +178,7 @@ impl<L: LockLayout> LockStateStore<L> {
         key: &LockKey,
         owner: &LockOwner,
         now_ms: u64,
-        publish: impl FnOnce(&LockTransition) -> Result<()>,
+        publish: impl FnOnce(&LockTransition) -> Result<()>
     ) -> Result<bool> {
         validate_entry(key, owner)?;
         self.with_table(|header, slots| {
@@ -198,7 +196,7 @@ impl<L: LockLayout> LockStateStore<L> {
         &self,
         key: &LockKey,
         now_ms: u64,
-        publish: impl FnOnce(&LockTransition) -> Result<()>,
+        publish: impl FnOnce(&LockTransition) -> Result<()>
     ) -> Result<bool> {
         validate_key(key)?;
         self.with_table(|header, slots| {
@@ -214,7 +212,11 @@ impl<L: LockLayout> LockStateStore<L> {
         })
     }
 
-    pub(crate) fn current(&self, key: &LockKey, now_ms: u64) -> Result<Option<LockLease>> {
+    pub(crate) fn current(
+        &self,
+        key: &LockKey,
+        now_ms: u64
+    ) -> Result<Option<LockLease>> {
         validate_key(key)?;
         self.with_table(|_header, slots| Ok(live_slot(slots, key, now_ms).map(|slot| slot.lease())))
     }
@@ -234,13 +236,13 @@ impl<L: LockLayout> LockStateStore<L> {
     pub(crate) fn unlink(&self) -> Result<()> {
         match &self.backend {
             StateBacking::InMemory(_) => self.reset(),
-            StateBacking::Shm(store) => store.open()?.unlink().map_err(Error::Io),
+            StateBacking::Shm(store) => store.open()?.unlink().map_err(Error::Io)
         }
     }
 
     fn with_table<T>(
         &self,
-        operation: impl FnOnce(&LockStateHeader, &mut [LockStateSlot]) -> Result<T>,
+        operation: impl FnOnce(&LockStateHeader, &mut [LockStateSlot]) -> Result<T>
     ) -> Result<T> {
         match &self.backend {
             StateBacking::InMemory(table) => {
@@ -249,7 +251,7 @@ impl<L: LockLayout> LockStateStore<L> {
                 operation(header, slots)
             }
             #[cfg(unix)]
-            StateBacking::Shm(store) => store.open()?.with_table(operation).map_err(Error::Io)?,
+            StateBacking::Shm(store) => store.open()?.with_table(operation).map_err(Error::Io)?
         }
     }
 }
@@ -258,7 +260,7 @@ fn renew_slot(
     header: &LockStateHeader,
     slot: &mut LockStateSlot,
     requested_expires_at_ms: u64,
-    publish: impl FnOnce(&LockTransition) -> Result<()>,
+    publish: impl FnOnce(&LockTransition) -> Result<()>
 ) -> Result<Option<LockLease>> {
     let mut lease = slot.lease();
     lease.expires_at_ms = lease.expires_at_ms.max(requested_expires_at_ms);
@@ -272,7 +274,7 @@ fn renew_slot(
 fn release_slot(
     header: &LockStateHeader,
     slot: &mut LockStateSlot,
-    publish: impl FnOnce(&LockTransition) -> Result<()>,
+    publish: impl FnOnce(&LockTransition) -> Result<()>
 ) -> Result<bool> {
     let lease = slot.lease();
     let state_revision = mint_revision(header)?;
@@ -280,7 +282,7 @@ fn release_slot(
         lock_id: lease.lock_id,
         key: lease.key,
         owner: lease.owner,
-        state_revision,
+        state_revision
     })?;
     slot.tombstone();
     Ok(true)
@@ -289,7 +291,7 @@ fn release_slot(
 fn live_slot<'a>(
     slots: &'a mut [LockStateSlot],
     key: &LockKey,
-    now_ms: u64,
+    now_ms: u64
 ) -> Option<&'a mut LockStateSlot> {
     let hash = lock_hash(key);
     let index = find_slot(slots, hash, key)?;
@@ -302,7 +304,11 @@ fn live_slot<'a>(
     }
 }
 
-fn find_slot(slots: &[LockStateSlot], hash: u64, key: &LockKey) -> Option<usize> {
+fn find_slot(
+    slots: &[LockStateSlot],
+    hash: u64,
+    key: &LockKey
+) -> Option<usize> {
     for offset in 0..slots.len() {
         let index = probe_index(hash, offset, slots.len());
         let slot = &slots[index];
@@ -330,13 +336,16 @@ fn validate_key(key: &LockKey) -> Result<()> {
             namespace_len: key.namespace().len(),
             key_len: key.label().len(),
             owner_len: 0,
-            max_payload: LOCK_STATE_PAYLOAD_MAX,
+            max_payload: LOCK_STATE_PAYLOAD_MAX
         });
     }
     Ok(())
 }
 
-fn validate_entry(key: &LockKey, owner: &LockOwner) -> Result<()> {
+fn validate_entry(
+    key: &LockKey,
+    owner: &LockOwner
+) -> Result<()> {
     validate_key(key)?;
     if owner.as_bytes().is_empty() {
         return Err(Error::OwnerEmpty);
@@ -355,13 +364,17 @@ fn validate_entry(key: &LockKey, owner: &LockOwner) -> Result<()> {
             namespace_len: key.namespace().len(),
             key_len: key.label().len(),
             owner_len: owner.as_bytes().len(),
-            max_payload: LOCK_STATE_PAYLOAD_MAX,
+            max_payload: LOCK_STATE_PAYLOAD_MAX
         });
     }
     Ok(())
 }
 
-fn mint_lock_id(header: &LockStateHeader, state_kind: u8, node_id: NodeId) -> Result<NetId64> {
+fn mint_lock_id(
+    header: &LockStateHeader,
+    state_kind: u8,
+    node_id: NodeId
+) -> Result<NetId64> {
     let current = header.next_lock.load(Ordering::Relaxed);
     let counter = current.checked_add(1).ok_or(Error::IdExhausted)?;
     if counter > LOCK_COUNTER_MAX {
@@ -387,7 +400,11 @@ fn lock_hash(key: &LockKey) -> u64 {
     hash
 }
 
-fn probe_index(hash: u64, offset: usize, capacity: usize) -> usize {
+fn probe_index(
+    hash: u64,
+    offset: usize,
+    capacity: usize
+) -> usize {
     debug_assert!(capacity.is_power_of_two());
     (hash as usize).wrapping_add(offset) & (capacity - 1)
 }
@@ -401,7 +418,7 @@ struct MemoryTable {
     /// reused by another fleet while this table lives.
     _fleet: Arc<Fleet>,
     header: LockStateHeader,
-    slots: Vec<LockStateSlot>,
+    slots: Vec<LockStateSlot>
 }
 
 impl MemoryTable {
@@ -409,9 +426,7 @@ impl MemoryTable {
         Self {
             _fleet: fleet,
             header: LockStateHeader::new(),
-            slots: (0..LOCK_STATE_CAPACITY)
-                .map(|_| LockStateSlot::empty())
-                .collect(),
+            slots: (0..LOCK_STATE_CAPACITY).map(|_| LockStateSlot::empty()).collect()
         }
     }
 }
@@ -420,14 +435,14 @@ type MemoryRegistry = HashMap<(usize, u8), Weak<Mutex<MemoryTable>>>;
 static MEMORY_TABLES: LazyLock<Mutex<MemoryRegistry>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn memory_table(fleet: &Arc<Fleet>, state_kind: u8) -> Arc<Mutex<MemoryTable>> {
+fn memory_table(
+    fleet: &Arc<Fleet>,
+    state_kind: u8
+) -> Arc<Mutex<MemoryTable>> {
     let fleet_identity = Arc::as_ptr(fleet) as usize;
     let mut tables = lock_unpoisoned(&MEMORY_TABLES);
     tables.retain(|_, table| table.strong_count() > 0);
-    if let Some(table) = tables
-        .get(&(fleet_identity, state_kind))
-        .and_then(Weak::upgrade)
-    {
+    if let Some(table) = tables.get(&(fleet_identity, state_kind)).and_then(Weak::upgrade) {
         return table;
     }
     let table = Arc::new(Mutex::new(MemoryTable::new(Arc::clone(fleet))));
@@ -450,7 +465,7 @@ struct LockStateHeader {
     slot_size: u32,
     next_lock: AtomicU64,
     next_revision: AtomicU64,
-    _reserved: [u8; 32],
+    _reserved: [u8; 32]
 }
 
 impl LockStateHeader {
@@ -469,7 +484,7 @@ impl LockStateHeader {
             slot_size: std::mem::size_of::<LockStateSlot>() as u32,
             next_lock: AtomicU64::new(0),
             next_revision: AtomicU64::new(0),
-            _reserved: [0; 32],
+            _reserved: [0; 32]
         }
     }
 }
@@ -486,7 +501,7 @@ struct LockStateSlot {
     state_revision: u64,
     acquired_at_ms: u64,
     expires_at_ms: u64,
-    payload: [u8; LOCK_STATE_PAYLOAD_MAX],
+    payload: [u8; LOCK_STATE_PAYLOAD_MAX]
 }
 
 impl LockStateSlot {
@@ -502,7 +517,7 @@ impl LockStateSlot {
             state_revision: 0,
             acquired_at_ms: 0,
             expires_at_ms: 0,
-            payload: [0; LOCK_STATE_PAYLOAD_MAX],
+            payload: [0; LOCK_STATE_PAYLOAD_MAX]
         }
     }
 
@@ -526,7 +541,11 @@ impl LockStateSlot {
         &self.payload[start..end]
     }
 
-    fn matches(&self, hash: u64, key: &LockKey) -> bool {
+    fn matches(
+        &self,
+        hash: u64,
+        key: &LockKey
+    ) -> bool {
         self.state() == SLOT_OCCUPIED
             && self.key_hash == hash
             && self.namespace_bytes() == key.namespace()
@@ -538,16 +557,20 @@ impl LockStateSlot {
             lock_id: NetId64::from_raw(self.lock_id),
             key: LockKey::from_parts(
                 bytes::Bytes::copy_from_slice(self.namespace_bytes()),
-                bytes::Bytes::copy_from_slice(self.key_bytes()),
+                bytes::Bytes::copy_from_slice(self.key_bytes())
             ),
             owner: LockOwner::from(bytes::Bytes::copy_from_slice(self.owner())),
             acquired_at_ms: self.acquired_at_ms,
             expires_at_ms: self.expires_at_ms,
-            state_revision: self.state_revision,
+            state_revision: self.state_revision
         }
     }
 
-    fn write(&mut self, hash: u64, lease: &LockLease) {
+    fn write(
+        &mut self,
+        hash: u64,
+        lease: &LockLease
+    ) {
         self.state.store(SLOT_TOMBSTONE, Ordering::Release);
         self.namespace_len = lease.key.namespace().len() as u16;
         self.key_len = lease.key.label().len() as u16;
@@ -580,16 +603,13 @@ impl LockStateSlot {
 #[cfg(unix)]
 struct ShmStateStore {
     name: String,
-    opened: Mutex<Option<Arc<ShmLockTable>>>,
+    opened: Mutex<Option<Arc<ShmLockTable>>>
 }
 
 #[cfg(unix)]
 impl ShmStateStore {
     fn new(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            opened: Mutex::new(None),
-        }
+        Self { name: name.to_owned(), opened: Mutex::new(None) }
     }
 
     fn open(&self) -> Result<Arc<ShmLockTable>> {
@@ -606,28 +626,24 @@ impl ShmStateStore {
 #[cfg(unix)]
 struct ShmLockTable {
     region: ShmRegion,
-    local_lock: Mutex<()>,
+    local_lock: Mutex<()>
 }
 
 #[cfg(unix)]
 impl ShmLockTable {
     fn open_or_create(name: &str) -> Result<Self> {
-        use std::io;
-        use std::ptr;
+        use std::{io, ptr};
 
         let (region, _initialization_lock) =
             ShmRegion::open_or_create_locked(name, shm_segment_size())?;
         if region.created() {
             unsafe {
-                ptr::write(
-                    region.as_ptr().cast::<LockStateHeader>(),
-                    LockStateHeader::new(),
-                );
+                ptr::write(region.as_ptr().cast::<LockStateHeader>(), LockStateHeader::new());
                 let slots = region.as_ptr().add(std::mem::size_of::<LockStateHeader>());
                 ptr::write_bytes(
                     slots,
                     0,
-                    LOCK_STATE_CAPACITY * std::mem::size_of::<LockStateSlot>(),
+                    LOCK_STATE_CAPACITY * std::mem::size_of::<LockStateSlot>()
                 );
             }
         } else {
@@ -638,7 +654,7 @@ impl ShmLockTable {
                     format!(
                         "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{STATE_MAGIC:08X})",
                         header.magic
-                    ),
+                    )
                 )));
             }
             if header.version != STATE_VERSION
@@ -648,20 +664,17 @@ impl ShmLockTable {
             {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("SHM segment {name} has an incompatible lock-state layout"),
+                    format!("SHM segment {name} has an incompatible lock-state layout")
                 )));
             }
         }
 
-        Ok(Self {
-            region,
-            local_lock: Mutex::new(()),
-        })
+        Ok(Self { region, local_lock: Mutex::new(()) })
     }
 
     fn with_table<T>(
         &self,
-        operation: impl FnOnce(&LockStateHeader, &mut [LockStateSlot]) -> Result<T>,
+        operation: impl FnOnce(&LockStateHeader, &mut [LockStateSlot]) -> Result<T>
     ) -> std::io::Result<Result<T>> {
         let _local = lock_unpoisoned(&self.local_lock);
         let _process = self.region.lock_exclusive()?;
@@ -672,7 +685,7 @@ impl ShmLockTable {
                     .as_ptr()
                     .add(std::mem::size_of::<LockStateHeader>())
                     .cast::<LockStateSlot>(),
-                LOCK_STATE_CAPACITY,
+                LOCK_STATE_CAPACITY
             )
         };
         Ok(operation(header, slots))

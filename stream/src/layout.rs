@@ -59,11 +59,15 @@ pub(crate) struct Header {
     /// created, advanced by every quiescent reset, and carried in every
     /// ticket, so a ticket from before a reset never matches after it.
     pub(crate) epoch: AtomicU64,
-    _reserved2: [u8; 32],
+    _reserved2: [u8; 32]
 }
 
 impl Header {
-    pub(crate) fn new(fleet_capacity: u16, geometry: &Geometry, epoch: u64) -> Self {
+    pub(crate) fn new(
+        fleet_capacity: u16,
+        geometry: &Geometry,
+        epoch: u64
+    ) -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
@@ -74,14 +78,18 @@ impl Header {
             fleet_capacity,
             _reserved: [0; 2],
             epoch: AtomicU64::new(epoch),
-            _reserved2: [0; 32],
+            _reserved2: [0; 32]
         }
     }
 
     /// The geometry a peer built its side with is part of the wire
     /// contract: a segment opened under one kind answers only to that
     /// kind's lane and ring size.
-    pub(crate) fn compatible(&self, fleet_capacity: u16, geometry: &Geometry) -> bool {
+    pub(crate) fn compatible(
+        &self,
+        fleet_capacity: u16,
+        geometry: &Geometry
+    ) -> bool {
         self.magic == MAGIC
             && self.version == VERSION
             && usize::from(self.header_size) == size_of::<Self>()
@@ -101,7 +109,7 @@ pub(crate) struct Doorbell {
     /// Whose driver is listening, so a death report for that incarnation
     /// can stop writers from ringing a bell nobody answers.
     pub(crate) incarnation: AtomicU64,
-    _padding: [u8; 48],
+    _padding: [u8; 48]
 }
 
 /// One direction of a stream: a single-producer, single-consumer byte ring
@@ -117,7 +125,7 @@ pub(crate) struct Direction {
     /// waiter parks on. 32 bits because that is what the platform waits want.
     pub(crate) changes: AtomicU32,
     pub(crate) waiters: AtomicU32,
-    _padding: [u8; 4],
+    _padding: [u8; 4]
 }
 
 impl Direction {
@@ -150,11 +158,14 @@ pub(crate) struct Slot {
     pub(crate) incarnation: [AtomicU64; 2],
     _padding: [u8; 32],
     /// `directions[0]` carries A -> B, `directions[1]` carries B -> A.
-    pub(crate) directions: [Direction; 2],
+    pub(crate) directions: [Direction; 2]
 }
 
 impl Slot {
-    pub(crate) fn is(&self, generation: u32) -> bool {
+    pub(crate) fn is(
+        &self,
+        generation: u32
+    ) -> bool {
         // `Acquire` on `state` publishes the generation written by `install`.
         self.state.load(Ordering::Acquire) == SLOT_LIVE
             && self.generation.load(Ordering::Relaxed) == generation
@@ -163,7 +174,11 @@ impl Slot {
     /// Under the lane owner's allocation lock. Returns the generation the
     /// new stream lives in, bumped on every install so no released id
     /// matches; `None` marks the slot exhausted instead of wrapping.
-    pub(crate) fn install(&self, creator: u16, incarnation: u64) -> Option<u32> {
+    pub(crate) fn install(
+        &self,
+        creator: u16,
+        incarnation: u64
+    ) -> Option<u32> {
         let generation = self.generation.load(Ordering::Relaxed);
         if generation >= GENERATION_LIMIT {
             self.state.store(SLOT_EXHAUSTED, Ordering::Release);
@@ -204,11 +219,14 @@ pub(crate) struct Geometry {
     pub(crate) offers_offset: usize,
     pub(crate) slots_offset: usize,
     pub(crate) buffers_offset: usize,
-    pub(crate) segment_size: usize,
+    pub(crate) segment_size: usize
 }
 
 impl Geometry {
-    pub(crate) fn new(fleet_capacity: u16, spec: StreamSpec) -> Self {
+    pub(crate) fn new(
+        fleet_capacity: u16,
+        spec: StreamSpec
+    ) -> Self {
         let StreamSpec { lane_capacity, buffer_bytes, .. } = spec;
         let fleet_capacity = usize::from(fleet_capacity);
         let total_slots = fleet_capacity * lane_capacity;
@@ -231,11 +249,15 @@ impl Geometry {
             offers_offset,
             slots_offset,
             buffers_offset,
-            segment_size,
+            segment_size
         }
     }
 
-    pub(crate) fn buffer_offset(&self, slot: usize, direction: usize) -> usize {
+    pub(crate) fn buffer_offset(
+        &self,
+        slot: usize,
+        direction: usize
+    ) -> usize {
         self.buffers_offset + (slot * 2 + direction) * self.buffer_bytes
     }
 }

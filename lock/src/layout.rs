@@ -10,7 +10,7 @@ pub const LOCK_EVENT_RING_CAPACITY: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_LOCK_EVENT_RING_CAPACITY"), 1_024);
 pub const LOCK_EVENT_RING_PAYLOAD_CAPACITY: usize = orbit_core::compile::usize_from_env(
     option_env!("ORBIT_LOCK_EVENT_RING_PAYLOAD_CAPACITY"),
-    1_024,
+    1_024
 );
 pub const LOCK_EVENT_RING_SPEC: RingSpec =
     RingSpec::per_node(LOCK_EVENT_RING_CAPACITY, LOCK_EVENT_RING_PAYLOAD_CAPACITY);
@@ -47,32 +47,22 @@ impl<L> Clone for LockEventRecord<L> {
 
 impl<L: LockLayout> OrbitTyped for LockEventRecord<L> {
     const KIND: u8 = L::EVENT_RING_KIND;
-    const RING_SPEC: RingSpec = RingSpec::per_node(
-        L::EVENT_RING_SPEC.capacity,
-        L::EVENT_RING_SPEC.payload_capacity,
-    );
+    const RING_SPEC: RingSpec =
+        RingSpec::per_node(L::EVENT_RING_SPEC.capacity, L::EVENT_RING_SPEC.payload_capacity);
 }
 
 pub(crate) fn validate<L: LockLayout>() -> Result<()> {
     if L::STATE_KIND == L::EVENT_RING_KIND {
-        return Err(Error::InvalidLayout(
-            "state and event-ring kinds must differ",
-        ));
+        return Err(Error::InvalidLayout("state and event-ring kinds must differ"));
     }
     if L::EVENT_RING_SPEC.topology != RingTopology::PerNode {
-        return Err(Error::InvalidLayout(
-            "the lock event ring must use per-node lanes",
-        ));
+        return Err(Error::InvalidLayout("the lock event ring must use per-node lanes"));
     }
     if L::EVENT_RING_SPEC.capacity == 0 || !L::EVENT_RING_SPEC.capacity.is_power_of_two() {
-        return Err(Error::InvalidLayout(
-            "event-ring capacity must be a non-zero power of two",
-        ));
+        return Err(Error::InvalidLayout("event-ring capacity must be a non-zero power of two"));
     }
     if L::EVENT_RING_SPEC.payload_capacity < crate::protocol::EVENT_HEADER_LEN + 2 {
-        return Err(Error::InvalidLayout(
-            "event-ring payload cannot fit a lock event",
-        ));
+        return Err(Error::InvalidLayout("event-ring payload cannot fit a lock event"));
     }
     Ok(())
 }

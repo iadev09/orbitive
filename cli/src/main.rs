@@ -19,7 +19,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Command
 }
 
 #[derive(Debug, Subcommand)]
@@ -27,7 +27,7 @@ enum Command {
     /// List shared-memory objects belonging to a fleet.
     List(ListArgs),
     /// Remove shared-memory objects belonging to a stopped fleet.
-    Clear(ClearArgs),
+    Clear(ClearArgs)
 }
 
 #[derive(Debug, Args)]
@@ -38,7 +38,7 @@ struct TargetArgs {
 
     /// Effective user id that owns the objects.
     #[arg(long, value_name = "UID")]
-    uid: Option<u32>,
+    uid: Option<u32>
 }
 
 #[derive(Debug, Args)]
@@ -48,7 +48,7 @@ struct ListArgs {
 
     /// Inspect only one Orbit kind instead of probing all 256 kinds.
     #[arg(long, value_name = "KIND")]
-    kind: Option<u8>,
+    kind: Option<u8>
 }
 
 #[derive(Debug, Args)]
@@ -72,7 +72,7 @@ struct ClearArgs {
 
     /// Confirm a fleet-wide clear.
     #[arg(long)]
-    yes: bool,
+    yes: bool
 }
 
 fn main() -> ExitCode {
@@ -88,7 +88,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::List(args) => list(args),
-        Command::Clear(args) => clear(args),
+        Command::Clear(args) => clear(args)
     }
 }
 
@@ -97,21 +97,13 @@ fn list(args: ListArgs) -> Result<(), Box<dyn Error>> {
     let segments = shm::discover(&args.target.fleet, uid, args.kind)?;
 
     if segments.is_empty() {
-        println!(
-            "No Orbit SHM objects found for fleet={} uid={uid}.",
-            args.target.fleet
-        );
+        println!("No Orbit SHM objects found for fleet={} uid={uid}.", args.target.fleet);
         return Ok(());
     }
 
     println!("{:>4}  {:>12}  NAME", "KIND", "SIZE");
     for segment in segments {
-        println!(
-            "{:>4}  {:>12}  {}",
-            segment.kind,
-            human_size(segment.size),
-            segment.name
-        );
+        println!("{:>4}  {:>12}  {}", segment.kind, human_size(segment.size), segment.name);
     }
 
     Ok(())
@@ -122,10 +114,7 @@ fn clear(args: ClearArgs) -> Result<(), Box<dyn Error>> {
     let segments = shm::discover(&args.target.fleet, uid, args.kind)?;
 
     if segments.is_empty() {
-        println!(
-            "No Orbit SHM objects found for fleet={} uid={uid}.",
-            args.target.fleet
-        );
+        println!("No Orbit SHM objects found for fleet={} uid={uid}.", args.target.fleet);
         return Ok(());
     }
 
@@ -149,16 +138,12 @@ fn clear(args: ClearArgs) -> Result<(), Box<dyn Error>> {
                 println!("removed {}", segment.name);
                 removed += 1;
             }
-            Err(error) => failures.push(format!("{}: {error}", segment.name)),
+            Err(error) => failures.push(format!("{}: {error}", segment.name))
         }
     }
 
     println!("removed={removed} failed={}", failures.len());
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; ").into())
-    }
+    if failures.is_empty() { Ok(()) } else { Err(failures.join("; ").into()) }
 }
 
 fn human_size(bytes: u64) -> String {

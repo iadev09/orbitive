@@ -70,13 +70,13 @@ fn fleet_name(tag: &str) -> &'static str {
 fn pair(name: &'static str) -> (Streams, Streams) {
     let near = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("fleet")),
-        Incarnation::new(1),
+        Incarnation::new(1)
     )
     .expect("streams");
     near.reset_all();
     let far = Streams::new(
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("fleet")),
-        Incarnation::new(2),
+        Incarnation::new(2)
     )
     .expect("streams");
     (near, far)
@@ -102,7 +102,7 @@ fn the_async_adapters_cost_more_wakeups_than_the_blocking_path() {
         while got < total {
             match read.blocking_read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => got += n,
+                Ok(n) => got += n
             }
         }
         got
@@ -140,7 +140,7 @@ fn the_async_adapters_cost_more_wakeups_than_the_blocking_path() {
             while got < total {
                 match read.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => got += n,
+                    Ok(n) => got += n
                 }
             }
             got

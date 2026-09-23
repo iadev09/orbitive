@@ -41,7 +41,7 @@ const TEXT_VERSION: u16 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TextId {
     index: u32,
-    generation: u32,
+    generation: u32
 }
 
 impl TextId {
@@ -58,15 +58,15 @@ impl TextId {
     }
 
     pub const fn from_bits(bits: u64) -> Self {
-        Self {
-            index: (bits >> 32) as u32,
-            generation: bits as u32,
-        }
+        Self { index: (bits >> 32) as u32, generation: bits as u32 }
     }
 }
 
 impl fmt::Display for TextId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
         write!(f, "text:{}:{}", self.index, self.generation)
     }
 }
@@ -80,7 +80,7 @@ impl FromStr for TextId {
         let (index, generation) = rest.split_once(':').ok_or_else(malformed)?;
         Ok(Self {
             index: index.parse().map_err(|_| malformed())?,
-            generation: generation.parse().map_err(|_| malformed())?,
+            generation: generation.parse().map_err(|_| malformed())?
         })
     }
 }
@@ -89,7 +89,7 @@ impl FromStr for TextId {
 #[derive(Clone)]
 pub struct Text {
     table: TextBackend,
-    id: TextId,
+    id: TextId
 }
 
 impl Text {
@@ -128,12 +128,12 @@ impl Text {
     }
 
     /// Replace the text.
-    pub fn store(&self, text: &str) -> Result<()> {
+    pub fn store(
+        &self,
+        text: &str
+    ) -> Result<()> {
         if text.len() > CELL_TEXT_MAX {
-            return Err(Error::TooLong {
-                len: text.len(),
-                max: CELL_TEXT_MAX,
-            });
+            return Err(Error::TooLong { len: text.len(), max: CELL_TEXT_MAX });
         }
         let slot = self.slot()?;
         let _write = slot.writer();
@@ -143,16 +143,16 @@ impl Text {
 
     /// Append to the text, atomically with respect to every other writer;
     /// refused whole, never cut, when the result would not fit.
-    pub fn append(&self, text: &str) -> Result<usize> {
+    pub fn append(
+        &self,
+        text: &str
+    ) -> Result<usize> {
         let slot = self.slot()?;
         let _write = slot.writer();
         let current = usize::from(slot.len.load(Ordering::Relaxed));
         let total = current + text.len();
         if total > CELL_TEXT_MAX {
-            return Err(Error::TooLong {
-                len: total,
-                max: CELL_TEXT_MAX,
-            });
+            return Err(Error::TooLong { len: total, max: CELL_TEXT_MAX });
         }
         slot.write(current, text.as_bytes());
         Ok(total)
@@ -179,7 +179,10 @@ impl Text {
     /// Park until the text has been written since `since`, then return the
     /// sequence now. A released cell wakes every waiter with
     /// [`Error::StaleText`]. Blocking; an async runtime wraps it.
-    pub fn wait_changed(&self, since: u32) -> Result<u32> {
+    pub fn wait_changed(
+        &self,
+        since: u32
+    ) -> Result<u32> {
         loop {
             let slot = self.slot()?;
             let now = slot.version.load(Ordering::SeqCst);
@@ -208,7 +211,7 @@ impl Text {
     pub fn wait_changed_until(
         &self,
         since: u32,
-        interrupt: &core::sync::atomic::AtomicBool,
+        interrupt: &core::sync::atomic::AtomicBool
     ) -> Result<Option<u32>> {
         loop {
             if interrupt.load(Ordering::SeqCst) {
@@ -254,7 +257,7 @@ impl Text {
 pub(crate) enum TextBackend {
     InMemory(Arc<MemoryTextTable>),
     #[cfg(unix)]
-    Shm(Arc<ShmTextTable>),
+    Shm(Arc<ShmTextTable>)
 }
 
 impl TextBackend {
@@ -264,7 +267,7 @@ impl TextBackend {
             {
                 Self::Shm(Arc::new(ShmTextTable::open_or_create(&ring_segment_name(
                     fleet.name(),
-                    CELL_TEXT_KIND,
+                    CELL_TEXT_KIND
                 ))?))
             }
             #[cfg(not(unix))]
@@ -274,12 +277,12 @@ impl TextBackend {
         })
     }
 
-    pub(crate) fn allocate(&self, text: &str) -> Result<Text> {
+    pub(crate) fn allocate(
+        &self,
+        text: &str
+    ) -> Result<Text> {
         if text.len() > CELL_TEXT_MAX {
-            return Err(Error::TooLong {
-                len: text.len(),
-                max: CELL_TEXT_MAX,
-            });
+            return Err(Error::TooLong { len: text.len(), max: CELL_TEXT_MAX });
         }
         let id = self.with_structure(|slots, hint| {
             let capacity = slots.len();
@@ -290,29 +293,26 @@ impl TextBackend {
                 if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
                     let generation = slot.install(text.as_bytes());
                     hint.store(((index + 1) & (capacity - 1)) as u32, Ordering::Relaxed);
-                    return Ok(TextId {
-                        index: index as u32,
-                        generation,
-                    });
+                    return Ok(TextId { index: index as u32, generation });
                 }
             }
             Err(Error::Full { capacity })
         })?;
-        Ok(Text {
-            table: self.clone(),
-            id,
-        })
+        Ok(Text { table: self.clone(), id })
     }
 
-    pub(crate) fn open(&self, id: TextId) -> Result<Text> {
+    pub(crate) fn open(
+        &self,
+        id: TextId
+    ) -> Result<Text> {
         self.slot(id)?;
-        Ok(Text {
-            table: self.clone(),
-            id,
-        })
+        Ok(Text { table: self.clone(), id })
     }
 
-    pub(crate) fn release(&self, id: TextId) -> Result<()> {
+    pub(crate) fn release(
+        &self,
+        id: TextId
+    ) -> Result<()> {
         self.with_structure(|slots, _| {
             let slot = slots
                 .get(id.index as usize)
@@ -326,7 +326,10 @@ impl TextBackend {
         })
     }
 
-    pub(crate) fn is_live(&self, id: TextId) -> bool {
+    pub(crate) fn is_live(
+        &self,
+        id: TextId
+    ) -> bool {
         self.slot(id).is_ok()
     }
 
@@ -346,7 +349,7 @@ impl TextBackend {
     pub(crate) fn unlink(&self) -> Result<()> {
         match self {
             Self::InMemory(_) => self.reset_all(),
-            Self::Shm(table) => table.region.unlink().map_err(Error::Io),
+            Self::Shm(table) => table.region.unlink().map_err(Error::Io)
         }
     }
 
@@ -354,20 +357,20 @@ impl TextBackend {
         match self {
             Self::InMemory(table) => &table.slots,
             #[cfg(unix)]
-            Self::Shm(table) => table.slots(),
+            Self::Shm(table) => table.slots()
         }
     }
 
-    fn slot(&self, id: TextId) -> Result<&TextSlot> {
-        self.slots()
-            .get(id.index as usize)
-            .filter(|slot| slot.is(id))
-            .ok_or(Error::StaleText(id))
+    fn slot(
+        &self,
+        id: TextId
+    ) -> Result<&TextSlot> {
+        self.slots().get(id.index as usize).filter(|slot| slot.is(id)).ok_or(Error::StaleText(id))
     }
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[TextSlot], &AtomicU32) -> Result<T>,
+        operation: impl FnOnce(&[TextSlot], &AtomicU32) -> Result<T>
     ) -> Result<T> {
         match self {
             Self::InMemory(table) => {
@@ -375,7 +378,7 @@ impl TextBackend {
                 operation(&table.slots, &table.hint)
             }
             #[cfg(unix)]
-            Self::Shm(table) => table.with_structure(operation),
+            Self::Shm(table) => table.with_structure(operation)
         }
     }
 }
@@ -394,7 +397,7 @@ struct TextStateHeader {
     capacity: u32,
     slot_size: u32,
     hint: AtomicU32,
-    _reserved: [u8; 44],
+    _reserved: [u8; 44]
 }
 
 impl TextStateHeader {
@@ -412,7 +415,7 @@ impl TextStateHeader {
             capacity: CELL_TEXT_CAPACITY as u32,
             slot_size: size_of::<TextSlot>() as u32,
             hint: AtomicU32::new(0),
-            _reserved: [0; 44],
+            _reserved: [0; 44]
         }
     }
 }
@@ -430,7 +433,7 @@ struct TextSlot {
     version: AtomicU32,
     /// Waiters parked on `version`; a writer wakes only when nonzero.
     waiters: AtomicU32,
-    bytes: [AtomicU8; CELL_TEXT_MAX],
+    bytes: [AtomicU8; CELL_TEXT_MAX]
 }
 
 impl TextSlot {
@@ -442,22 +445,24 @@ impl TextSlot {
             generation: AtomicU32::new(0),
             version: AtomicU32::new(0),
             waiters: AtomicU32::new(0),
-            bytes: std::array::from_fn(|_| AtomicU8::new(0)),
+            bytes: std::array::from_fn(|_| AtomicU8::new(0))
         }
     }
 
-    fn is(&self, id: TextId) -> bool {
+    fn is(
+        &self,
+        id: TextId
+    ) -> bool {
         self.state.load(Ordering::Acquire) == SLOT_OCCUPIED
             && self.generation.load(Ordering::Relaxed) == id.generation
     }
 
     /// Under the structural lock.
-    fn install(&self, text: &[u8]) -> u32 {
-        let generation = self
-            .generation
-            .load(Ordering::Relaxed)
-            .wrapping_add(1)
-            .max(1);
+    fn install(
+        &self,
+        text: &[u8]
+    ) -> u32 {
+        let generation = self.generation.load(Ordering::Relaxed).wrapping_add(1).max(1);
         for (index, byte) in self.bytes.iter().enumerate() {
             byte.store(text.get(index).copied().unwrap_or(0), Ordering::Relaxed);
         }
@@ -472,10 +477,7 @@ impl TextSlot {
 
     /// The cell's writer bit, held for the duration of one write.
     fn writer(&self) -> WriterGuard<'_> {
-        while self
-            .writer
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
+        while self.writer.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err()
         {
             std::hint::spin_loop();
         }
@@ -484,14 +486,17 @@ impl TextSlot {
 
     /// Write `bytes` at `offset` and publish the new length; the caller holds
     /// the writer bit and has checked the fit.
-    fn write(&self, offset: usize, bytes: &[u8]) {
+    fn write(
+        &self,
+        offset: usize,
+        bytes: &[u8]
+    ) {
         debug_assert!(offset + bytes.len() <= CELL_TEXT_MAX);
         self.version.fetch_add(1, Ordering::AcqRel);
         for (target, source) in self.bytes[offset..offset + bytes.len()].iter().zip(bytes) {
             target.store(*source, Ordering::Relaxed);
         }
-        self.len
-            .store((offset + bytes.len()) as u16, Ordering::Relaxed);
+        self.len.store((offset + bytes.len()) as u16, Ordering::Relaxed);
         self.version.fetch_add(1, Ordering::SeqCst);
         self.wake_waiters();
     }
@@ -518,7 +523,7 @@ pub(crate) struct MemoryTextTable {
     _fleet: Arc<Fleet>,
     slots: Vec<TextSlot>,
     hint: AtomicU32,
-    structural_lock: Mutex<()>,
+    structural_lock: Mutex<()>
 }
 
 impl MemoryTextTable {
@@ -527,7 +532,7 @@ impl MemoryTextTable {
             _fleet: fleet,
             slots: (0..CELL_TEXT_CAPACITY).map(|_| TextSlot::empty()).collect(),
             hint: AtomicU32::new(0),
-            structural_lock: Mutex::new(()),
+            structural_lock: Mutex::new(())
         }
     }
 }
@@ -552,7 +557,7 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryTextTable> {
 #[cfg(unix)]
 pub(crate) struct ShmTextTable {
     region: ShmRegion,
-    structural_lock: Mutex<()>,
+    structural_lock: Mutex<()>
 }
 
 #[cfg(unix)]
@@ -564,10 +569,7 @@ impl ShmTextTable {
             ShmRegion::open_or_create_locked(name, shm_segment_size())?;
         if region.created() {
             unsafe {
-                ptr::write(
-                    region.as_ptr().cast::<TextStateHeader>(),
-                    TextStateHeader::new(),
-                );
+                ptr::write(region.as_ptr().cast::<TextStateHeader>(), TextStateHeader::new());
                 let slots = region.as_ptr().add(size_of::<TextStateHeader>());
                 ptr::write_bytes(slots, 0, CELL_TEXT_CAPACITY * size_of::<TextSlot>());
             }
@@ -579,7 +581,7 @@ impl ShmTextTable {
                     format!(
                         "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{TEXT_MAGIC:08X})",
                         header.magic
-                    ),
+                    )
                 )));
             }
             if header.version != TEXT_VERSION
@@ -589,14 +591,11 @@ impl ShmTextTable {
             {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("SHM segment {name} has an incompatible text-cell layout"),
+                    format!("SHM segment {name} has an incompatible text-cell layout")
                 )));
             }
         }
-        Ok(Self {
-            region,
-            structural_lock: Mutex::new(()),
-        })
+        Ok(Self { region, structural_lock: Mutex::new(()) })
     }
 
     fn header(&self) -> &TextStateHeader {
@@ -606,18 +605,15 @@ impl ShmTextTable {
     fn slots(&self) -> &[TextSlot] {
         unsafe {
             std::slice::from_raw_parts(
-                self.region
-                    .as_ptr()
-                    .add(size_of::<TextStateHeader>())
-                    .cast::<TextSlot>(),
-                CELL_TEXT_CAPACITY,
+                self.region.as_ptr().add(size_of::<TextStateHeader>()).cast::<TextSlot>(),
+                CELL_TEXT_CAPACITY
             )
         }
     }
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[TextSlot], &AtomicU32) -> Result<T>,
+        operation: impl FnOnce(&[TextSlot], &AtomicU32) -> Result<T>
     ) -> Result<T> {
         let _local = lock_unpoisoned(&self.structural_lock);
         let _process = self.region.lock_exclusive()?;

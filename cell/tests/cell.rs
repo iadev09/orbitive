@@ -42,14 +42,7 @@ fn the_type_is_stamped_on_the_cell() {
     let cells = cells();
     let counter = cells.allocate(7_i64).expect("allocate");
     let wrong = cells.open::<f64>(counter.id());
-    assert!(matches!(
-        wrong,
-        Err(Error::TypeMismatch {
-            expected: "float",
-            found: "int",
-            ..
-        })
-    ));
+    assert!(matches!(wrong, Err(Error::TypeMismatch { expected: "float", found: "int", .. })));
 }
 
 #[test]
@@ -84,15 +77,10 @@ fn a_released_cell_goes_stale_and_its_slot_is_reused_under_a_new_generation() {
 #[test]
 fn a_full_table_says_so() {
     let cells = cells();
-    let held: Vec<_> = (0..orbit_cell::CELL_CAPACITY)
-        .map(|_| cells.allocate(0_i64).expect("allocate"))
-        .collect();
+    let held: Vec<_> =
+        (0..orbit_cell::CELL_CAPACITY).map(|_| cells.allocate(0_i64).expect("allocate")).collect();
     assert!(matches!(cells.allocate(0_i64), Err(Error::Full { .. })));
-    held.into_iter()
-        .next()
-        .expect("one")
-        .release()
-        .expect("release");
+    held.into_iter().next().expect("one").release().expect("release");
     assert!(cells.allocate(0_i64).is_ok());
 }
 
@@ -105,16 +93,9 @@ fn ids_round_trip_through_text_and_bits() {
     assert!(text.starts_with("cell:"));
     assert_eq!(text.parse::<CellId>().expect("parse"), id);
     assert_eq!(CellId::from_bits(id.to_bits()), id);
-    assert!(matches!(
-        "cell:x".parse::<CellId>(),
-        Err(Error::Malformed(_))
-    ));
+    assert!(matches!("cell:x".parse::<CellId>(), Err(Error::Malformed(_))));
     assert_eq!(
-        cells
-            .open::<i64>(text.parse().expect("parse"))
-            .expect("open")
-            .load()
-            .expect("load"),
+        cells.open::<i64>(text.parse().expect("parse")).expect("open").load().expect("load"),
         3
     );
 }
@@ -131,11 +112,7 @@ fn text_cells_append_atomically_and_refuse_what_does_not_fit() {
 
     let big = "y".repeat(orbit_cell::CELL_TEXT_MAX);
     assert!(matches!(same.append(&big), Err(Error::TooLong { .. })));
-    assert_eq!(
-        text.load().expect("load"),
-        "x",
-        "a refused append writes nothing"
-    );
+    assert_eq!(text.load().expect("load"), "x", "a refused append writes nothing");
     assert!(cells.allocate_text(&format!("{big}z")).is_err());
 
     let id = text.id();
@@ -154,18 +131,13 @@ fn text_readers_never_see_a_torn_write() {
     let thread = std::thread::spawn(move || {
         let mut flip = false;
         while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-            writer
-                .store(if flip { "bbbbbbbb" } else { "aaaaaaaa" })
-                .expect("store");
+            writer.store(if flip { "bbbbbbbb" } else { "aaaaaaaa" }).expect("store");
             flip = !flip;
         }
     });
     for _ in 0..5_000 {
         let seen = text.load().expect("load");
-        assert!(
-            seen == "aaaaaaaa" || seen == "bbbbbbbb",
-            "torn read: {seen:?}"
-        );
+        assert!(seen == "aaaaaaaa" || seen == "bbbbbbbb", "torn read: {seen:?}");
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     thread.join().expect("writer");
@@ -181,7 +153,9 @@ fn racing_callers_divide_a_limit_without_ever_passing_it() {
     const LIMIT: i64 = 200_000;
     const THREADS: usize = 8;
 
-    let cells = Arc::new(Cells::new(Arc::new(Fleet::join("cell-claim", 1).expect("fleet"))).expect("cells"));
+    let cells = Arc::new(
+        Cells::new(Arc::new(Fleet::join("cell-claim", 1).expect("fleet"))).expect("cells")
+    );
     let counter = Arc::new(cells.allocate(0_i64).expect("allocate"));
 
     let takers: Vec<_> = (0..THREADS)

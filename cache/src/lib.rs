@@ -18,20 +18,18 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use orbit_core::{Fleet, RingLoss};
-
 pub use error::{Error, Result};
 pub use layout::{
     CACHE_MUTATION_RING_CAPACITY, CACHE_MUTATION_RING_KIND, CACHE_MUTATION_RING_PAYLOAD_CAPACITY,
     CACHE_MUTATION_RING_SPEC, CACHE_PAYLOAD_RING_CAPACITY, CACHE_PAYLOAD_RING_KIND,
-    CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY, CACHE_PAYLOAD_RING_SPEC, CacheLayout, DefaultCacheLayout,
+    CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY, CACHE_PAYLOAD_RING_SPEC, CacheLayout, DefaultCacheLayout
 };
 pub use local::{CacheEntry, CacheRead, LocalCache};
-pub use protocol::{CacheMutation, CacheRevision, PayloadRef};
-pub use transport::{CacheMutationCursor, CacheMutationPoll, CacheTransport};
-
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub use orbit_core::RingEventFd;
+use orbit_core::{Fleet, RingLoss};
+pub use protocol::{CacheMutation, CacheRevision, PayloadRef};
+pub use transport::{CacheMutationCursor, CacheMutationPoll, CacheTransport};
 
 pub const DEFAULT_L1_CAPACITY: usize = 10_000;
 
@@ -39,7 +37,7 @@ pub const DEFAULT_L1_CAPACITY: usize = 10_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheAddress {
     pub store: Bytes,
-    pub key: Bytes,
+    pub key: Bytes
 }
 
 /// Result of dispatching all currently visible mutations to local stores.
@@ -53,7 +51,7 @@ pub struct CachePoll {
     pub unknown_stores: Vec<Bytes>,
     pub loss: RingLoss,
     pub malformed: u64,
-    pub resync_required: bool,
+    pub resync_required: bool
 }
 
 impl CachePoll {
@@ -70,14 +68,14 @@ impl CachePoll {
 pub struct Cache<L: CacheLayout = DefaultCacheLayout> {
     transport: CacheTransport<L>,
     stores: Arc<RwLock<HashMap<Vec<u8>, LocalCache>>>,
-    cursor: Arc<Mutex<CacheMutationCursor>>,
+    cursor: Arc<Mutex<CacheMutationCursor>>
 }
 
 /// One named logical cache store with its own bounded process-local L1.
 pub struct Store<L: CacheLayout = DefaultCacheLayout> {
     cache: Cache<L>,
     name: Bytes,
-    local: LocalCache,
+    local: LocalCache
 }
 
 impl<L: CacheLayout> Clone for Cache<L> {
@@ -85,18 +83,14 @@ impl<L: CacheLayout> Clone for Cache<L> {
         Self {
             transport: self.transport.clone(),
             stores: self.stores.clone(),
-            cursor: self.cursor.clone(),
+            cursor: self.cursor.clone()
         }
     }
 }
 
 impl<L: CacheLayout> Clone for Store<L> {
     fn clone(&self) -> Self {
-        Self {
-            cache: self.cache.clone(),
-            name: self.name.clone(),
-            local: self.local.clone(),
-        }
+        Self { cache: self.cache.clone(), name: self.name.clone(), local: self.local.clone() }
     }
 }
 
@@ -108,7 +102,7 @@ impl<L: CacheLayout> Cache<L> {
         Ok(Self {
             transport,
             stores: Arc::new(RwLock::new(HashMap::new())),
-            cursor: Arc::new(Mutex::new(cursor)),
+            cursor: Arc::new(Mutex::new(cursor))
         })
     }
 
@@ -123,7 +117,7 @@ impl<L: CacheLayout> Cache<L> {
         Ok(Self {
             transport,
             stores: Arc::new(RwLock::new(HashMap::new())),
-            cursor: Arc::new(Mutex::new(cursor)),
+            cursor: Arc::new(Mutex::new(cursor))
         })
     }
 
@@ -132,49 +126,37 @@ impl<L: CacheLayout> Cache<L> {
     /// Opening the same name more than once returns another handle to the
     /// existing local store. Its capacity is therefore fixed by the first
     /// registration in this process.
-    pub fn open_store(&self, name: impl AsRef<[u8]>, capacity: NonZeroUsize) -> Result<Store<L>> {
+    pub fn open_store(
+        &self,
+        name: impl AsRef<[u8]>,
+        capacity: NonZeroUsize
+    ) -> Result<Store<L>> {
         let name = name.as_ref();
         self.transport.validate_store(name)?;
 
         let local = {
-            let stores = self
-                .stores
-                .read()
-                .unwrap_or_else(|error| error.into_inner());
+            let stores = self.stores.read().unwrap_or_else(|error| error.into_inner());
             stores.get(name).cloned()
         }
         .unwrap_or_else(|| {
-            let mut stores = self
-                .stores
-                .write()
-                .unwrap_or_else(|error| error.into_inner());
-            stores
-                .entry(name.to_vec())
-                .or_insert_with(|| LocalCache::new(capacity))
-                .clone()
+            let mut stores = self.stores.write().unwrap_or_else(|error| error.into_inner());
+            stores.entry(name.to_vec()).or_insert_with(|| LocalCache::new(capacity)).clone()
         });
 
-        Ok(Store {
-            cache: self.clone(),
-            name: Bytes::copy_from_slice(name),
-            local,
-        })
+        Ok(Store { cache: self.clone(), name: Bytes::copy_from_slice(name), local })
     }
 
     pub fn open_default_store(&self) -> Result<Store<L>> {
         self.open_store(
             b"default",
-            NonZeroUsize::new(DEFAULT_L1_CAPACITY).expect("default L1 capacity is non-zero"),
+            NonZeroUsize::new(DEFAULT_L1_CAPACITY).expect("default L1 capacity is non-zero")
         )
     }
 
     /// Reset the shared transport during owner-controlled, quiescent boot and
     /// align every registered local store with the new ring generation.
     pub fn reset_transport(&self) -> Result<()> {
-        let mut cursor = self
-            .cursor
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut cursor = self.cursor.lock().unwrap_or_else(|error| error.into_inner());
         self.transport.reset_rings()?;
         *cursor = self.transport.cursor_at_head();
         self.for_each_local(LocalCache::reset_after_transport_reset);
@@ -185,10 +167,7 @@ impl<L: CacheLayout> Cache<L> {
     /// the addressed logical store.
     pub fn poll(&self) -> CachePoll {
         let raw = {
-            let mut cursor = self
-                .cursor
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut cursor = self.cursor.lock().unwrap_or_else(|error| error.into_inner());
             self.transport.poll(&mut cursor)
         };
         let observed = raw.mutations.len();
@@ -239,10 +218,7 @@ impl<L: CacheLayout> Cache<L> {
     /// from authoritative backing stores. Because the cursor is shared, loss
     /// and recovery apply to every registered logical store together.
     pub fn recover_from_backing(&self) {
-        let mut cursor = self
-            .cursor
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut cursor = self.cursor.lock().unwrap_or_else(|error| error.into_inner());
         *cursor = self.transport.cursor_at_head();
         let revision_floor = self.transport.current_revision_sequence();
         self.for_each_local(|local| local.recover_from_backing(revision_floor));
@@ -257,7 +233,10 @@ impl<L: CacheLayout> Cache<L> {
         self.transport.event_fd()
     }
 
-    fn for_each_local(&self, mut apply: impl FnMut(&LocalCache)) {
+    fn for_each_local(
+        &self,
+        mut apply: impl FnMut(&LocalCache)
+    ) {
         let locals = self
             .stores
             .read()
@@ -270,12 +249,11 @@ impl<L: CacheLayout> Cache<L> {
         }
     }
 
-    fn any_local(&self, mut predicate: impl FnMut(&LocalCache) -> bool) -> bool {
-        self.stores
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .values()
-            .any(&mut predicate)
+    fn any_local(
+        &self,
+        mut predicate: impl FnMut(&LocalCache) -> bool
+    ) -> bool {
+        self.stores.read().unwrap_or_else(|error| error.into_inner()).values().any(&mut predicate)
     }
 }
 
@@ -284,37 +262,46 @@ impl<L: CacheLayout> Store<L> {
         &self.name
     }
 
-    pub fn read(&self, key: &[u8]) -> CacheRead {
+    pub fn read(
+        &self,
+        key: &[u8]
+    ) -> CacheRead {
         self.local.read(key)
     }
 
-    pub fn validate_put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn validate_put(
+        &self,
+        key: &[u8],
+        value: &[u8]
+    ) -> Result<()> {
         self.cache.transport.validate_put(&self.name, key, value)
     }
 
-    pub fn validate_key(&self, key: &[u8]) -> Result<()> {
+    pub fn validate_key(
+        &self,
+        key: &[u8]
+    ) -> Result<()> {
         self.cache.transport.validate_key(&self.name, key)
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8], ttl: Option<Duration>) -> Result<CacheRevision> {
-        let mutation = self
-            .cache
-            .transport
-            .publish_put(&self.name, key, value, ttl)?;
-        let CacheMutation::Put {
-            revision,
-            expires_at_ms,
-            ..
-        } = mutation
-        else {
+    pub fn put(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>
+    ) -> Result<CacheRevision> {
+        let mutation = self.cache.transport.publish_put(&self.name, key, value, ttl)?;
+        let CacheMutation::Put { revision, expires_at_ms, .. } = mutation else {
             unreachable!("publish_put returned a non-put mutation")
         };
-        self.local
-            .install_local(key, Bytes::copy_from_slice(value), revision, expires_at_ms);
+        self.local.install_local(key, Bytes::copy_from_slice(value), revision, expires_at_ms);
         Ok(revision)
     }
 
-    pub fn delete(&self, key: &[u8]) -> Result<CacheRevision> {
+    pub fn delete(
+        &self,
+        key: &[u8]
+    ) -> Result<CacheRevision> {
         let mutation = self.cache.transport.publish_delete(&self.name, key)?;
         let CacheMutation::Delete { revision, .. } = mutation else {
             unreachable!("publish_delete returned a non-delete mutation")
