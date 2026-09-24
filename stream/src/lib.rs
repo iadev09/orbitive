@@ -507,9 +507,14 @@ impl Streams {
         }
         slot.incarnation[ticket.side.index()].store(self.table.incarnation(), Ordering::Release);
         slot.node[ticket.side.index()].store(self.table.node(), Ordering::Release);
-        // Whoever was waiting for this side to show up.
+        // Counted for blocking waiters, and no doorbell rung. A claim is not
+        // something a parked task can be waiting for: readiness is `head`,
+        // `tail` and the flags, and no predicate reads who holds a side. A
+        // ring here woke both processes' drivers on every open to find
+        // nothing ready — measured, it was most of what an exchange cost
+        // above a Unix socket.
         for direction in &slot.directions {
-            self.table.notify(index, slot, direction, true);
+            self.table.notify(index, slot, direction, false);
         }
         Ok(Endpoint::new(Arc::new(Handle {
             table: Arc::clone(&self.table),
@@ -519,24 +524,41 @@ impl Streams {
         })))
     }
 
-    /// Clear a stream for another exchange without giving up either claim.
+    /// Clear a stream for another exchange, and let its far side be opened
+    /// again — by any process.
     ///
     /// A slot created and released per exchange pays for both every time: two
     /// compare-and-swaps, a reset, and a ring nobody has touched since it was
-    /// last used, so cold in cache and absent from the TLB. A caller that
-    /// keeps its slots between exchanges calls this instead. Both claims
-    /// stand, the generation does not move — so the ticket the two ends
-    /// already hold stays valid — and only the directions' positions and
-    /// flags go back to nothing.
+    /// last used, so cold in cache and absent from the TLB. A creator that
+    /// keeps its slots between exchanges calls this instead. Its own claim
+    /// stands and the generation does not move, so the ticket stays valid;
+    /// the directions go back to nothing, and the far side changes hands.
+    ///
+    /// **The far side has to have let go, and the table is what says so.** Its
+    /// halves raise their flags as they drop and its claim is released after
+    /// them, so a claim that reads released belongs to a process that can no
+    /// longer touch the slot. That is the whole handshake — no message, no
+    /// flag to race with — and it is why the slot belongs to its creator
+    /// rather than to a pair: once reopened, whichever process the next
+    /// exchange is addressed to opens it.
+    ///
+    /// - `Ok`: re-armed; the next ticket written for it can be opened.
+    /// - [`Error::WouldBlock`]: the far side still holds it. Not yet — try
+    ///   another slot.
+    /// - [`Error::Stale`]: let it go. The address no longer names this stream,
+    ///   the far side died, or it never opened this exchange at all — and a
+    ///   side nobody opened may still be opened late by whoever the last
+    ///   ticket went to, so it is not safe to hand to anyone else. Dropping the
+    ///   endpoint empties the slot, and a late open is then refused as stale.
+    ///
+    /// The far side's owner goes back to what [`Streams::create`] writes for
+    /// nobody before its claim opens. A death report reads the claim first and
+    /// the owner after it, so without this a report about the process that
+    /// just let go could land on the one that opens next.
     ///
     /// **The caller owns the ordering.** Whoever re-arms must do it *before*
     /// telling the other side that a new exchange has begun, so that the
     /// message announcing the exchange is what publishes the cleared state.
-    /// The release fence here is that publication's other half; the announcing
-    /// write supplies the acquire.
-    ///
-    /// Refused on a stale address, which is what a ticket becomes when the
-    /// table was reset or the slot given up and taken by someone else.
     pub fn rearm(
         &self,
         id: StreamId
@@ -546,10 +568,23 @@ impl Streams {
         if !slot.is(id.generation()) {
             return Err(Error::Stale(id));
         }
+        let far = Side::B.index();
+        match slot.claimed[far].load(Ordering::SeqCst) {
+            SIDE_RELEASED => {}
+            SIDE_CLAIMED => return Err(Error::WouldBlock),
+            _ => return Err(Error::Stale(id))
+        }
         for direction in &slot.directions {
             direction.clear();
         }
-        std::sync::atomic::fence(Ordering::Release);
+        slot.node[far].store(u16::MAX, Ordering::Relaxed);
+        slot.incarnation[far].store(0, Ordering::Relaxed);
+        // Released is terminal for its holder and a death report only touches
+        // a claimed side, so nothing else moves this word; the exchange is
+        // what publishes everything written above it.
+        slot.claimed[far]
+            .compare_exchange(SIDE_RELEASED, SIDE_FREE, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| Error::Stale(id))?;
         Ok(())
     }
 
@@ -957,8 +992,10 @@ impl Handle {
     ) {
         if let Ok(slot) = self.slot() {
             let direction = Self::direction(slot, direction_index);
-            if direction.flags.fetch_or(flag, Ordering::SeqCst) & flag == 0 {
-                self.table.notify(self.index, slot, direction, true);
+            let before = direction.flags.fetch_or(flag, Ordering::SeqCst);
+            if before & flag == 0 {
+                let ring = flag != FLAG_READER_GONE || writer_may_park(direction, before);
+                self.table.notify(self.index, slot, direction, ring);
             }
         }
     }
@@ -1039,8 +1076,35 @@ impl Handle {
         if let Err(error) = self.table.register(self.index, interest, cx.waker()) {
             return std::task::Poll::Ready(Err(error));
         }
+        // Pairs with the fence in `writer_may_park`: a flag set without a
+        // doorbell is one this second look is guaranteed to see.
+        std::sync::atomic::fence(Ordering::SeqCst);
         if ready(direction) { std::task::Poll::Ready(Ok(())) } else { std::task::Poll::Pending }
     }
+}
+
+/// Whether a task could be parked writing into `direction` as its reader
+/// goes — the only case in which the reader going has to ring a doorbell.
+///
+/// Not a writer that has finished: it will never write or wait again. And not
+/// while nothing is queued: with the ring empty every write fits, so nobody is
+/// waiting for room. The ordinary end of an exchange is both — the reader has
+/// taken everything, and often the writer has already said so — and ringing
+/// there woke two drivers per exchange for no one.
+///
+/// The fence pairs with the one in [`Handle::poll_ready`]: either this sees
+/// bytes a writer queued before parking, or that writer's second look sees
+/// the flag. The reader is gone, so `tail` no longer moves, and a ring seen
+/// empty here fills only through writes that will see the flag first.
+fn writer_may_park(
+    direction: &Direction,
+    before: u8
+) -> bool {
+    if before & (FLAG_FIN | FLAG_RESET) != 0 {
+        return false;
+    }
+    std::sync::atomic::fence(Ordering::SeqCst);
+    direction.head.load(Ordering::SeqCst) != direction.tail.load(Ordering::SeqCst)
 }
 
 fn readable(direction: &Direction) -> bool {
@@ -1213,12 +1277,6 @@ impl Endpoint {
         self.write.blocking_write_all(buf)
     }
 
-    /// Whether the peer has ended the direction this endpoint reads.
-    /// See [`ReadHalf::ended`].
-    pub fn ended(&self) -> Result<bool> {
-        self.read.ended()
-    }
-
     pub fn finish(&mut self) -> Result<()> {
         self.write.finish()
     }
@@ -1271,19 +1329,15 @@ impl ReadHalf {
         }
     }
 
-    /// Whether the peer has ended this direction — `FIN` or `RESET`.
+    /// Tell the peer's writer that nothing more will be read, without letting
+    /// go of the stream.
     ///
-    /// Asked without reading, because the answer is a property of the
-    /// direction rather than of what is left in it. A caller that keeps a
-    /// stream between exchanges uses it as the release handshake: the peer
-    /// ends the direction when it lets go of its half, so until this is true
-    /// the slot is still the peer's and must not be re-armed under it. What
-    /// is still queued is unaffected; ending a direction says no more will
-    /// be added to it, not that what is there has been taken.
-    pub fn ended(&self) -> Result<bool> {
-        let slot = self.handle.slot()?;
-        let direction = Handle::direction(slot, self.handle.side.read_direction());
-        Ok(direction.flags() & (FLAG_FIN | FLAG_RESET) != 0)
+    /// What dropping this half says, for a holder that keeps its halves
+    /// between exchanges. Without it a writer the reader has given up on —
+    /// a client gone mid-response — waits on a full ring that nobody will
+    /// empty. Re-arming the stream clears it again.
+    pub fn stop_reading(&self) {
+        self.handle.set_flag(self.handle.side.read_direction(), FLAG_READER_GONE);
     }
 
     /// Up to `max` bytes as one owned chunk; empty at clean end of stream.
