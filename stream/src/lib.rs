@@ -514,7 +514,7 @@ impl Streams {
         // nothing ready — measured, it was most of what an exchange cost
         // above a Unix socket.
         for direction in &slot.directions {
-            self.table.notify(index, slot, direction, false);
+            self.table.notify(index, slot, direction, table::Ring::Nobody);
         }
         Ok(Endpoint::new(Arc::new(Handle {
             table: Arc::clone(&self.table),
@@ -777,6 +777,16 @@ struct Handle {
 }
 
 impl Handle {
+    /// The other side's doorbell when `ring`, nobody's otherwise. Everything a
+    /// handle changes is news to its peer and never to itself; see
+    /// [`table::Ring`].
+    fn peer_if(
+        &self,
+        ring: bool
+    ) -> table::Ring {
+        if ring { table::Ring::Side(1 - self.side.index()) } else { table::Ring::Nobody }
+    }
+
     fn slot(&self) -> Result<&Slot> {
         let slot = &self.table.slots()[self.index];
         if slot.is(self.id.generation()) { Ok(slot) } else { Err(Error::Stale(self.id)) }
@@ -838,7 +848,7 @@ impl Handle {
         // drained tail and rings.
         std::sync::atomic::fence(Ordering::SeqCst);
         let drained = direction.tail.load(Ordering::SeqCst) >= head;
-        self.table.notify(self.index, slot, direction, drained);
+        self.table.notify(self.index, slot, direction, self.peer_if(drained));
         Ok(len)
     }
 
@@ -885,7 +895,7 @@ impl Handle {
         direction.head.store(head + buf.len() as u64, Ordering::SeqCst);
         std::sync::atomic::fence(Ordering::SeqCst);
         let drained = direction.tail.load(Ordering::SeqCst) >= head;
-        self.table.notify(self.index, slot, direction, drained);
+        self.table.notify(self.index, slot, direction, self.peer_if(drained));
         Ok(())
     }
 
@@ -932,7 +942,7 @@ impl Handle {
         std::sync::atomic::fence(Ordering::SeqCst);
         let head_now = direction.head.load(Ordering::SeqCst);
         let was_full = head_now - tail >= buffer_bytes as u64;
-        self.table.notify(self.index, slot, direction, was_full);
+        self.table.notify(self.index, slot, direction, self.peer_if(was_full));
         Ok(len)
     }
 
@@ -981,7 +991,7 @@ impl Handle {
         std::sync::atomic::fence(Ordering::SeqCst);
         let head_now = direction.head.load(Ordering::SeqCst);
         let was_full = head_now - tail >= buffer_bytes as u64;
-        self.table.notify(self.index, slot, direction, was_full);
+        self.table.notify(self.index, slot, direction, self.peer_if(was_full));
         Ok(())
     }
 
@@ -995,7 +1005,7 @@ impl Handle {
             let before = direction.flags.fetch_or(flag, Ordering::SeqCst);
             if before & flag == 0 {
                 let ring = flag != FLAG_READER_GONE || writer_may_park(direction, before);
-                self.table.notify(self.index, slot, direction, ring);
+                self.table.notify(self.index, slot, direction, self.peer_if(ring));
             }
         }
     }

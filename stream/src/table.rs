@@ -211,36 +211,37 @@ impl Table {
     }
 
     /// After anything changed on `direction` of `slot`: count it for
-    /// blocking waiters, then, when `ring` says the change is one a parked
-    /// task could be waiting for, tell the processes holding the stream's
-    /// sides. Blocking waiters are always counted; they park on the word
-    /// itself and are woken only when present.
+    /// blocking waiters, then tell whichever process `ring` names. Blocking
+    /// waiters are always counted; they park on the word itself and are woken
+    /// only when present.
     pub(crate) fn notify(
         &self,
         index: usize,
         slot: &Slot,
         direction: &Direction,
-        ring: bool
+        ring: Ring
     ) {
         direction.changes.fetch_add(1, Ordering::SeqCst);
         if direction.waiters.load(Ordering::SeqCst) > 0 {
             crate::wake_on(&direction.changes);
         }
-        if !ring {
-            return;
-        }
+        let sides: &[usize] = match ring {
+            Ring::Nobody => return,
+            Ring::Side(side) => &[side],
+            Ring::Both => &[0, 1]
+        };
         if !self.is_shared() {
             self.registry.wake(index);
             self.signal_readiness();
             return;
         }
-        let first = usize::from(slot.node[0].load(Ordering::Acquire));
-        let second = usize::from(slot.node[1].load(Ordering::Acquire));
-        if first < self.geometry.fleet_capacity {
-            self.ring(first, Some(index));
-        }
-        if second < self.geometry.fleet_capacity && second != first {
-            self.ring(second, Some(index));
+        let mut rung = usize::MAX;
+        for &side in sides {
+            let node = usize::from(slot.node[side].load(Ordering::Acquire));
+            if node < self.geometry.fleet_capacity && node != rung {
+                self.ring(node, Some(index));
+                rung = node;
+            }
         }
     }
 
@@ -432,8 +433,8 @@ impl Table {
                 let reads = &slot.directions[1 - side];
                 writes.flags.fetch_or(FLAG_RESET, Ordering::SeqCst);
                 reads.flags.fetch_or(FLAG_READER_GONE, Ordering::SeqCst);
-                self.notify(index, slot, writes, true);
-                self.notify(index, slot, reads, true);
+                self.notify(index, slot, writes, Ring::Both);
+                self.notify(index, slot, reads, Ring::Both);
             }
             if touched
                 && slot.claimed.iter().all(|side| side.load(Ordering::SeqCst) != SIDE_CLAIMED)
@@ -693,4 +694,22 @@ pub fn segment_size_for(
     spec: StreamSpec
 ) -> usize {
     Geometry::new(fleet_capacity, spec).segment_size
+}
+
+/// Whose doorbell a change rings.
+///
+/// A change on a direction is news to one side only: bytes, `FIN` and `RESET`
+/// are the writer's doing and the reader's concern, room freed and a reader
+/// gone are the reader's doing and the writer's concern. So a handle rings its
+/// peer and not itself. It used to ring both, and the process that made the
+/// change woke its own driver thread to find nothing there — on every
+/// response body and every end of one. Two sides in one process share a
+/// node, and ringing the peer rings it all the same.
+#[derive(Clone, Copy)]
+pub(crate) enum Ring {
+    Nobody,
+    /// The side at this index: the one that can be waiting on the change.
+    Side(usize),
+    /// A death report, on behalf of a process that is gone: both.
+    Both
 }
