@@ -115,17 +115,59 @@ pub(crate) struct Doorbell {
 /// One direction of a stream: a single-producer, single-consumer byte ring
 /// described by two monotonic positions. `head` is owned by the writer,
 /// `tail` by the reader; the buffer index is the position masked.
-#[repr(C)]
+///
+/// # Three cache lines, on purpose
+///
+/// The two positions are written by different processes — `head` by the
+/// writer on every commit, `tail` by the reader on every consume — and on a
+/// busy stream that is once per chunk each. Sharing a line between them
+/// means every commit invalidates the reader's copy and every consume
+/// invalidates the writer's: the line crosses between cores as often as
+/// bytes cross the ring, and the cost grows with the size of the body rather
+/// than staying fixed per exchange.
+///
+/// It was that way until 2026-09-24: `Direction` was thirty-two bytes, so
+/// `head` and `tail` sat eight bytes apart and a slot's two directions fell
+/// inside one line together — four contended words, one line, two processes.
+///
+/// So: the writer's word, the reader's word, and the wake word each get a
+/// line, and the whole thing is aligned so two directions never share one.
+/// The wake word is touched by both sides and cannot be given to either;
+/// giving it its own line at least keeps it away from the positions.
+///
+/// **It measured as nothing**, and the reason is worth keeping. A benchmark
+/// moving 128 KiB through a 64 KiB window was 378.9 µs of CPU per exchange
+/// before and 382.5 after — noise. Contention costs what it is given to
+/// contend over, and a ring written in window-sized chunks updates `head` a
+/// handful of times per exchange, not once per byte. There was nothing for
+/// the ping-pong to scale with.
+///
+/// It is kept because the hazard is real where the pattern differs: a
+/// chunked response or an event stream commits every few hundred bytes, and
+/// there the two words are touched thousands of times per exchange. The
+/// measurement above says this workload cannot see it, not that it is not
+/// there.
+///
+/// It costs 160 bytes per direction. A fleet of four thousand slots pays
+/// under two megabytes for it, against a table measured in hundreds.
+#[repr(C, align(64))]
 pub(crate) struct Direction {
+    // ── the writer's line ──────────────────────────────────────────────
     pub(crate) head: AtomicU64,
-    pub(crate) tail: AtomicU64,
     pub(crate) flags: AtomicU8,
     _reserved: [u8; 3],
+    _writer_padding: [u8; 52],
+
+    // ── the reader's line ──────────────────────────────────────────────
+    pub(crate) tail: AtomicU64,
+    _reader_padding: [u8; 56],
+
+    // ── the wake word, which belongs to neither ────────────────────────
     /// Bumped on every commit, consume and flag change; the word a blocking
     /// waiter parks on. 32 bits because that is what the platform waits want.
     pub(crate) changes: AtomicU32,
     pub(crate) waiters: AtomicU32,
-    _padding: [u8; 4]
+    _wake_padding: [u8; 56]
 }
 
 impl Direction {
@@ -202,8 +244,8 @@ impl Slot {
 
 const _: () = assert!(size_of::<Header>() == 64);
 const _: () = assert!(size_of::<Doorbell>() == 64);
-const _: () = assert!(size_of::<Direction>() == 32);
-const _: () = assert!(size_of::<Slot>() == 128);
+const _: () = assert!(size_of::<Direction>() == 192);
+const _: () = assert!(size_of::<Slot>() == 448);
 
 /// Where everything sits, computed once per opened table from the fleet
 /// capacity, which is runtime geometry like a ring's lane count.
