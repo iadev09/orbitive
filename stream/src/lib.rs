@@ -519,6 +519,40 @@ impl Streams {
         })))
     }
 
+    /// Clear a stream for another exchange without giving up either claim.
+    ///
+    /// A slot created and released per exchange pays for both every time: two
+    /// compare-and-swaps, a reset, and a ring nobody has touched since it was
+    /// last used, so cold in cache and absent from the TLB. A caller that
+    /// keeps its slots between exchanges calls this instead. Both claims
+    /// stand, the generation does not move — so the ticket the two ends
+    /// already hold stays valid — and only the directions' positions and
+    /// flags go back to nothing.
+    ///
+    /// **The caller owns the ordering.** Whoever re-arms must do it *before*
+    /// telling the other side that a new exchange has begun, so that the
+    /// message announcing the exchange is what publishes the cleared state.
+    /// The release fence here is that publication's other half; the announcing
+    /// write supplies the acquire.
+    ///
+    /// Refused on a stale address, which is what a ticket becomes when the
+    /// table was reset or the slot given up and taken by someone else.
+    pub fn rearm(
+        &self,
+        id: StreamId
+    ) -> Result<()> {
+        let index = self.locate(id)?;
+        let slot = &self.table.slots()[index];
+        if !slot.is(id.generation()) {
+            return Err(Error::Stale(id));
+        }
+        for direction in &slot.directions {
+            direction.clear();
+        }
+        std::sync::atomic::fence(Ordering::Release);
+        Ok(())
+    }
+
     /// Whether the address names a live stream right now.
     pub fn is_live(
         &self,
@@ -1101,6 +1135,26 @@ impl Endpoint {
 
     pub fn split(self) -> (ReadHalf, WriteHalf) {
         (self.read, self.write)
+    }
+
+    /// Put a split endpoint back together.
+    ///
+    /// For a caller that keeps its streams between exchanges: the halves go
+    /// out to whoever pumps the bodies and come back here, so the slot is
+    /// never given up and never claimed again. Neither half is dropped on the
+    /// way through, so neither terminal flag is set.
+    ///
+    /// Refused if the two halves are not the same side of the same stream,
+    /// which would otherwise build an endpoint that reads one slot and writes
+    /// another.
+    pub fn rejoin(
+        read: ReadHalf,
+        write: WriteHalf
+    ) -> Result<Self> {
+        if read.id() != write.id() {
+            return Err(Error::Stale(read.id()));
+        }
+        Ok(Self { read, write })
     }
 
     pub fn try_read(
