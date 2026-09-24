@@ -1213,6 +1213,12 @@ impl Endpoint {
         self.write.blocking_write_all(buf)
     }
 
+    /// Whether the peer has ended the direction this endpoint reads.
+    /// See [`ReadHalf::ended`].
+    pub fn ended(&self) -> Result<bool> {
+        self.read.ended()
+    }
+
     pub fn finish(&mut self) -> Result<()> {
         self.write.finish()
     }
@@ -1263,6 +1269,21 @@ impl ReadHalf {
                 other => return other
             }
         }
+    }
+
+    /// Whether the peer has ended this direction — `FIN` or `RESET`.
+    ///
+    /// Asked without reading, because the answer is a property of the
+    /// direction rather than of what is left in it. A caller that keeps a
+    /// stream between exchanges uses it as the release handshake: the peer
+    /// ends the direction when it lets go of its half, so until this is true
+    /// the slot is still the peer's and must not be re-armed under it. What
+    /// is still queued is unaffected; ending a direction says no more will
+    /// be added to it, not that what is there has been taken.
+    pub fn ended(&self) -> Result<bool> {
+        let slot = self.handle.slot()?;
+        let direction = Handle::direction(slot, self.handle.side.read_direction());
+        Ok(direction.flags() & (FLAG_FIN | FLAG_RESET) != 0)
     }
 
     /// Up to `max` bytes as one owned chunk; empty at clean end of stream.
