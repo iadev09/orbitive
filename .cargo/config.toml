@@ -1,0 +1,5 @@
+# The de02 Gitea's Cargo registry: where pre-releases of this workspace are
+# published and where its consumers take them from. The address is the VPN's
+# until Gitea is served behind the edge under its own name.
+[registries.de02]
+index = "sparse+http://10.8.0.1:3000/api/packages/developer/cargo/"

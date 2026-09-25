@@ -1,6 +1,7 @@
 [package]
 name = "orbit-cache"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Fleet-coherent local cache over Orbit shared-memory rings."
