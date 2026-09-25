@@ -119,3 +119,16 @@ nix = { version = "0.31", features = ["process", "signal", "user", "fs"] }
 rustls_0_23 = { package = "rustls", version = "0.23", default-features = false, features = ["std"] }
 rustls_0_24 = { package = "rustls", version = "0.24.0-dev.1", default-features = false }
 tracing = "0.1.44"
+
+# Claviron's release settings, so what this crate measures on its own — its
+# benches — is built the way the binaries that embed it are. A library's
+# profile applies only when it is the root being built; the application's
+# own profile governs it everywhere else. No `strip`: a profiler needs the
+# symbols.
+[profile.release]
+codegen-units = 1
+debug = 0
+incremental = false
+lto = "thin"
+opt-level = 3
+panic = "unwind"
