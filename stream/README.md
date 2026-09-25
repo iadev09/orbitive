@@ -230,9 +230,9 @@ difference is that a poll with nothing to do registers a wake and returns
 With the `tokio` feature, `ReadHalf` implements `AsyncRead`, `WriteHalf`
 implements `AsyncWrite`, and `Endpoint` implements both. A poll that finds
 nothing registers its waker and returns `Pending`; nothing blocks a runtime
-thread. In a fleet, one thread per process waits on that process's doorbell
-in the segment and wakes the tasks whose streams have news, so the cost is
-one thread and no descriptor however many streams are open. Standalone
+thread. In a fleet, the process's doorbell in the segment is answered once
+per process and wakes the tasks whose streams have news, so the cost does
+not grow with the number of streams open (below: how it is answered). Standalone
 there is no thread at all: the other end wakes the task directly.
 `tokio_util::io::ReaderStream` turns a `ReadHalf` into a stream of `Bytes`
 chunks; write boundaries are not preserved, only the bytes and their order.
@@ -253,8 +253,9 @@ did not inherit it; an `eventfd` or kqueue `EVFILT_USER` is private to its
 process; a descriptor inherited across `fork` does not reach a process that
 joined the fleet on its own, which Orbit supports.
 
-The `tokio-doorbell` feature (experimental) sidesteps that with a name
-instead of a descriptor. Each process binds a Unix datagram socket named
+With the `tokio` feature the stream sidesteps that with a name instead of
+a descriptor, and the thread above is only the fallback where no runtime is
+current. Each process binds a Unix datagram socket named
 after its segment and node, and a task on the runtime waits on it. Before
 waiting the task sets a bit in its node's `listening` word; a writer that
 finds the bit clears it and sends one byte. The reactor wakes the task, the

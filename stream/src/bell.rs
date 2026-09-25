@@ -1,10 +1,10 @@
 //! A doorbell the async runtime answers itself.
 //!
-//! Experimental, behind `tokio-doorbell`. With the plain `tokio` feature a
-//! doorbell is answered by one thread per process parked on the generation
-//! word (`wake`): the writer wakes that thread, and the thread wakes the task.
-//! Two wakes per crossing where a socket costs one, because the runtime's
-//! reactor waits on descriptors and cannot park on a shared word.
+//! Without it a doorbell is answered by one thread per process parked on the
+//! generation word (`wake`): the writer wakes that thread, and the thread
+//! wakes the task. Two wakes per crossing where a socket costs one, because
+//! the runtime's reactor waits on descriptors and cannot park on a shared
+//! word. The thread remains for a table used where no runtime is current.
 //!
 //! Here the process binds a Unix datagram socket named after its segment and
 //! node, and a task on the runtime waits on it like any other socket. Before
@@ -29,16 +29,16 @@
 
 use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 use std::sync::{Arc, Weak};
 
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 use crate::layout::Doorbell;
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 use crate::table::Table;
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 use crate::wake::Doorstep;
 
 /// Set in a doorbell's `listening` word while a socket listener waits. The
@@ -100,7 +100,7 @@ impl Bell {
 
     /// Bind this node's name. A file left by an earlier process on this node
     /// is removed first: one live process per node is the fleet's rule.
-    #[cfg(feature = "tokio-doorbell")]
+    #[cfg(feature = "tokio")]
     fn bind(
         &self,
         node: usize
@@ -124,7 +124,7 @@ impl Bell {
         Ok(socket)
     }
 
-    #[cfg(feature = "tokio-doorbell")]
+    #[cfg(feature = "tokio")]
     fn unbind(
         &self,
         node: usize
@@ -137,13 +137,13 @@ impl Bell {
 }
 
 /// The task that answers this process's doorbell on the runtime.
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 pub(crate) struct ReactorDriver {
     task: tokio::task::JoinHandle<()>,
     node: usize
 }
 
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 impl ReactorDriver {
     pub(crate) fn start(
         table: &Arc<Table>,
@@ -178,7 +178,7 @@ impl ReactorDriver {
 /// sets [`ARMED`] and only then reads the generation. Both sequentially
 /// consistent, so either the writer sees the bit and sends, or this task
 /// sees the bump and drains again: a wake is never lost between the two.
-#[cfg(feature = "tokio-doorbell")]
+#[cfg(feature = "tokio")]
 async fn answer(
     table: Weak<Table>,
     socket: tokio::net::UnixDatagram

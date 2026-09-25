@@ -1264,3 +1264,19 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[patch.unused]]
+name = "claviron"
+version = "0.2.0-alpha.1"
+
+[[patch.unused]]
+name = "claviron-acme"
+version = "0.2.0-alpha.1"
+
+[[patch.unused]]
+name = "claviron-pubsub"
+version = "0.2.0-alpha.1"
+
+[[patch.unused]]
+name = "gufi"
+version = "0.1.0-alpha.1"

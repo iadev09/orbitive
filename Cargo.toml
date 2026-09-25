@@ -28,9 +28,6 @@ metrics = ["dep:orbit-metrics"]
 rustls = ["rustls_0_23"]
 stream = ["dep:orbit-stream"]
 stream-tokio = ["stream", "orbit-stream?/tokio"]
-# Experimental: the stream doorbell answered on the tokio runtime, one wake
-# per crossing instead of two (`orbit-stream/src/bell.rs`).
-stream-tokio-doorbell = ["stream-tokio", "orbit-stream?/tokio-doorbell"]
 pool = ["dep:orbit-pool"]
 pool-stream = ["pool", "stream", "orbit-pool?/pool-stream"]
 rustls_0_23 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_23"]

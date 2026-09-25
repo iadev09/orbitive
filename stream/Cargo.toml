@@ -13,11 +13,9 @@ documentation = "https://docs.rs/orbit-stream"
 exclude.workspace = true
 
 [features]
-tokio = ["dep:tokio"]
-# Experimental: answer the doorbell on the tokio runtime through a named Unix
-# datagram socket instead of a driver thread, one wake per crossing instead
-# of two. See `src/bell.rs`.
-tokio-doorbell = ["tokio", "tokio/net"]
+# `AsyncRead` / `AsyncWrite` on the halves, with the doorbell answered on the
+# runtime through a named Unix datagram socket (`src/bell.rs`).
+tokio = ["dep:tokio", "tokio/net"]
 
 [dependencies]
 bytes.workspace = true

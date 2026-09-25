@@ -10,8 +10,9 @@
 //! The thread exists because the async runtime cannot park on a shared word:
 //! its reactor waits on descriptors. The price is a second wake per crossing —
 //! the writer wakes this thread, this thread wakes the task — which a Unix
-//! socket does not pay. `bell` (feature `tokio-doorbell`) removes it by letting
-//! the runtime wait on a named socket instead; the README's "Waiting" section
+//! socket does not pay. With the `tokio` feature, `bell` removes it by letting
+//! the runtime wait on a named socket instead, and this thread only answers
+//! for a table used where no runtime is current; the README's "Waiting" section
 //! has the measurement and why a shared descriptor was not the answer.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

@@ -123,7 +123,7 @@ impl Table {
         self.header().epoch.load(Ordering::Acquire)
     }
 
-    #[cfg(all(unix, feature = "tokio-doorbell"))]
+    #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn own_doorbell(&self) -> &Doorbell {
         self.doorbell(usize::from(self.node))
     }
@@ -413,7 +413,7 @@ impl Table {
         if self.is_shared() {
             let mut driver = lock_unpoisoned(&self.driver);
             if driver.is_none() {
-                #[cfg(all(unix, feature = "tokio-doorbell"))]
+                #[cfg(all(unix, feature = "tokio"))]
                 if let (Some(bell), Ok(runtime)) =
                     (&self.bell, tokio::runtime::Handle::try_current())
                 {
@@ -572,7 +572,7 @@ impl Drop for Table {
     fn drop(&mut self) {
         match lock_unpoisoned(&self.driver).take() {
             Some(Driving::Thread(mut driver)) => driver.stop(self.generation()),
-            #[cfg(all(unix, feature = "tokio-doorbell"))]
+            #[cfg(all(unix, feature = "tokio"))]
             Some(Driving::Reactor(driver)) => {
                 if let Some(bell) = &self.bell {
                     driver.stop(self.own_doorbell(), bell);
@@ -587,7 +587,7 @@ impl Drop for Table {
 /// generation word, or a task on the runtime woken through the bell.
 enum Driving {
     Thread(Driver),
-    #[cfg(all(unix, feature = "tokio-doorbell"))]
+    #[cfg(all(unix, feature = "tokio"))]
     Reactor(crate::bell::ReactorDriver)
 }
 
