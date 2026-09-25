@@ -1,5 +1,5 @@
-# The de02 Gitea's Cargo registry: where pre-releases of this workspace are
-# published and where its consumers take them from. The address is the VPN's
-# until Gitea is served behind the edge under its own name.
+# The de02 Gitea's Cargo registry: where pre-releases are published and
+# where consumers take them from. Gitea sits behind portico as
+# git.claviron.dev, reachable over the VPN and from de02 (ACL).
 [registries.de02]
-index = "sparse+http://10.8.0.1:3000/api/packages/developer/cargo/"
+index = "sparse+https://git.claviron.dev/api/packages/developer/cargo/"
