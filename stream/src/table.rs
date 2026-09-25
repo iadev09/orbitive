@@ -70,7 +70,10 @@ pub(crate) struct Table {
     /// so no cross-process lock is needed here.
     allocate: Mutex<usize>,
     pub(crate) registry: Registry,
-    driver: Mutex<Option<Driver>>,
+    driver: Mutex<Option<Driving>>,
+    /// Where this table rings a node whose doorbell a socket answers.
+    #[cfg(unix)]
+    bell: Option<crate::bell::Bell>,
     /// The driver's end of this process's readiness descriptor, once
     /// somebody has asked for one. Read on every drain, so it is a
     /// `OnceLock` rather than a lock.
@@ -118,6 +121,11 @@ impl Table {
 
     pub(crate) fn epoch(&self) -> u64 {
         self.header().epoch.load(Ordering::Acquire)
+    }
+
+    #[cfg(all(unix, feature = "tokio-doorbell"))]
+    pub(crate) fn own_doorbell(&self) -> &Doorbell {
+        self.doorbell(usize::from(self.node))
     }
 
     fn doorbell(
@@ -257,7 +265,19 @@ impl Table {
         }
         let doorbell = self.doorbell(node);
         doorbell.generation.fetch_add(1, Ordering::SeqCst);
-        if doorbell.listening.load(Ordering::SeqCst) > 0 {
+        let listening = doorbell.listening.load(Ordering::SeqCst);
+        #[cfg(unix)]
+        let listening = {
+            use crate::bell::ARMED;
+            if listening & ARMED != 0
+                && doorbell.listening.fetch_and(!ARMED, Ordering::SeqCst) & ARMED != 0
+                && let Some(bell) = &self.bell
+            {
+                bell.ring(node);
+            }
+            listening & !ARMED
+        };
+        if listening > 0 {
             crate::wake_on(&doorbell.generation);
         }
     }
@@ -393,10 +413,20 @@ impl Table {
         if self.is_shared() {
             let mut driver = lock_unpoisoned(&self.driver);
             if driver.is_none() {
-                *driver = Some(Driver::start(
+                #[cfg(all(unix, feature = "tokio-doorbell"))]
+                if let (Some(bell), Ok(runtime)) =
+                    (&self.bell, tokio::runtime::Handle::try_current())
+                {
+                    *driver = Some(Driving::Reactor(
+                        crate::bell::ReactorDriver::start(self, bell, &runtime)
+                            .map_err(Error::Io)?
+                    ));
+                    return Ok(());
+                }
+                *driver = Some(Driving::Thread(Driver::start(
                     Arc::as_ptr(self),
                     format!("orbit-stream-{}-driver", self.node)
-                )?);
+                )?));
             }
         }
         Ok(())
@@ -540,10 +570,25 @@ impl Doorstep for Table {
 
 impl Drop for Table {
     fn drop(&mut self) {
-        if let Some(mut driver) = lock_unpoisoned(&self.driver).take() {
-            driver.stop(self.generation());
+        match lock_unpoisoned(&self.driver).take() {
+            Some(Driving::Thread(mut driver)) => driver.stop(self.generation()),
+            #[cfg(all(unix, feature = "tokio-doorbell"))]
+            Some(Driving::Reactor(driver)) => {
+                if let Some(bell) = &self.bell {
+                    driver.stop(self.own_doorbell(), bell);
+                }
+            }
+            None => {}
         }
     }
+}
+
+/// What answers this process's doorbell: the thread parked on the
+/// generation word, or a task on the runtime woken through the bell.
+enum Driving {
+    Thread(Driver),
+    #[cfg(all(unix, feature = "tokio-doorbell"))]
+    Reactor(crate::bell::ReactorDriver)
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -627,6 +672,11 @@ pub(crate) fn open(
         allocate: Mutex::new(0),
         registry: Registry::new(geometry.total_slots),
         driver: Mutex::new(None),
+        #[cfg(unix)]
+        bell: match &key {
+            Key::Shm(name, _) => Some(crate::bell::Bell::new(name).map_err(Error::Io)?),
+            Key::Memory(..) => None
+        },
         readiness: std::sync::OnceLock::new()
     });
     tables.insert(key, Arc::downgrade(&table));

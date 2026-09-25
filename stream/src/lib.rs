@@ -42,6 +42,8 @@ use std::{fmt, io};
 use bytes::{Bytes, BytesMut};
 use orbit_core::{Fleet, NetId64};
 
+#[cfg(unix)]
+mod bell;
 pub mod exchange;
 mod layout;
 #[cfg(feature = "tokio")]
