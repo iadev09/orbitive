@@ -20,6 +20,12 @@
 //!
 //! The writer's half is compiled in every build: a process without the
 //! feature must still ring a node whose listener has it.
+//!
+//! Limits, not yet settled: the listener runs on the runtime current when a
+//! stream first registers a waker, so a process with several runtimes has it
+//! on one of them, and if that runtime shuts down while others still wait on
+//! streams nothing answers the bell. Where no runtime is current the table
+//! uses the thread as before.
 
 use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};

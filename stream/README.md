@@ -237,6 +237,45 @@ there is no thread at all: the other end wakes the task directly.
 `tokio_util::io::ReaderStream` turns a `ReadHalf` into a stream of `Bytes`
 chunks; write boundaries are not preserved, only the bytes and their order.
 
+### Why a thread, and the doorbell the runtime answers
+
+That thread is a hop. A Tokio runtime sleeps in its reactor, which waits on
+descriptors; it cannot park on a word in shared memory. So a crossing
+wakes twice: the writer wakes the doorbell thread, and the thread wakes the
+task's worker. A Unix socket wakes the worker once. Measured on a WebSocket
+echo (macOS, one round trip per message), that is one context switch more
+on each side and about 20% more CPU a message than the socket behind the
+same edge.
+
+A descriptor the reactor could wait on is not simply shared between
+processes. A pipe is not a broadcast and cannot be opened by a process that
+did not inherit it; an `eventfd` or kqueue `EVFILT_USER` is private to its
+process; a descriptor inherited across `fork` does not reach a process that
+joined the fleet on its own, which Orbit supports.
+
+The `tokio-doorbell` feature (experimental) sidesteps that with a name
+instead of a descriptor. Each process binds a Unix datagram socket named
+after its segment and node, and a task on the runtime waits on it. Before
+waiting the task sets a bit in its node's `listening` word; a writer that
+finds the bit clears it and sends one byte. The reactor wakes the task, the
+task drains the pending bits, and the tasks it wakes run on that worker —
+one wake per crossing. Any process can reach a name, so nothing is
+inherited or passed. The order is the futex idiom's: the writer bumps the
+generation and then reads `listening`, the listener sets the bit and then
+reads the generation, both sequentially consistent, so one of them sees the
+other. On the same benchmark it removed two switches a round trip and 14%
+of the CPU; under saturated HTTP it changed nothing, because a busy driver
+thread is rarely asleep.
+
+The writer's half is built into every configuration, so a process without
+the feature still rings a node whose listener has it. On Linux the name is
+abstract and leaves nothing behind; elsewhere it is a socket file under
+`/tmp/orbit-bell-<uid>/`, removed when the table drops. The listener runs
+on the runtime current when a stream first waits, and falls back to the
+thread where there is none. Not settled yet: a process with several
+runtimes gets its listener on whichever registered first, and nothing takes
+over if that runtime shuts down while others still hold streams.
+
 ## Geometry and lifetime
 
 Geometry is compile-time, like the other Orbit tables:
