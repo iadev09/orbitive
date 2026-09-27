@@ -684,6 +684,35 @@ impl Fleet {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    /// Publish one contiguous batch and wake the ring's readers only if one
+    /// is parked — [`publish_notified_parked`](Self::publish_notified_parked)
+    /// for a batch. A per-node lane commits the whole batch before a reader
+    /// can see any of it.
+    pub fn publish_batch_notified_parked<T: OrbitTyped>(
+        &self,
+        frame_kind: u8,
+        ver: u64,
+        payloads: Vec<Bytes>
+    ) -> std::io::Result<Vec<NetId64>> {
+        match &self.inner.backing {
+            RingBacking::Shm(rings) => {
+                let ring = rings.get_or_create_for::<T>()?;
+                let ids = ring.write_batch(self.node_id(), frame_kind, ver, payloads)?;
+                if !ids.is_empty() {
+                    ParkedRingEventFd::notify(&ring)?;
+                }
+                Ok(ids)
+            }
+            RingBacking::InMemory(rings) => Ok(rings.get_or_create::<T>().write_batch(
+                self.node_id(),
+                frame_kind,
+                ver,
+                payloads
+            ))
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
     /// Publish one contiguous batch and notify native waiters once after the
     /// complete batch commits.
     pub fn publish_batch_notified<T: OrbitTyped>(
