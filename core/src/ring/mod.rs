@@ -61,7 +61,7 @@ mod readiness;
 pub mod shm;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-pub use readiness::RingEventFd;
+pub use readiness::{ParkedRingEventFd, RingEventFd};
 
 /// Writer ownership for one [`OrbitTyped`] ring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

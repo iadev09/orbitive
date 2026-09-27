@@ -211,3 +211,52 @@ fn independent_readers_broadcast_late_join_and_drop() {
         peer.finish();
     }
 }
+
+#[derive(Clone)]
+struct Parked;
+
+impl OrbitTyped for Parked {
+    const KIND: u8 = 82;
+    const RING_SPEC: RingSpec = RingSpec::new(64, 8);
+}
+
+/// A parked reader is woken by every publish that finds it parked, and a
+/// publish racing its parking is not lost: each round publishes from another
+/// thread while the reader is anywhere between drain and park.
+#[test]
+fn parked_readiness_loses_no_publish() {
+    let name = Box::leak(format!("pk{:x}", std::process::id()).into_boxed_str());
+    let fleet = Fleet::join_shm_as(name, 1, NodeId::new(0)).unwrap();
+    let fd = fleet.ring_event_fd_parked::<Parked>().unwrap();
+    for round in 0..500u64 {
+        let publisher = fleet.clone();
+        let task = std::thread::spawn(move || {
+            publisher
+                .publish_notified_parked::<Parked>(0, round, Bytes::from_static(b"p"))
+                .unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "round {round}: parked reader was not woken");
+            if readable_parked(&fd, 5000) {
+                fd.drain().unwrap();
+                if fleet.read_head::<Parked>().is_some_and(|frame| frame.ver == round) {
+                    break;
+                }
+            }
+        }
+        task.join().unwrap();
+    }
+    drop(fd);
+    fleet.shm_ring::<Parked>().unwrap().unlink().unwrap();
+}
+
+fn readable_parked(
+    fd: &orbit_core::ParkedRingEventFd,
+    timeout: i32
+) -> bool {
+    let mut poll = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let result = unsafe { libc::poll(&mut poll, 1, timeout) };
+    assert!(result >= 0, "poll: {}", std::io::Error::last_os_error());
+    result > 0 && poll.revents & libc::POLLIN != 0
+}

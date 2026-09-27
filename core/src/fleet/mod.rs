@@ -10,11 +10,11 @@ use dashmap::DashMap;
 use crate::OrbitTyped;
 use crate::error::{Error, Result};
 use crate::id::NetId64;
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-use crate::ring::RingEventFd;
 #[cfg(unix)]
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
 use crate::ring::{Frame, Ring, RingRegistry, RingTopology};
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+use crate::ring::{ParkedRingEventFd, RingEventFd};
 
 mod cursor;
 pub use cursor::{FleetLaneCursor, FleetLanePoll};
@@ -636,6 +636,47 @@ impl Fleet {
                 Ok(id)
             }
             // Process-local fleets do not need a kernel wake bridge.
+            RingBacking::InMemory(rings) => {
+                Ok(rings.get_or_create::<T>().write(self.node_id(), frame_kind, ver, payload))
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    /// Readiness for a ring published with
+    /// [`publish_notified_parked`](Self::publish_notified_parked). See
+    /// [`ParkedRingEventFd`]: every reader of such a ring uses this, not
+    /// [`ring_event_fd`](Self::ring_event_fd).
+    pub fn ring_event_fd_parked<T: OrbitTyped>(&self) -> std::io::Result<ParkedRingEventFd> {
+        match &self.inner.backing {
+            RingBacking::Shm(rings) => ParkedRingEventFd::new(rings.get_or_create_for::<T>()?),
+            RingBacking::InMemory(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Orbit parked readiness requires a shared-memory fleet"
+            ))
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    /// Publish one frame and wake the ring's readers only if one is parked.
+    ///
+    /// For rings read through [`ring_event_fd_parked`](Self::ring_event_fd_parked):
+    /// while every reader is busy draining, a publish is a write and an
+    /// atomic, with no syscall. Rings published with
+    /// [`publish_notified`](Self::publish_notified) are not affected.
+    pub fn publish_notified_parked<T: OrbitTyped>(
+        &self,
+        frame_kind: u8,
+        ver: u64,
+        payload: Bytes
+    ) -> std::io::Result<NetId64> {
+        match &self.inner.backing {
+            RingBacking::Shm(rings) => {
+                let ring = rings.get_or_create_for::<T>()?;
+                let id = ring.write(self.node_id(), frame_kind, ver, payload)?;
+                ParkedRingEventFd::notify(&ring)?;
+                Ok(id)
+            }
             RingBacking::InMemory(rings) => {
                 Ok(rings.get_or_create::<T>().write(self.node_id(), frame_kind, ver, payload))
             }
