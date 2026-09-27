@@ -463,8 +463,7 @@ impl Arena {
         incarnation: Incarnation
     ) {
         let metadata = self.metadata();
-        for first in 0..metadata.len() {
-            let slot = &metadata[first];
+        for (first, slot) in metadata.iter().enumerate() {
             let state = slot.state.load(Ordering::Acquire);
             let producer_node = first / self.geometry.slots_per_node;
             let allocation_start = slot.allocation_first.load(Ordering::Acquire) as usize == first;
@@ -1016,7 +1015,7 @@ mod tests {
         let arena =
             PayloadArena::open(fleet(), Incarnation::new(1), PayloadArenaSpec::new(242, 4, 64))
                 .expect("arena");
-        let first = arena.publish(&vec![1; 256]).expect("fills lane");
+        let first = arena.publish(&[1; 256]).expect("fills lane");
         let descriptor = descriptor(&first, 1);
         first.mark_published();
         assert!(matches!(arena.publish(&[2]), Err(Error::PayloadFull { .. })));
@@ -1029,8 +1028,8 @@ mod tests {
         let arena =
             PayloadArena::open(fleet(), Incarnation::new(1), PayloadArenaSpec::new(243, 2, 64))
                 .expect("arena");
-        drop(arena.publish(&vec![1; 128]).expect("reserved publication"));
-        assert!(arena.publish(&vec![2; 128]).is_ok());
+        drop(arena.publish(&[1; 128]).expect("reserved publication"));
+        assert!(arena.publish(&[2; 128]).is_ok());
     }
 
     #[test]
@@ -1038,7 +1037,7 @@ mod tests {
         let arena =
             PayloadArena::open(fleet(), Incarnation::new(1), PayloadArenaSpec::new(244, 2, 64))
                 .expect("arena");
-        let publication = arena.publish(&vec![1; 128]).expect("fills lane");
+        let publication = arena.publish(&[1; 128]).expect("fills lane");
         let descriptor = descriptor(&publication, 1);
         publication.mark_published();
         let chunk = arena.read(descriptor).expect("held chunk");
@@ -1104,7 +1103,7 @@ mod tests {
         let arena =
             PayloadArena::open(fleet(), Incarnation::new(1), PayloadArenaSpec::new(247, 2, 64))
                 .expect("arena");
-        let publication = arena.publish(&vec![1; 128]).expect("fills lane");
+        let publication = arena.publish(&[1; 128]).expect("fills lane");
         let descriptor = descriptor(&publication, 1);
         publication.mark_published();
         let chunk = arena.read(descriptor).expect("held chunk");
@@ -1128,7 +1127,7 @@ mod tests {
 
         let abandoned = arena.arena.reserve(128).expect("reserved by producer");
         arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(7));
-        let replacement = arena.publish(&vec![2; 128]).expect("producer credit reclaimed");
+        let replacement = arena.publish(&[2; 128]).expect("producer credit reclaimed");
         drop(abandoned);
         let replacement_descriptor = descriptor(&replacement, 2);
         replacement.mark_published();
@@ -1137,7 +1136,7 @@ mod tests {
         arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(6));
         assert!(matches!(arena.publish(&[3]), Err(Error::PayloadFull { .. })));
         arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(7));
-        let after_reader_death = arena.publish(&vec![4; 128]).expect("reader credit reclaimed");
+        let after_reader_death = arena.publish(&[4; 128]).expect("reader credit reclaimed");
         drop(held);
         let after_descriptor = descriptor(&after_reader_death, 3);
         after_reader_death.mark_published();
@@ -1155,6 +1154,6 @@ mod tests {
 
         arena.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(8));
         assert!(arena.read(descriptor).is_err());
-        assert!(arena.publish(&vec![9; 128]).is_ok());
+        assert!(arena.publish(&[9; 128]).is_ok());
     }
 }
