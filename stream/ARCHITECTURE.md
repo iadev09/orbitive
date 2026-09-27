@@ -204,7 +204,7 @@ its own.
 ## Geometry for a deployment (Linux is production)
 
 Measured 2026-09-17 on the same M3 Max, macOS host and a Debian aarch64
-guest (`xd01`); logs in `BENCHMARKS.local.md`:
+guest; logs in `BENCHMARKS.local.md`:
 
 | | macOS host | Linux guest |
 |---|---|---|
@@ -225,7 +225,7 @@ and both rows above obey it (64 KiB / 12 µs ≈ 5 GiB/s, 64 KiB / 55 µs ≈
 and no user-space wake hop, not a faster copy. Consequences:
 
 - **The ring size is a per-deployment number.** The sweep was run end to
-  end on `xd01` on 2026-09-18 (`benches/fleet.rs`, four processes) and
+  end on the Linux guest on 2026-09-18 (`benches/fleet.rs`, four processes) and
   the formula holds to the wake count: a 1 MiB body one at a time goes
   2.24 → 7.68 → 21.7 GiB/s as the ring goes 64 KiB → 256 KiB → 1 MiB,
   with 62.6 → 18.2 → 6.05 voluntary context switches per request. At

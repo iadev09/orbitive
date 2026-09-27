@@ -82,7 +82,7 @@ resolver = "3"
 
 [workspace.package]
 version = "0.5.0-alpha.2"
-# Pre-releases go to the de02 registry only; a final version is published to
+# Pre-releases go to a private registry only; a final version is published to
 # crates.io by hand, never by accident.
 publish = ["de02"]
 edition = "2024"
