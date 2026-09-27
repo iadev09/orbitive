@@ -721,6 +721,21 @@ impl Streams {
         self.table.node_dead(node.get(), incarnation.get());
     }
 
+    /// This process took over its node from an earlier life: every side that
+    /// any other incarnation of this node held, in any lane, is finished, as
+    /// [`Streams::node_dead`] finishes one. The node id is inherited and the
+    /// incarnation is not, so what the node left behind is told apart from
+    /// this process's own by the stamp alone — no report from a supervisor
+    /// is needed.
+    ///
+    /// Call it once, before this process creates or opens anything. It is
+    /// sound only where a node is handed on after its holder is gone; a
+    /// node given to a second process while the first still runs would
+    /// have that process's streams ended under it.
+    pub fn supersede(&self) {
+        self.table.supersede();
+    }
+
     /// Clear the table during quiescent owner boot and start a new epoch.
     /// Every handle and every ticket from before goes stale.
     pub fn reset_all(&self) {

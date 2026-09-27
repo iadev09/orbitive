@@ -440,6 +440,31 @@ impl Table {
         node: u16,
         incarnation: u64
     ) {
+        self.end_sides(node, |held| held == incarnation);
+        let doorbell = self.doorbell(usize::from(node));
+        if doorbell.incarnation.load(Ordering::SeqCst) == incarnation {
+            doorbell.listening.store(0, Ordering::SeqCst);
+            doorbell.incarnation.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// This process took over its node: every side an earlier life of the
+    /// node held is finished, as [`Self::node_dead`] finishes one life's.
+    pub(crate) fn supersede(&self) {
+        let mine = self.incarnation;
+        self.end_sides(self.node, |held| held != mine);
+        let doorbell = self.doorbell(usize::from(self.node));
+        if doorbell.incarnation.load(Ordering::SeqCst) != mine {
+            doorbell.listening.store(0, Ordering::SeqCst);
+            doorbell.incarnation.store(0, Ordering::SeqCst);
+        }
+    }
+
+    fn end_sides(
+        &self,
+        node: u16,
+        dead: impl Fn(u64) -> bool
+    ) {
         for (index, slot) in self.slots().iter().enumerate() {
             if slot.state.load(Ordering::Acquire) != SLOT_LIVE {
                 continue;
@@ -448,7 +473,7 @@ impl Table {
             for side in 0..2 {
                 if slot.claimed[side].load(Ordering::SeqCst) != SIDE_CLAIMED
                     || slot.node[side].load(Ordering::Acquire) != node
-                    || slot.incarnation[side].load(Ordering::Acquire) != incarnation
+                    || !dead(slot.incarnation[side].load(Ordering::Acquire))
                 {
                     continue;
                 }
@@ -476,11 +501,6 @@ impl Table {
                     Ordering::SeqCst
                 );
             }
-        }
-        let doorbell = self.doorbell(usize::from(node));
-        if doorbell.incarnation.load(Ordering::SeqCst) == incarnation {
-            doorbell.listening.store(0, Ordering::SeqCst);
-            doorbell.incarnation.store(0, Ordering::SeqCst);
         }
     }
 

@@ -247,6 +247,45 @@ fn a_killed_peer_is_reported_dead_and_the_survivor_ends_cleanly() {
     assert!(!owner.streams.is_live(ticket.id));
 }
 
+/// No report this time: the process that takes node 1 over after the kill
+/// ends what its earlier life held, by the incarnation stamp alone.
+#[test]
+fn the_successor_on_a_node_ends_what_its_earlier_life_held() {
+    let owner = Owner::new("s");
+    let mut peer = Peer::spawn(owner.name);
+    peer.send("hold");
+
+    let (a, ticket) = owner.streams.create().unwrap();
+    owner.streams.offer(ticket, NodeId::new(1)).unwrap();
+    peer.expect("holding");
+    assert_eq!(a.blocking_read_chunk(16).unwrap().as_ref(), b"hello");
+
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0_u8; 8];
+        let outcome = a.blocking_read(&mut buf);
+        (a, outcome)
+    });
+    peer.kill();
+
+    let successor = Streams::new(
+        Arc::new(Fleet::join_shm_as(owner.name, 2, NodeId::new(1)).unwrap()),
+        Incarnation::new(PEER_INCARNATION + 1)
+    )
+    .unwrap();
+    successor.supersede();
+    let (a, outcome) = reader.join().unwrap();
+    assert!(matches!(outcome, Err(Error::Reset)), "{outcome:?}");
+    assert!(matches!(a.try_write(b"x"), Err(Error::PeerGone)));
+    drop(a);
+    assert!(!owner.streams.is_live(ticket.id));
+
+    // What the successor opens itself is its own, and a second call leaves
+    // it alone.
+    let (_mine, own) = successor.create().unwrap();
+    successor.supersede();
+    assert!(successor.is_live(own.id));
+}
+
 /// The same echo with the parent on Tokio: the doorbell driver, not a
 /// blocking wait, is what wakes the parent's tasks when the peer drains and
 /// writes.
