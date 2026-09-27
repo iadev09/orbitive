@@ -370,11 +370,28 @@ impl ShmRegion {
         } else {
             None
         };
-        let lock_error = match std::fs::remove_file(&self.lock_path) {
+        let mut lock_error = match std::fs::remove_file(&self.lock_path) {
             Ok(()) => None,
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => Some(error)
         };
+        let name = self.name.to_string_lossy();
+        // SAFETY: a plain syscall with no arguments.
+        let uid = unsafe { libc::geteuid() };
+        match companion_lock_files(&name, uid) {
+            Ok(files) => {
+                for file in files {
+                    if let Err(error) = std::fs::remove_file(&file)
+                        && error.kind() != io::ErrorKind::NotFound
+                    {
+                        lock_error.get_or_insert(error);
+                    }
+                }
+            }
+            Err(error) => {
+                lock_error.get_or_insert(error);
+            }
+        }
         if let Some(error) = shm_error.or(lock_error) {
             return Err(error);
         }
@@ -580,6 +597,74 @@ pub fn try_lock_fleet_exclusive(
         return Ok(None);
     }
     Err(error)
+}
+
+/// One process's hold on one lane of a segment: an exclusive `flock` on the
+/// lane's own lock file, kept for as long as this lives and released by the
+/// kernel when the process dies, however it dies.
+///
+/// It is how a lane's owner is known to be gone without a timeout and without
+/// a PID, which another PID namespace would read wrongly: a hold that can be
+/// taken has nobody behind it.
+pub struct LaneHold {
+    lock_fd: OwnedFd
+}
+
+impl Drop for LaneHold {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.lock_fd.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Take lane `lane` of segment `shm_name`, if no live process holds it.
+///
+/// `Ok(None)` means a process holding it is alive. Never waits.
+pub fn try_hold_lane(
+    shm_name: &str,
+    lane: usize
+) -> io::Result<Option<LaneHold>> {
+    let name = format!("{}.lane{lane}", shm_name.trim_start_matches('/'));
+    let lock_fd = open_lock_file(&lock_file_path(&name))?;
+    // SAFETY: `lock_fd` is an open descriptor owned by this call.
+    let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(Some(LaneHold { lock_fd }));
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(error)
+}
+
+/// Every lock file beside segment `shm_name` of `uid`: the region's own and
+/// one per lane that was ever held ([`try_hold_lane`]). What removes a segment
+/// removes these with it; an unlocked one left behind is harmless, but it is
+/// one more file per lane for every segment that ever existed.
+pub fn companion_lock_files(
+    shm_name: &str,
+    uid: u32
+) -> io::Result<Vec<PathBuf>> {
+    let base = shm_name.trim_start_matches('/');
+    let own = format!("{base}.lock");
+    let lane = format!("{base}.lane");
+    let dir = lock_dir_for_uid(uid);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error)
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let Some(file) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if file == own || (file.starts_with(&lane) && file.ends_with(".lock")) {
+            found.push(entry.path());
+        }
+    }
+    Ok(found)
 }
 
 fn lock_file_path(shm_name: &str) -> PathBuf {

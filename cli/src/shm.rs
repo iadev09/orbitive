@@ -1,9 +1,8 @@
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::PathBuf;
 use std::{fs, io};
 
-use orbit_core::shm::ring_segment_name_for_uid;
+use orbit_core::shm::{companion_lock_files, ring_segment_name_for_uid};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Segment {
@@ -40,7 +39,10 @@ pub fn discover(
     Ok(segments)
 }
 
-pub fn unlink(segment: &Segment) -> io::Result<()> {
+pub fn unlink(
+    segment: &Segment,
+    uid: u32
+) -> io::Result<()> {
     let name = c_name(&segment.name)?;
     // SAFETY: `name` is a valid, NUL-terminated POSIX SHM name.
     let rc = unsafe { libc::shm_unlink(name.as_ptr()) };
@@ -51,12 +53,14 @@ pub fn unlink(segment: &Segment) -> io::Result<()> {
         }
     }
 
-    let lock_path = lock_path(&segment.name);
-    match fs::remove_file(&lock_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(context(&lock_path.display().to_string(), error))
+    for lock_path in companion_lock_files(&segment.name, uid)? {
+        match fs::remove_file(&lock_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(context(&lock_path.display().to_string(), error))
+        }
     }
+    Ok(())
 }
 
 fn inspect(
@@ -123,10 +127,6 @@ fn c_name(name: &str) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SHM name has a NUL byte"))
 }
 
-fn lock_path(shm_name: &str) -> PathBuf {
-    PathBuf::from("/tmp").join(format!("{}.lock", shm_name.trim_start_matches('/')))
-}
-
 fn context(
     target: &str,
     error: io::Error
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(found[0].name, name);
         assert!(found[0].size >= 4096);
 
-        unlink(&found[0]).expect("unlink must succeed");
+        unlink(&found[0], uid).expect("unlink must succeed");
         assert!(
             discover(&fleet, uid, Some(kind)).expect("second discovery must succeed").is_empty()
         );

@@ -133,7 +133,7 @@ fn clear(args: ClearArgs) -> Result<(), Box<dyn Error>> {
     let mut failures = Vec::new();
 
     for segment in &segments {
-        match shm::unlink(segment) {
+        match shm::unlink(segment, uid) {
             Ok(()) => {
                 println!("removed {}", segment.name);
                 removed += 1;
