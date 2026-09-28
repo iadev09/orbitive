@@ -107,7 +107,9 @@ listening while it does. Taking is not claiming: `open` is, once per side.
 
 ## Waking
 
-Three mechanisms, all hints over authoritative state:
+Readiness is authoritative in the SHM rings and bitmaps. Every wake mechanism
+is only a coalescing hint to inspect that state; application bytes never ride a
+socket.
 
 - **Blocking waiters** park on the direction's `changes` word with
   `orbit_core::sync::wait_word`, announcing themselves in `waiters` first
@@ -149,12 +151,39 @@ Three mechanisms, all hints over authoritative state:
   `tokio_stream::a_body_behind_a_header_wakes_a_reader_that_parked_between_the_two`
   and was found by `benches/fleet.rs` across four processes.
 
-  One
-  driver thread per process per (segment, node) parks on the doorbell,
-  swaps the bitmap words out and wakes the registered tasks. Bit before
-  bump, drain before compare: either the driver sees the bump or the park
-  returns at once. In memory the writer wakes the registry directly and no
-  thread exists.
+  A shared table has two ways to turn that node doorbell into local task
+  wakes:
+
+  - **Doorstep** (`wake.rs`) parks one driver thread per process per
+    (segment, node) on the shared generation word. The writer wakes that
+    thread, which drains the pending bitmap and wakes the registered task:
+    two wakes per crossing (writer -> thread, thread -> task) and one
+    standing thread. This is the fallback when no async runtime is current.
+  - **Bell** (`bell.rs`, with the `tokio` feature) binds one Unix datagram
+    socket whose name is derived from the SHM segment, node and uid. A task
+    on the runtime waits on it as on any other socket. Before parking it sets
+    `ARMED` (`1 << 31`) in the node's `listening` word. A writer that observes
+    the bit atomically clears it and sends one byte; the reactor wakes the
+    driver task directly on a runtime worker, which drains the pending bitmap
+    and wakes the registered tasks there. That is one kernel wake per
+    crossing and no bridge thread.
+
+  The socket name is the rendezvous. No descriptor is inherited or passed
+  with `SCM_RIGHTS`, so an independently joined process reaches the same bell
+  as a forked sibling. Linux uses an abstract socket name, which leaves
+  nothing in the filesystem; other Unix targets use a socket file below
+  `/tmp/orbit-bell-<uid>/` and remove it on drop.
+
+  `ARMED` is also the load gate. A reader that is already draining the ring
+  has not armed the bell, so the writer sends no datagram. Wake cost therefore
+  follows idle-to-busy transitions, not bytes or chunks transferred. Both the
+  word wait and the socket bell enter the kernel when they actually wake; the
+  bell's advantage is that a busy path does not ring at all, and a parked
+  runtime takes one hop instead of two through a standing thread.
+
+  Bit before bump, drain before compare, and arm before re-check preserve the
+  no-lost-wake property on both paths. In memory the writer wakes the registry
+  directly and neither a thread nor a socket exists.
 
 - **A descriptor**, for a runtime that parks on descriptors rather than
   on wakers or on a word: `Streams::readiness` hands out one `eventfd`
@@ -171,11 +200,14 @@ Three mechanisms, all hints over authoritative state:
   the ring bridge and with `orbit-pool`: one descriptor implementation,
   three things that signal it.
 
-The driver starts lazily on the first registration in a process, or when
-a readiness descriptor is taken, and is stopped and joined when the table
-drops, before the mapping goes away; a
-forked child that inherited the table skips the join because the thread is
-not there. Create tables after fork, as with ring readiness fds.
+The doorbell answerer starts lazily on the first registration in a process, or
+when a readiness descriptor is taken. The socket listener runs on the runtime
+current at that first registration. This is not yet a multi-runtime handoff:
+if that runtime shuts down while other runtimes still hold streams, nothing
+takes the listener over. Where no runtime is current, the thread driver is
+used; it is stopped and joined when the table drops, before the mapping goes
+away. A forked child that inherited the table skips the join because the
+thread is not there. Create tables after fork, as with ring readiness fds.
 
 ## Specs: one fleet, several tables
 
@@ -263,10 +295,11 @@ and no user-space wake hop, not a faster copy. Consequences:
   better. Anything latency-shaped (a lease handshake, a small RPC)
   should count its hops: each stream setup and each direction reversal
   is one wake.
-- The driver-thread hop (writer → futex → driver → waker → runtime) is
-  one of those wakes on both hosts. Parking the runtime directly on a
-  per-process fd fed by the doorbell would remove it; it stays on the
-  list until a consumer needs the microseconds and measures them.
+- With `tokio`, the named Unix-datagram bell parks the runtime directly and
+  removes the driver-thread hop (writer → futex → driver → waker →
+  runtime). The word-wait driver remains the fallback where no runtime is
+  current. This is deliberately hybrid: the payload and authoritative state
+  are SHM, while one byte on the bell is the parked runtime's wake wire.
 
 ## Invariants
 

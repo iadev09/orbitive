@@ -31,6 +31,41 @@ independent when their arenas differ. The helper rejects zero and slot counts
 outside the local lane; an adapter may choose `n` per invocation without
 changing the SHM contract.
 
+## Data path, rendezvous, and waking
+
+Control frames and payload bytes live in the named SHM tables above. Payload
+never travels through a socket: a `DATA` frame publishes an arena descriptor,
+and the peer reads the referenced slots directly. This SHM data path is the
+source of the transport's throughput advantage over a Unix byte stream.
+
+Peers rendezvous by name, not by descriptor passing. The fleet opens each SHM
+segment by name, while the exchange ticket identifies the control slot and
+lifetime to claim. No inherited file descriptor or `SCM_RIGHTS` exchange is
+required. A process that joined independently can open the same resources as a
+forked sibling; the name is the only shared rendezvous material.
+
+Readiness remains a hint over that authoritative SHM state. A blocking caller
+parks on a shared generation word. An async caller with a current runtime uses
+the named Unix-datagram bell: each process binds a socket name derived from the
+segment, node and uid, then the runtime waits on that socket directly. Before
+parking, the listener sets `ARMED` in its node's `listening` word. A writer
+that observes `ARMED` clears it and sends one byte, waking the runtime worker
+in one hop; where no runtime is current, a driver thread waits on the shared
+word and relays the wake to the task in two hops.
+
+The gate is important under load. A reader that is already draining SHM is not
+armed, so writers send no datagram. Wake syscalls track idle-to-busy
+transitions rather than payload throughput. The design is therefore a hybrid,
+not a claim that sockets disappeared: SHM carries all control and payload
+data, and a one-byte datagram is used only as the async wake wire when a
+runtime is present.
+
+On Linux the bell uses an abstract socket name. Other Unix targets use a
+socket file below `/tmp/orbit-bell-<uid>/` and remove it on drop. The listener
+currently stays on the runtime that was current when the first waker was
+registered; multi-runtime handoff if that runtime shuts down is not yet
+defined.
+
 ## Endpoint and direction
 
 `Exchanges::create()` creates side A and an `ExchangeTicket`.
