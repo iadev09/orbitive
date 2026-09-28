@@ -1,7 +1,9 @@
 #![cfg(unix)]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use orbit_core::{Fleet, NodeId};
 use orbit_link::{InboxGeometry, LinkBodies, LinkSegment, LinkSpec};
 use orbit_stream::StreamSpec;
 
@@ -103,6 +105,10 @@ fn link_kinds_are_explicit_and_must_be_distinct() {
     let invalid = LinkSpec::new(4, 200, InboxGeometry::new(8, 256), StreamSpec::new(200, 8, 4096));
     assert!(LinkSegment::open(&fleet_name("kinds"), invalid).is_err());
     assert!(LinkBodies::for_name(&fleet_name("lane"), 4, 1, SPEC).is_err());
+
+    let name = fleet_name("capacity");
+    let fleet = Arc::new(Fleet::join_shm_as(&name, 3, NodeId::ZERO).unwrap());
+    assert!(LinkBodies::open(fleet, 1, SPEC).is_err());
 }
 
 #[test]

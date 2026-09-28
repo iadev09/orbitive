@@ -24,6 +24,11 @@ impl LinkBodies {
         spec: LinkSpec
     ) -> Result<Self> {
         spec.validate()?;
+        if fleet.fleet_capacity() != spec.fleet_capacity {
+            return Err(super::Error::Malformed(
+                "link stream fleet capacity differs from its inbox specification"
+            ));
+        }
         let streams = Streams::with_spec(fleet, Incarnation::new(incarnation), spec.streams)?;
         Ok(Self { streams })
     }
