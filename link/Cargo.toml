@@ -1,0 +1,28 @@
+[package]
+name = "orbit-link"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Named reusable duplex sessions between members of an Orbit fleet."
+keywords = ["ipc", "session", "shared-memory", "fleet", "stream"]
+categories = ["asynchronous", "concurrency"]
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/orbit-link"
+exclude.workspace = true
+
+[features]
+tokio = ["orbit-stream/tokio"]
+
+[dependencies]
+orbit-core.workspace = true
+orbit-stream.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+
+[[bench]]
+name = "dispatch"
+harness = false

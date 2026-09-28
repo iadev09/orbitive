@@ -62,6 +62,7 @@ bus.publish("worker.ready", b"worker-1")?;
 | `cell` | `orbitive::cell` | typed atomic cells addressed by id, shared across the fleet |
 | `events` | `orbitive::events` | raw topic and byte-payload event streams |
 | `invoke` | `orbitive::invoke` | bounded invocation requests with operation routing |
+| `link` / `link-tokio` | `orbitive::link` | named reusable duplex sessions between fleet members |
 | `lock` | `orbitive::lock` | keyed leases with ownership checks and fencing tokens |
 | `metrics` | `orbitive::metrics` | current metrics snapshots across workers |
 | `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
@@ -78,7 +79,8 @@ applications should opt in only when they need remote resource execution.
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
 [`orbit-arena`](arena/README.md), [`orbit-cell`](cell/README.md), [`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
-[`orbit-invoke`](invoke/README.md), [`orbit-lock`](lock/README.md),
+[`orbit-invoke`](invoke/README.md), [`orbit-link`](link/README.md),
+[`orbit-lock`](lock/README.md),
 [`orbit-metrics`](metrics/README.md), [`orbit-pool`](pool/README.md),
 [`orbit-rustls`](rustls/README.md), and
 [`orbit-stream`](stream/README.md). Direct dependencies are supported when an

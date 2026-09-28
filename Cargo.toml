@@ -24,6 +24,8 @@ cell = ["dep:orbit-cell"]
 arena = ["dep:orbit-arena"]
 invoke = ["dep:orbit-invoke"]
 invoke-tokio = ["invoke", "orbit-invoke?/tokio"]
+link = ["dep:orbit-link"]
+link-tokio = ["link", "orbit-link?/tokio"]
 metrics = ["dep:orbit-metrics"]
 rustls = ["rustls_0_23"]
 stream = ["dep:orbit-stream"]
@@ -39,6 +41,7 @@ full = [
     "events",
     "counter",
     "invoke",
+    "link",
     "metrics",
     "lock",
     "rustls",
@@ -56,6 +59,7 @@ orbit-events = { workspace = true, optional = true }
 orbit-counter = { workspace = true, optional = true }
 orbit-cell = { workspace = true, optional = true }
 orbit-invoke = { workspace = true, optional = true }
+orbit-link = { workspace = true, optional = true }
 orbit-metrics = { workspace = true, optional = true }
 orbit-pool = { workspace = true, optional = true }
 orbit-rustls = { workspace = true, optional = true }
@@ -70,6 +74,7 @@ members = [
     "cell",
     "events",
     "invoke",
+    "link",
     "lock",
     "rustls",
     "core",
@@ -108,6 +113,7 @@ orbit-counter = { version = "0.5.0-alpha.3", registry = "de02", path = "counter"
 orbit-cell = { version = "0.5.0-alpha.3", registry = "de02", path = "cell", default-features = false }
 orbit-arena = { version = "0.5.0-alpha.3", registry = "de02", path = "arena", default-features = false }
 orbit-invoke = { version = "0.5.0-alpha.3", registry = "de02", path = "invoke", default-features = false }
+orbit-link = { version = "0.5.0-alpha.3", registry = "de02", path = "link", default-features = false }
 orbit-metrics = { version = "0.5.0-alpha.3", registry = "de02", path = "metrics", default-features = false }
 orbit-pool = { version = "0.5.0-alpha.3", registry = "de02", path = "pool", default-features = false}
 orbit-stream = { version = "0.5.0-alpha.3", registry = "de02", path = "stream", default-features = false }

@@ -563,6 +563,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-link"
+version = "0.5.0-alpha.3"
+dependencies = [
+ "criterion",
+ "orbit-core",
+ "orbit-stream",
+ "tokio",
+]
+
+[[package]]
 name = "orbit-lock"
 version = "0.5.0-alpha.3"
 dependencies = [
@@ -624,6 +634,7 @@ dependencies = [
  "orbit-counter",
  "orbit-events",
  "orbit-invoke",
+ "orbit-link",
  "orbit-lock",
  "orbit-metrics",
  "orbit-pool",

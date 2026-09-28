@@ -1248,6 +1248,32 @@ impl Endpoint {
         Ok(Self { read, write })
     }
 
+    /// Clear this creator-held endpoint for another peer and restore its
+    /// process-local write state.
+    ///
+    /// [`Streams::rearm`] clears the shared directions after side B has let
+    /// go. An endpoint that sent FIN also remembers that fact locally in its
+    /// write half, so reusing the slot through the endpoint needs to clear
+    /// both layers. Keeping that pairing here prevents a caller from
+    /// successfully rearming SHM and then finding its retained writer still
+    /// closed.
+    ///
+    /// Only side A, the creator-held side, is reusable. The ticket remains
+    /// valid because rearming does not change the stream generation.
+    pub fn rearm(
+        &mut self,
+        streams: &Streams
+    ) -> Result<()> {
+        if self.side() != Side::A {
+            return Err(Error::Malformed(
+                "only the creator side of a stream can be rearmed".to_owned()
+            ));
+        }
+        streams.rearm(self.id())?;
+        self.write.shut = false;
+        Ok(())
+    }
+
     pub fn try_read(
         &self,
         buf: &mut [u8]

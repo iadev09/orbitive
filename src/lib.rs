@@ -58,6 +58,11 @@ pub mod invoke {
     pub use orbit_invoke::*;
 }
 
+#[cfg(feature = "link")]
+pub mod link {
+    pub use orbit_link::*;
+}
+
 #[cfg(feature = "metrics")]
 pub mod metrics {
     pub use orbit_metrics::*;
