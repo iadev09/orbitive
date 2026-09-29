@@ -4,6 +4,11 @@
 //! API is under [`core`], while optional semantic crates keep separate module
 //! namespaces.
 
+#[cfg(feature = "auth")]
+pub mod auth {
+    pub use orbit_auth::*;
+}
+
 /// Low-level Orbit primitives.
 pub mod core {
     pub use orbit_core::*;

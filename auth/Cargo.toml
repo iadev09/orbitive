@@ -1,0 +1,35 @@
+[package]
+name = "orbit-auth"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-backed encrypted tokens, cached principals, sessions and atomic refresh/replay."
+license.workspace = true
+repository.workspace = true
+keywords = ["auth", "token", "session", "aead", "orbit"]
+categories = ["authentication", "cryptography"]
+exclude.workspace = true
+
+[dependencies]
+orbit-core.workspace = true
+base64.workspace = true
+blake3.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+lru.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "validation"
+harness = false

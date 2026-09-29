@@ -61,6 +61,7 @@ bus.publish("worker.ready", b"worker-1")?;
 | always | `orbitive::ring` | typed rings, cursors, and readiness primitives |
 | Unix | `orbitive::shm` | POSIX shared-memory regions and naming |
 | always | `orbitive::core` | the complete low-level core surface |
+| `auth` | `orbitive::auth` | encrypted tokens, local Principal cache and fleet session/refresh/replay state |
 | `cache` | `orbitive::cache` | process-local L1 caches with fleet-wide mutation propagation |
 | `counter` | `orbitive::counter` | keyed signed counters shared across the fleet |
 | `cell` | `orbitive::cell` | typed atomic cells addressed by id, shared across the fleet |
@@ -75,6 +76,12 @@ bus.publish("worker.ready", b"worker-1")?;
 | `client-pool` | `orbitive::client_pool` | Tokio-based process-local outbound client ownership and lifecycle |
 | `client-pool-fleet` | `orbitive::client_pool` | fleet-wide client admission and remote-owner execution over pool-stream |
 | `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls server sessions and rustls 0.24 client sessions |
+
+`auth` can be enabled individually and is included in `full`. It shares authentication trust across
+domains and protocols through encrypted, audience/purpose-scoped tokens and
+a local decoded cache plus shared session, refresh and replay state. Backing follows
+the supplied Fleet. Cookie, Bearer, WebSocket and internal transport extraction
+remain in adapters; see [`orbit-auth`](auth/README.md).
 
 `stream` is the transport primitive: it provides bounded duplex byte flow and
 typed paired exchanges without deciding why an application moves those bytes.
@@ -100,6 +107,9 @@ The implementation crates are also published separately as
 [`orbit-stream`](stream/README.md). Direct dependencies are supported when an
 integration needs a single narrow layer; applications can otherwise use the
 facade and enable only the modules they need.
+
+The optional [`orbit-auth`](auth/README.md) implementation is also available as
+a narrow direct dependency, with backing selected by the supplied Fleet.
 
 ## Compile-time geometry
 
