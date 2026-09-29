@@ -191,6 +191,29 @@ impl Table {
         }
     }
 
+    /// Request admissions `node` holds on key `key_index`.
+    pub(crate) fn admissions(
+        &self,
+        node: usize,
+        key_index: usize
+    ) -> &AtomicU32 {
+        debug_assert!(self.geometry.fleet_concurrency);
+        debug_assert!(
+            node < self.geometry.fleet_capacity && key_index < self.geometry.key_capacity
+        );
+        // SAFETY: inside the optional admissions area by construction of
+        // `Geometry`; callers only use it when the feature is enabled.
+        unsafe {
+            &*self
+                .base()
+                .add(
+                    self.geometry.admissions_offset
+                        + (node * self.geometry.key_capacity + key_index) * size_of::<AtomicU32>()
+                )
+                .cast::<AtomicU32>()
+        }
+    }
+
     pub(crate) fn key(
         &self,
         index: usize
@@ -260,6 +283,7 @@ impl Table {
                     slot.key_hi.store(hi, Ordering::Relaxed);
                     slot.counts.store(0, Ordering::Relaxed);
                     slot.available.store(0, Ordering::Relaxed);
+                    slot.admitted.store(0, Ordering::Relaxed);
                     slot.changes.store(0, Ordering::Relaxed);
                     slot.waiters.store(0, Ordering::Relaxed);
                     for word in self.members(index) {
@@ -596,6 +620,17 @@ impl Table {
                 });
                 self.key_changed(key_index);
             }
+            if self.geometry.fleet_concurrency {
+                let held = self.admissions(usize::from(node), key_index).swap(0, Ordering::SeqCst);
+                if held > 0 {
+                    let _ = self.key(key_index).admitted.try_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |admitted| Some(admitted.saturating_sub(held))
+                    );
+                    self.key_changed(key_index);
+                }
+            }
         }
         let doorbell = self.doorbell(usize::from(node));
         if doorbell.incarnation.load(Ordering::SeqCst) == incarnation {
@@ -649,6 +684,7 @@ impl Table {
         }
         for index in 0..self.geometry.key_capacity {
             let key = self.key(index);
+            key.admitted.store(0, Ordering::Relaxed);
             key.state.store(KEY_EMPTY, Ordering::Release);
             key.changes.fetch_add(1, Ordering::SeqCst);
             crate::wake_on(&key.changes);
@@ -660,6 +696,9 @@ impl Table {
             }
             for key_index in 0..self.geometry.key_capacity {
                 self.claims(node, key_index).store(0, Ordering::Relaxed);
+                if self.geometry.fleet_concurrency {
+                    self.admissions(node, key_index).store(0, Ordering::Relaxed);
+                }
             }
         }
         for wakers in &self.wakers {

@@ -24,6 +24,9 @@ pub(crate) const RESOURCE_CLOSED: u8 = 3;
 /// The generation field ran out under this epoch.
 pub(crate) const RESOURCE_EXHAUSTED: u8 = 4;
 
+const FLAG_FLEET_AVAILABILITY: u8 = 1 << 0;
+const FLAG_FLEET_CONCURRENCY: u8 = 1 << 1;
+
 pub(crate) const SLOT_BITS: u32 = 16;
 pub(crate) const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 pub(crate) const GENERATION_BITS: u32 = 40 - SLOT_BITS;
@@ -61,7 +64,8 @@ impl Header {
             key_stride: geometry.key_stride as u32,
             resource_size: size_of::<ResourceSlot>() as u32,
             fleet_capacity,
-            flags: u8::from(geometry.fleet_availability),
+            flags: (u8::from(geometry.fleet_availability) * FLAG_FLEET_AVAILABILITY)
+                | (u8::from(geometry.fleet_concurrency) * FLAG_FLEET_CONCURRENCY),
             _reserved: [0; 5],
             epoch: AtomicU64::new(epoch),
             _reserved2: [0; 24]
@@ -84,7 +88,9 @@ impl Header {
             && self.key_stride as usize == geometry.key_stride
             && self.resource_size as usize == size_of::<ResourceSlot>()
             && self.fleet_capacity == fleet_capacity
-            && self.flags == u8::from(geometry.fleet_availability)
+            && self.flags
+                == (u8::from(geometry.fleet_availability) * FLAG_FLEET_AVAILABILITY)
+                    | (u8::from(geometry.fleet_concurrency) * FLAG_FLEET_CONCURRENCY)
     }
 }
 
@@ -117,7 +123,10 @@ pub(crate) struct KeySlot {
     /// availability; it lives in former padding so default table geometry is
     /// unchanged.
     pub(crate) available: AtomicU32,
-    _padding: [u8; 20]
+    /// Requests admitted under this key across the fleet. Used only by specs
+    /// that opt into fleet concurrency.
+    pub(crate) admitted: AtomicU32,
+    _padding: [u8; 16]
 }
 
 impl KeySlot {
@@ -248,6 +257,7 @@ pub(crate) struct Geometry {
     pub(crate) fleet_capacity: usize,
     pub(crate) total_resources: usize,
     pub(crate) fleet_availability: bool,
+    pub(crate) fleet_concurrency: bool,
     /// Words in a resource bitmap (key members).
     pub(crate) member_words: usize,
     /// Words in a key bitmap (pending, interest).
@@ -258,6 +268,7 @@ pub(crate) struct Geometry {
     pub(crate) pending_offset: usize,
     pub(crate) interest_offset: usize,
     pub(crate) claims_offset: usize,
+    pub(crate) admissions_offset: usize,
     pub(crate) keys_offset: usize,
     pub(crate) resources_offset: usize,
     pub(crate) segment_size: usize
@@ -268,7 +279,8 @@ impl Geometry {
         fleet_capacity: u16,
         spec: PoolSpec
     ) -> Self {
-        let PoolSpec { key_capacity, lane_capacity, fleet_availability, .. } = spec;
+        let PoolSpec { key_capacity, lane_capacity, fleet_availability, fleet_concurrency, .. } =
+            spec;
         let fleet_capacity = usize::from(fleet_capacity);
         let total_resources = fleet_capacity * lane_capacity;
         let member_words = total_resources.div_ceil(64);
@@ -281,7 +293,10 @@ impl Geometry {
         let interest_offset = pending_offset + key_bitmap_bytes;
         let claims_offset = (interest_offset + key_bitmap_bytes).next_multiple_of(64);
         let claims_bytes = fleet_capacity * key_capacity * size_of::<AtomicU32>();
-        let keys_offset = (claims_offset + claims_bytes).next_multiple_of(64);
+        let admissions_offset = claims_offset + claims_bytes;
+        let admissions_bytes =
+            usize::from(fleet_concurrency) * fleet_capacity * key_capacity * size_of::<AtomicU32>();
+        let keys_offset = (admissions_offset + admissions_bytes).next_multiple_of(64);
         let resources_offset = keys_offset + key_capacity * key_stride;
         let segment_size = resources_offset + total_resources * size_of::<ResourceSlot>();
         Self {
@@ -290,6 +305,7 @@ impl Geometry {
             fleet_capacity,
             total_resources,
             fleet_availability,
+            fleet_concurrency,
             member_words,
             key_words,
             key_stride,
@@ -297,6 +313,7 @@ impl Geometry {
             pending_offset,
             interest_offset,
             claims_offset,
+            admissions_offset,
             keys_offset,
             resources_offset,
             segment_size

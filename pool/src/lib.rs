@@ -91,7 +91,10 @@ pub struct PoolSpec {
     pub lane_capacity: usize,
     /// Track fleet-wide available units for an exact idle floor/ceiling.
     /// Off by default so existing pool-table kinds keep their wire contract.
-    fleet_availability: bool
+    fleet_availability: bool,
+    /// Track fleet-wide request admission for one key.
+    /// Off by default so existing pool-table kinds keep their wire contract.
+    fleet_concurrency: bool
 }
 
 impl PoolSpec {
@@ -102,7 +105,13 @@ impl PoolSpec {
         key_capacity: usize,
         lane_capacity: usize
     ) -> Self {
-        Self { kind, key_capacity, lane_capacity, fleet_availability: false }
+        Self {
+            kind,
+            key_capacity,
+            lane_capacity,
+            fleet_availability: false,
+            fleet_concurrency: false
+        }
     }
 
     /// Make free resource units part of this table's shared contract.
@@ -110,6 +119,14 @@ impl PoolSpec {
     /// Use a distinct kind when enabling this on an existing deployment.
     pub const fn with_fleet_availability(mut self) -> Self {
         self.fleet_availability = true;
+        self
+    }
+
+    /// Make per-key concurrent admission part of this table's contract.
+    ///
+    /// Use a distinct kind when enabling this on an existing deployment.
+    pub const fn with_fleet_concurrency(mut self) -> Self {
+        self.fleet_concurrency = true;
         self
     }
 
@@ -172,6 +189,13 @@ pub enum Error {
     },
     /// This table's spec did not opt into fleet-wide free-unit accounting.
     AvailabilityDisabled,
+    /// This table's spec did not opt into fleet-wide request admission.
+    ConcurrencyDisabled,
+    /// The key already has the declared number of admitted requests.
+    ConcurrencyLimit {
+        key: Key,
+        max_concurrency: u32
+    },
     /// Every key slot is taken.
     KeyFull {
         capacity: usize
@@ -205,6 +229,10 @@ impl fmt::Display for Error {
             }
             Self::AvailabilityDisabled => {
                 f.write_str("pool spec does not track fleet availability")
+            }
+            Self::ConcurrencyDisabled => f.write_str("pool spec does not track fleet concurrency"),
+            Self::ConcurrencyLimit { key, max_concurrency } => {
+                write!(f, "concurrency limit for {key} is spent: max_concurrency={max_concurrency}")
             }
             Self::KeyFull { capacity } => write!(f, "pool key table is full: capacity={capacity}"),
             Self::Full { capacity } => write!(f, "pool lane is full: capacity={capacity}"),
@@ -466,6 +494,12 @@ impl Pool {
 
     pub fn epoch(&self) -> u64 {
         self.table.epoch()
+    }
+
+    /// Whether this table's wire contract includes fleet-wide request
+    /// admission.
+    pub fn tracks_concurrency(&self) -> bool {
+        self.table.geometry().fleet_concurrency
     }
 
     /// Make a resource this process owns visible under `key` with
@@ -888,6 +922,54 @@ impl Pool {
         }
     }
 
+    /// Admit one request under a key-wide fleet limit.
+    ///
+    /// The returned permit belongs to the request origin and must live until
+    /// that request is finished, whether its resource is local or remote.
+    /// Dropping it returns the admission and wakes one contender. A confirmed
+    /// node death returns every permit that node held.
+    pub fn admit(
+        &self,
+        key: Key,
+        max_concurrency: u32
+    ) -> Result<AdmissionPermit> {
+        if !self.table.geometry().fleet_concurrency {
+            return Err(Error::ConcurrencyDisabled);
+        }
+        if max_concurrency == 0 {
+            return Err(Error::Malformed("max_concurrency must be at least one".to_owned()));
+        }
+        let (lo, hi) = key.parts();
+        let key_index = self.table.key_index(lo, hi)?;
+        self.table
+            .key(key_index)
+            .admitted
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
+                (admitted < max_concurrency).then_some(admitted + 1)
+            })
+            .map_err(|_| Error::ConcurrencyLimit { key, max_concurrency })?;
+        self.table
+            .admissions(usize::from(self.table.node()), key_index)
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(AdmissionPermit { table: Arc::clone(&self.table), key_index })
+    }
+
+    /// Requests currently admitted under `key` across this fleet.
+    pub fn admitted(
+        &self,
+        key: Key
+    ) -> Result<u32> {
+        if !self.table.geometry().fleet_concurrency {
+            return Err(Error::ConcurrencyDisabled);
+        }
+        let (lo, hi) = key.parts();
+        Ok(self
+            .table
+            .key_index(lo, hi)
+            .map(|index| self.table.key(index).admitted.load(Ordering::SeqCst))
+            .unwrap_or(0))
+    }
+
     /// Fleet-wide free resource units for specs that opted into availability.
     pub fn available(
         &self,
@@ -1216,6 +1298,40 @@ pub struct CreationPermit {
     key_index: usize
 }
 
+/// One admitted request under a key's fleet-wide concurrency limit.
+pub struct AdmissionPermit {
+    table: Arc<Table>,
+    key_index: usize
+}
+
+impl fmt::Debug for AdmissionPermit {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
+        f.debug_struct("AdmissionPermit")
+            .field("key_index", &self.key_index)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for AdmissionPermit {
+    fn drop(&mut self) {
+        let held = self
+            .table
+            .admissions(usize::from(self.table.node()), self.key_index)
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| held.checked_sub(1));
+        if held.is_ok() {
+            let _ = self.table.key(self.key_index).admitted.try_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |admitted| admitted.checked_sub(1)
+            );
+            self.table.key_changed_one(self.key_index);
+        }
+    }
+}
+
 impl CreationPermit {
     /// The resource exists now (or never will); the claim is over.
     pub fn finish(self) {}
@@ -1331,6 +1447,15 @@ mod tests {
             Arc::new(Fleet::join(name, 2).unwrap()),
             Incarnation::new(1),
             PoolSpec::new(190, 16, 16).with_fleet_availability()
+        )
+        .unwrap()
+    }
+
+    fn fleet_concurrency_pool(name: &'static str) -> Pool {
+        Pool::with_spec(
+            Arc::new(Fleet::join(name, 2).unwrap()),
+            Incarnation::new(1),
+            PoolSpec::new(191, 16, 16).with_fleet_concurrency()
         )
         .unwrap()
     }
@@ -1544,6 +1669,35 @@ mod tests {
             .collect::<Vec<_>>();
         let held = threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
         assert_eq!(held.iter().filter(|claim| claim.is_some()).count(), 3);
+    }
+
+    #[test]
+    fn admission_holds_a_key_under_max_concurrency() {
+        let pool = fleet_concurrency_pool("pool-concurrency");
+        assert!(pool.tracks_concurrency());
+        let first = pool.admit(KEY, 2).unwrap();
+        let second = pool.admit(KEY, 2).unwrap();
+        assert_eq!(pool.admitted(KEY).unwrap(), 2);
+        assert!(matches!(
+            pool.admit(KEY, 2),
+            Err(Error::ConcurrencyLimit { max_concurrency: 2, .. })
+        ));
+        drop(first);
+        assert_eq!(pool.admitted(KEY).unwrap(), 1);
+        assert!(pool.admit(KEY, 2).is_ok());
+        drop(second);
+    }
+
+    #[test]
+    fn a_death_report_returns_that_nodes_admissions() {
+        let pool = fleet_concurrency_pool("pool-concurrency-dead");
+        let _permit = pool.admit(KEY, 1).unwrap();
+        assert_eq!(pool.admitted(KEY).unwrap(), 1);
+
+        pool.node_dead(NodeId::ZERO, Incarnation::new(1));
+        assert_eq!(pool.admitted(KEY).unwrap(), 0);
+        assert!(pool.admit(KEY, 1).is_ok());
+        // `_permit` drops after death recovery and must not underflow.
     }
 
     #[test]

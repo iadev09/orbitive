@@ -105,6 +105,16 @@ and `Execution::complete_idle(max_idle)` either retains the unit within the
 shared ceiling or tells the owner to retire the resource. The default spec
 does not pay for or reinterpret this policy.
 
+A consumer that needs a fleet-wide request limit opts a distinct kind into
+`PoolSpec::with_fleet_concurrency()`. `Pool::admit(key, max_concurrency)`
+atomically admits one request and returns an `AdmissionPermit`. The request
+origin holds that permit across local execution or a remote exchange; dropping
+it returns the admission and wakes one contender. A confirmed `node_dead`
+returns permits held by that node. This is separate from resource capacity:
+`max_live` limits physical resources, each resource's `capacity` limits uses of
+that one resource, and `max_concurrency` limits admitted request transactions
+for the key.
+
 `max_live`, `min_idle`, and `max_idle` are caller policy inputs, not a policy
 document stored in the pool. The shared table enforces each atomic claim, but
 all nodes using one key must currently be configured with the same values.
@@ -140,9 +150,9 @@ completion, an unregister, a closed resource, a returned claim.
 process, as `orbit-stream` does. Nothing here knows whether a process is
 alive: the embedder reports a confirmed death with `node_dead(node,
 incarnation)`, and every resource that life of the process owned is
-closed and its creation claims returned; leases it held on other owners'
-resources are those owners' to complete, which they do when the stream
-that carried them ends.
+closed and its creation claims and request admissions returned; leases it held
+on other owners' resources are those owners' to complete, which they do when
+the stream that carried them ends.
 
 Geometry is compile-time: `ORBIT_POOL_KEY_CAPACITY` (keys per epoch,
 default 256) and `ORBIT_POOL_RESOURCE_LANE_CAPACITY` (resources per node,
