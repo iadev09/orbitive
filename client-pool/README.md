@@ -1,19 +1,21 @@
 # orbit-client-pool
 
-`orbit-client-pool` owns reusable outbound clients for asynchronous Rust
-applications. It is protocol-neutral: HTTP, database, mail and application
-protocols provide a `ClientManager`; the pool owns bounded admission, physical
-client lifetime, reuse and cooperative drain.
+`orbit-client-pool` is the outbound-client pooling crate in
+[Orbitive](https://github.com/iadev09/orbitive). It is published as a separate
+crate and can be used directly. HTTP, database, mail and application protocols
+provide a `ClientManager`; the pool owns bounded admission, physical client
+lifetime, reuse and cooperative drain.
 
 The crate is Tokio-based. Constructing a pool performs no network IO. Clients
 are created lazily by `acquire()`, while the explicit `run()` lifecycle keeps a
 declared warm floor and drains on cancellation.
 
-The optional `fleet` feature composes the local pool with `orbit-pool` and
-`orbit-stream`. Physical client objects remain inside their owner process.
-Fleet peers share concurrency and resource admission; when policy selects a
-remote owner, request bytes travel through a paired exchange instead of moving
-the client object through shared memory.
+The process-local pool needs no shared-memory runtime. The optional `fleet`
+feature uses Orbitive's `orbit-pool` and `orbit-stream` primitives to compose
+that local pool across a process fleet. Physical client objects remain inside
+their owner process. Fleet peers share concurrency and resource admission;
+when policy selects a remote owner, request bytes travel through a paired
+exchange instead of moving the client object through shared memory.
 
 ```toml
 [dependencies]
@@ -27,6 +29,71 @@ exchange surfaces:
 [dependencies]
 orbit-client-pool = { version = "0.5.0", features = ["fleet"] }
 ```
+
+## Capacity options
+
+The pool is code-first. `PoolOptions` declares the complete operating envelope
+for one process-local pool:
+
+```rust
+let options = PoolOptions::new(
+    min_idle,
+    max_idle,
+    max_live,
+    max_concurrency,
+    max_waiting,
+)
+.acquire_timeout(acquire_timeout)
+.idle_timeout(idle_timeout)
+.max_lifetime(max_lifetime);
+```
+
+| Option | Meaning |
+| --- | --- |
+| `min_idle` | Idle floor maintained by `run()` while the pool is open. |
+| `max_idle` | Maximum number of returned clients retained for reuse. |
+| `max_live` | Maximum number of physical clients, including clients being created. |
+| `max_concurrency` | Maximum number of requests admitted at once. This is independent of physical client count. |
+| `max_waiting` | Maximum number of acquisitions waiting for admission or capacity. |
+| `acquire_timeout` | Optional caller wait bound. `None` means no pool-owned deadline. |
+| `idle_timeout` | Optional retirement age for an unused client. |
+| `max_lifetime` | Optional total lifetime for a physical client. |
+
+Capacity must satisfy `min_idle <= max_idle <= max_live`; `max_live` and
+`max_concurrency` must be non-zero. Optional durations must be non-zero when
+present. The pool supplies no implicit duration.
+
+### Fleet scope
+
+`FleetPoolOptions` declares the same policy for one fleet profile and adds
+`attempts`, the bounded budget for retrying a lost shared-selection race:
+
+```rust
+let options = FleetPoolOptions::new(
+    min_idle,
+    max_idle,
+    max_live,
+    max_concurrency,
+    max_waiting,
+    attempts,
+)
+.acquire_timeout(acquire_timeout)
+.idle_timeout(idle_timeout)
+.max_lifetime(max_lifetime);
+```
+
+For a shared pool key, `min_idle`, `max_idle`, `max_live`, and
+`max_concurrency` are fleet-wide values. They are not multiplied by the worker
+count: all members maintain one idle floor and ceiling, share one physical
+client budget, and consume one request-admission budget. A physical client
+still lives only in its owner process; a peer selected by fleet policy reaches
+that owner through an exchange.
+
+`max_waiting` bounds each caller process's local waiters rather than creating a
+second shared queue. `acquire_timeout` belongs to each acquisition, while
+`idle_timeout` and `max_lifetime` are enforced by the process that owns the
+physical client. These values apply the same declared policy at every member,
+but they are not additional fleet counters.
 
 ## Protocol policy
 
