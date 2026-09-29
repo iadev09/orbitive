@@ -46,10 +46,48 @@ use std::ptr::NonNull;
 /// Namespace used by Orbit POSIX shared-memory objects.
 pub const SHM_NAMESPACE: &str = "orbit";
 
+/// Maximum POSIX access allowed for one SHM object, independent of its layout.
+///
+/// New objects are owned by the effective uid. On macOS, the selected group
+/// must be the creator's effective gid and the requested mode is passed directly
+/// to `shm_open` (with the platform's native creation-mask semantics).
+/// Other Unix targets create privately, then set the requested group and exact
+/// group-sharing mode. `OwnerOnly` uses the existing `shm_open(..., 0600)` path.
+/// Orbit never changes `umask` or process credentials, or chmods/chowns an
+/// existing object. This does not
+/// isolate processes running under the same uid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShmAccessPolicy {
+    /// Owner read/write, no group or other access (`0600`).
+    #[default]
+    OwnerOnly,
+    /// Owner read/write and selected group read (`0640`).
+    GroupRead { gid: u32 },
+    /// Owner and selected group read/write (`0660`). Trust every group writer.
+    GroupReadWrite { gid: u32 }
+}
+
+impl ShmAccessPolicy {
+    pub const fn mode(self) -> u32 {
+        match self {
+            Self::OwnerOnly => 0o600,
+            Self::GroupRead { .. } => 0o640,
+            Self::GroupReadWrite { .. } => 0o660
+        }
+    }
+
+    pub const fn gid(self) -> Option<u32> {
+        match self {
+            Self::OwnerOnly => None,
+            Self::GroupRead { gid } | Self::GroupReadWrite { gid } => Some(gid)
+        }
+    }
+}
+
 /// Result of physically validating an existing POSIX SHM object.
 ///
 /// This check is deliberately below ring semantics: it verifies that the
-/// named object can be opened and is large enough for the requested mapping,
+/// named object satisfies the access policy and is large enough for the requested mapping,
 /// but it does not inspect an owning data structure's magic, version, or
 /// geometry header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,9 +127,26 @@ impl ShmRegion {
     /// are accepted because some platforms report page-rounded SHM sizes.
     /// The owning ring or table remains responsible for validating its own
     /// persisted ABI header after mapping.
+    /// The expected owner is the effective uid and the policy is `OwnerOnly`.
     pub fn validate_existing(
         name: &str,
         minimum_size: usize
+    ) -> io::Result<ShmValidation> {
+        Self::validate_existing_with_policy(
+            name,
+            minimum_size,
+            unsafe { libc::geteuid() },
+            ShmAccessPolicy::default()
+        )
+    }
+
+    /// Validate size, expected owner and maximum permissions without mutation.
+    /// `owner_uid` is trusted configuration, not metadata read from the object.
+    pub fn validate_existing_with_policy(
+        name: &str,
+        minimum_size: usize,
+        owner_uid: u32,
+        policy: ShmAccessPolicy
     ) -> io::Result<ShmValidation> {
         let cname = CString::new(name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
@@ -115,7 +170,7 @@ impl ShmRegion {
         // SAFETY: `raw_fd` was returned by `shm_open` and is now uniquely
         // owned by this scope.
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-        let actual_size = shm_object_size(&fd, name)?;
+        let actual_size = shm_object_size(&fd, name, owner_uid, policy)?;
         validate_minimum_size(name, actual_size, minimum_size)?;
         Ok(ShmValidation::Valid { actual_size })
     }
@@ -128,7 +183,9 @@ impl ShmRegion {
     /// lifecycle and writable-pointer operations.
     pub(crate) fn open_existing_read_only(
         name: &str,
-        minimum_size: usize
+        minimum_size: usize,
+        owner_uid: u32,
+        policy: ShmAccessPolicy
     ) -> io::Result<Self> {
         let cname = CString::new(name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
@@ -150,7 +207,7 @@ impl ShmRegion {
         // SAFETY: `raw_fd` was returned by `shm_open` and is now uniquely
         // owned by this scope.
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-        let actual_size = shm_object_size(&fd, name)?;
+        let actual_size = shm_object_size(&fd, name, owner_uid, policy)?;
         validate_minimum_size(name, actual_size, minimum_size)?;
 
         // Map the complete object so its persisted header can describe the
@@ -190,11 +247,23 @@ impl ShmRegion {
     /// later opens verify the existing object before mapping it. Some
     /// platforms report a page-rounded SHM size, so a larger `st_size`
     /// is valid; the owning data structure must verify its own header.
+    /// Existing objects must belong to the effective uid and satisfy `OwnerOnly`.
     pub fn open_or_create(
         name: &str,
         size: usize
     ) -> io::Result<Self> {
-        let (region, initialization_lock) = Self::open_or_create_inner(name, size, false)?;
+        Self::open_or_create_with_policy(name, size, ShmAccessPolicy::default())
+    }
+
+    /// Open or create using an explicit access policy. Existing objects must
+    /// belong to the effective uid and pass the policy before being mapped.
+    /// Rejection never resizes, chmods, chowns or unlinks an existing object.
+    pub fn open_or_create_with_policy(
+        name: &str,
+        size: usize,
+        policy: ShmAccessPolicy
+    ) -> io::Result<Self> {
+        let (region, initialization_lock) = Self::open_or_create_inner(name, size, false, policy)?;
         debug_assert!(initialization_lock.is_none());
         Ok(region)
     }
@@ -206,7 +275,17 @@ impl ShmRegion {
         name: &str,
         size: usize
     ) -> io::Result<(Self, ShmRegionLock)> {
-        let (region, initialization_lock) = Self::open_or_create_inner(name, size, true)?;
+        Self::open_or_create_locked_with_policy(name, size, ShmAccessPolicy::default())
+    }
+
+    /// Policy-aware creation with the existing owner-local initialization lock.
+    /// Group permissions do not make that lock or fleet membership cross-user.
+    pub fn open_or_create_locked_with_policy(
+        name: &str,
+        size: usize,
+        policy: ShmAccessPolicy
+    ) -> io::Result<(Self, ShmRegionLock)> {
+        let (region, initialization_lock) = Self::open_or_create_inner(name, size, true, policy)?;
         Ok((
             region,
             initialization_lock.expect("locked SHM open must return its initialization lock")
@@ -216,7 +295,8 @@ impl ShmRegion {
     fn open_or_create_inner(
         name: &str,
         size: usize,
-        process_lock: bool
+        process_lock: bool,
+        policy: ShmAccessPolicy
     ) -> io::Result<(Self, Option<ShmRegionLock>)> {
         let cname = CString::new(name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
@@ -224,16 +304,38 @@ impl ShmRegion {
         let initialization_lock =
             if process_lock { Some(lock_path_exclusive(&lock_path)?) } else { None };
 
+        // Darwin cannot fchmod/fchown a POSIX SHM descriptor. Grant only the
+        // intended group at creation; attaching a matching existing object is OK.
+        #[cfg(target_os = "macos")]
+        let can_create = policy.gid().is_none_or(|gid| gid == unsafe { libc::getegid() });
+        #[cfg(target_os = "macos")]
+        let creation_mode = policy.mode();
+        // Elsewhere, don't expose the object to its initial group before chown.
+        #[cfg(not(target_os = "macos"))]
+        let (can_create, creation_mode) = (true, 0o600u32);
         // Try create-exclusive first; if it already exists, open.
         let (raw_fd, created) = unsafe {
             // SAFETY: passing a valid C string and well-known POSIX flags.
-            let fd =
-                libc::shm_open(cname.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600);
+            let fd = if can_create {
+                libc::shm_open(
+                    cname.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                    creation_mode
+                )
+            } else {
+                libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0)
+            };
             if fd >= 0 {
-                (fd, true)
+                (fd, can_create)
             } else {
                 // Could be EEXIST (already created by a peer) or another error.
                 let err = io::Error::last_os_error();
+                if !can_create && err.raw_os_error() == Some(libc::ENOENT) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "creating group-shared SHM requires the selected effective gid"
+                    ));
+                }
                 if err.raw_os_error() != Some(libc::EEXIST) {
                     return Err(err);
                 }
@@ -247,6 +349,22 @@ impl ShmRegion {
         // SAFETY: `raw_fd` was returned by `shm_open` and is now uniquely
         // owned by this scope.
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        #[cfg(not(target_os = "macos"))]
+        if created && let Err(error) = configure_new_shm(&fd, policy) {
+            let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
+            return Err(error);
+        }
+
+        // Verify ownership and permissions before ftruncate or mmap. Only a
+        // newly created object is ours to unlink on initialization failure.
+        let owner_uid = unsafe { libc::geteuid() };
+        if let Err(error) = shm_object_size(&fd, name, owner_uid, policy) {
+            if created {
+                let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
+            }
+            return Err(error);
+        }
 
         // Size the segment on first creation.
         if created {
@@ -263,7 +381,7 @@ impl ShmRegion {
         // SIGBUS. A larger reported size is valid on platforms (notably
         // macOS) that page-round POSIX SHM objects; callers verify their
         // own ABI metadata after mapping.
-        let actual_size = match shm_object_size(&fd, name) {
+        let actual_size = match shm_object_size(&fd, name, owner_uid, policy) {
             Ok(actual_size) => actual_size,
             Err(error) => {
                 if created {
@@ -399,9 +517,33 @@ impl ShmRegion {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+fn configure_new_shm(
+    fd: &OwnedFd,
+    policy: ShmAccessPolicy
+) -> io::Result<()> {
+    let Some(gid) = policy.gid() else {
+        return Ok(());
+    };
+    if gid == !0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid SHM group id"));
+    }
+    // SAFETY: this is our new, still owner-only object. Preserve its uid.
+    if unsafe { libc::fchown(fd.as_raw_fd(), !0, gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Explicit group-sharing policy, applied only after group ownership is set.
+    if unsafe { libc::fchmod(fd.as_raw_fd(), policy.mode() as _) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn shm_object_size(
     fd: &OwnedFd,
-    name: &str
+    name: &str,
+    owner_uid: u32,
+    policy: ShmAccessPolicy
 ) -> io::Result<usize> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `fd` is valid and `stat` points to writable storage.
@@ -410,7 +552,20 @@ fn shm_object_size(
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `fstat` succeeded and initialized the structure.
-    let actual_size = unsafe { stat.assume_init() }.st_size;
+    let stat = unsafe { stat.assume_init() };
+    let mode = u64::from(stat.st_mode) & 0o7777;
+    if stat.st_uid != owner_uid
+        || policy.gid().is_some_and(|gid| gid != stat.st_gid)
+        || mode & !u64::from(policy.mode()) != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "SHM segment {name} owner/group/mode do not satisfy {policy:?} for uid {owner_uid}"
+            )
+        ));
+    }
+    let actual_size = stat.st_size;
     usize::try_from(actual_size).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,

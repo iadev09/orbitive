@@ -239,6 +239,17 @@ pub struct ShmRing {
 }
 
 impl ShmRing {
+    /// Open or create one ring with an explicit OS access policy.
+    /// The policy is not part of the persisted ring layout.
+    pub fn open_or_create_with_policy(
+        fleet_name: &str,
+        kind: u8,
+        spec: RingSpec,
+        policy: shm::ShmAccessPolicy
+    ) -> std::io::Result<Self> {
+        Self::open_or_create_for_fleet_with_policy(fleet_name, kind, spec, 1, policy)
+    }
+
     /// Open or create a SHM-backed ring under `fleet_name` for type
     /// kind `kind` with `spec`. The first process to call
     /// this initializes the header; later attachers reuse it.
@@ -258,6 +269,25 @@ impl ShmRing {
         spec: RingSpec,
         fleet_capacity: u16
     ) -> std::io::Result<Self> {
+        Self::open_or_create_for_fleet_with_policy(
+            fleet_name,
+            kind,
+            spec,
+            fleet_capacity,
+            shm::ShmAccessPolicy::default()
+        )
+    }
+
+    /// Policy-aware variant of [`Self::open_or_create_for_fleet`].
+    /// Fleet writers and companion locks remain in the owner's uid namespace;
+    /// group permissions do not provide cross-uid fleet joining or coordination.
+    pub fn open_or_create_for_fleet_with_policy(
+        fleet_name: &str,
+        kind: u8,
+        spec: RingSpec,
+        fleet_capacity: u16,
+        policy: shm::ShmAccessPolicy
+    ) -> std::io::Result<Self> {
         let lane_count = lane_count_for(spec, fleet_capacity)?;
         let (slot_stride, slots_offset, size) = checked_layout(spec, fleet_capacity)?;
         let lane_stride = spec
@@ -275,7 +305,8 @@ impl ShmRing {
         // "wrong magic 0x00000000"; N workers starting together is exactly the
         // case that produces it. `SharedOrdered` still keeps the lock for its
         // writes — this is the same lock, held for a different reason.
-        let (region, _initialization_lock) = ShmRegion::open_or_create_locked(&name, size)?;
+        let (region, _initialization_lock) =
+            ShmRegion::open_or_create_locked_with_policy(&name, size, policy)?;
 
         // Initialize header on first creation; subsequent attachers
         // skip and rely on whatever the creator wrote.
@@ -959,6 +990,20 @@ impl std::fmt::Debug for ShmRingView {
 }
 
 impl ShmRingView {
+    /// Attach read-only in the current user's namespace with an explicit policy.
+    pub fn attach_existing_with_policy(
+        fleet_name: &str,
+        kind: u8,
+        policy: shm::ShmAccessPolicy
+    ) -> std::io::Result<Self> {
+        Self::attach_existing_for_uid_with_policy(
+            fleet_name,
+            kind,
+            unsafe { libc::geteuid() },
+            policy
+        )
+    }
+
     /// Attach to an existing ring owned by the effective user.
     pub fn attach_existing(
         fleet_name: &str,
@@ -978,8 +1023,24 @@ impl ShmRingView {
         kind: u8,
         uid: u32
     ) -> std::io::Result<Self> {
+        Self::attach_existing_for_uid_with_policy(
+            fleet_name,
+            kind,
+            uid,
+            shm::ShmAccessPolicy::default()
+        )
+    }
+
+    /// Attach read-only after checking the named owner's uid, selected gid and
+    /// maximum permissions. OS access checks still apply to the calling process.
+    pub fn attach_existing_for_uid_with_policy(
+        fleet_name: &str,
+        kind: u8,
+        uid: u32,
+        policy: shm::ShmAccessPolicy
+    ) -> std::io::Result<Self> {
         let name = shm::ring_segment_name_for_uid(fleet_name, kind, uid);
-        let region = ShmRegion::open_existing_read_only(&name, HEADER_SIZE)?;
+        let region = ShmRegion::open_existing_read_only(&name, HEADER_SIZE, uid, policy)?;
 
         // SAFETY: the mapping is at least HEADER_SIZE bytes and the header is
         // cache-line aligned at offset zero.
@@ -1298,6 +1359,7 @@ impl crate::ring::cursor::RingFrameSource for ShmRingLaneView<'_> {
 pub struct ShmRingRegistry {
     fleet_name: String,
     fleet_capacity: u16,
+    policies: std::collections::BTreeMap<u8, shm::ShmAccessPolicy>,
     rings: dashmap::DashMap<u8, std::sync::Arc<ShmRing>>
 }
 
@@ -1306,7 +1368,22 @@ impl ShmRingRegistry {
         fleet_name: impl Into<String>,
         fleet_capacity: u16
     ) -> Self {
-        Self { fleet_name: fleet_name.into(), fleet_capacity, rings: dashmap::DashMap::new() }
+        Self::with_policies(fleet_name, fleet_capacity, [])
+    }
+
+    /// Freeze per-kind policies before any ring opens. Unspecified kinds use
+    /// `OwnerOnly`; repeated kind entries use the last supplied policy.
+    pub fn with_policies(
+        fleet_name: impl Into<String>,
+        fleet_capacity: u16,
+        policies: impl IntoIterator<Item = (u8, shm::ShmAccessPolicy)>
+    ) -> Self {
+        Self {
+            fleet_name: fleet_name.into(),
+            fleet_capacity,
+            policies: policies.into_iter().collect(),
+            rings: dashmap::DashMap::new()
+        }
     }
 
     /// Get-or-create the SHM ring for `kind`. Failure here means the
@@ -1329,11 +1406,12 @@ impl ShmRingRegistry {
             }
             return Ok(entry.clone());
         }
-        let ring = std::sync::Arc::new(ShmRing::open_or_create_for_fleet(
+        let ring = std::sync::Arc::new(ShmRing::open_or_create_for_fleet_with_policy(
             &self.fleet_name,
             T::KIND,
             T::RING_SPEC,
-            self.fleet_capacity
+            self.fleet_capacity,
+            self.policies.get(&T::KIND).copied().unwrap_or_default()
         )?);
         let entry = self.rings.entry(T::KIND).or_insert_with(|| ring.clone());
         if entry.spec() != T::RING_SPEC {

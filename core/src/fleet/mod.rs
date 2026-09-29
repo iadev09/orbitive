@@ -85,9 +85,28 @@ impl FleetObserver {
         crate::ring::shm::ShmRingView::attach_existing_for_uid(&self.name, kind, self.uid)
     }
 
+    /// Attach read-only using an explicit per-ring maximum access policy.
+    pub fn ring_with_policy(
+        &self,
+        kind: u8,
+        policy: crate::shm::ShmAccessPolicy
+    ) -> std::io::Result<crate::ring::shm::ShmRingView> {
+        crate::ring::shm::ShmRingView::attach_existing_for_uid_with_policy(
+            &self.name, kind, self.uid, policy
+        )
+    }
+
     /// Attach read-only and verify a linked [`OrbitTyped`] contract.
     pub fn typed_ring<T: OrbitTyped>(&self) -> std::io::Result<crate::ring::shm::ShmRingView> {
-        let view = self.ring(T::KIND)?;
+        self.typed_ring_with_policy::<T>(crate::shm::ShmAccessPolicy::default())
+    }
+
+    /// Attach with a policy and additionally verify the typed ring layout.
+    pub fn typed_ring_with_policy<T: OrbitTyped>(
+        &self,
+        policy: crate::shm::ShmAccessPolicy
+    ) -> std::io::Result<crate::ring::shm::ShmRingView> {
+        let view = self.ring_with_policy(T::KIND, policy)?;
         if view.metadata().spec != T::RING_SPEC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -242,6 +261,19 @@ impl Fleet {
         fleet_capacity: u16,
         node_id: NodeId
     ) -> Result<Self> {
+        Self::join_shm_as_with_policies(name, fleet_capacity, node_id, [])
+    }
+
+    /// Join with immutable per-kind SHM policies. Unspecified kinds retain
+    /// `OwnerOnly`. This configures typed rings, not separate semantic tables,
+    /// membership locks or process credentials. All writers must agree on policy.
+    #[cfg(unix)]
+    pub fn join_shm_as_with_policies(
+        name: &str,
+        fleet_capacity: u16,
+        node_id: NodeId,
+        policies: impl IntoIterator<Item = (u8, crate::shm::ShmAccessPolicy)>
+    ) -> Result<Self> {
         if fleet_capacity == 0 {
             return Err(Error::EmptyFleet);
         }
@@ -256,7 +288,11 @@ impl Fleet {
                 fleet_capacity,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::Shm(ShmRingRegistry::new(name.as_ref(), fleet_capacity)),
+                backing: RingBacking::Shm(ShmRingRegistry::with_policies(
+                    name.as_ref(),
+                    fleet_capacity,
+                    policies
+                )),
                 membership: Some(membership)
             })
         })
