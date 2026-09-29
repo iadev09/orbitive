@@ -2,7 +2,8 @@
 
 `orbit-metrics` publishes compact runtime snapshots into Orbit rings and reads
 the newest valid sample per node or logical metric key. Applications normally
-use it through `orbitive::metrics`; direct package access remains available.
+use it through the [Orbitive](https://github.com/iadev09/orbitive) facade as
+`orbitive::metrics`; direct package access remains available.
 
 Hot paths remain process-local. A periodic task captures counters or gauges
 into an application-defined snapshot and publishes that bounded value:

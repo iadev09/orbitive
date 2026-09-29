@@ -1,8 +1,9 @@
 # orbit-core
 
-`orbit-core` is the low-level Orbit runtime beneath the `orbitive` facade. It
-provides fleets, bounded typed rings, cursor traversal, POSIX shared-memory
-backing, and native readiness primitives.
+`orbit-core` is the low-level Orbit runtime beneath the
+[Orbitive](https://github.com/iadev09/orbitive) facade. It provides fleets,
+bounded typed rings, cursor traversal, POSIX shared-memory backing, and native
+readiness primitives.
 
 Most applications should depend on `orbitive`. Direct `orbit-core` access is
 available for semantic crates and integrations that deliberately need the

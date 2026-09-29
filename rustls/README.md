@@ -1,8 +1,9 @@
 # orbit-rustls
 
 `orbit-rustls` provides same-host, fleet-shared runtime state for rustls over
-Orbit shared memory. Applications normally use it through
-`orbitive::rustls`; direct package access remains available. The session-store
+Orbit shared memory. Applications normally use it through the
+[Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::rustls`;
+direct package access remains available. The session-store
 surface requires a Unix target. Server-session storage supports rustls 0.23
 and 0.24; client-session storage requires rustls 0.24.
 

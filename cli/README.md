@@ -1,8 +1,9 @@
 # Orbitive CLI
 
-`orbitive-cli` inspects and removes Orbit POSIX shared-memory objects without
-mapping their data structures or joining a fleet. The installed command is
-`orbit`.
+`orbitive-cli` is the command-line tool distributed by
+[Orbitive](https://github.com/iadev09/orbitive). It inspects and removes Orbit
+POSIX shared-memory objects without mapping their data structures or joining a
+fleet. The installed command is `orbit`.
 
 ## Install
 

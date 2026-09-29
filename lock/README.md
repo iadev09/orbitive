@@ -1,8 +1,9 @@
 # orbit-lock
 
 `orbit-lock` provides bounded keyed leases for processes in the same Orbit
-fleet. Applications normally use it through `orbitive::lock`; direct package
-access remains available.
+fleet. Applications normally use it through the
+[Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::lock`;
+direct package access remains available.
 
 Each active key stores its current owner, deadline, fencing token, and state
 revision in a shared current-state table:

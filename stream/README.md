@@ -10,6 +10,7 @@ two endpoints, ordered bytes, independent directions and no message
 boundaries. `exchange` is the typed invocation layer: one paired exchange,
 one lossless control channel, and either one fleet-wide payload arena or two
 directional arenas. Applications normally use both through
+the [Orbitive](https://github.com/iadev09/orbitive) facade as
 `orbitive::stream`.
 
 An exchange is not an HTTP implementation and is not specific to upstream

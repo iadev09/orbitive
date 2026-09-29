@@ -1,8 +1,9 @@
 # orbit-events
 
 `orbit-events` provides a bounded topic and byte-payload stream for processes
-in the same Orbit fleet. Applications normally use it through
-`orbitive::events`; direct package access remains available.
+in the same Orbit fleet. Applications normally use it through the
+[Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::events`;
+direct package access remains available.
 
 ```rust
 use std::sync::Arc;

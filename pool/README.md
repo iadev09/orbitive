@@ -10,7 +10,8 @@ chosen connection's capacity with a single compare-and-swap and gets a
 lease. It brings the lease to the owner, the owner accepts it, does the
 work, and gives the unit back when the work is over. Nothing moves between
 processes but numbers: the connection stays where it is. Applications
-normally use it through `orbitive::pool`.
+normally use it through the [Orbitive](https://github.com/iadev09/orbitive)
+facade as `orbitive::pool`.
 
 Bringing the lease to its owner is the one step every consumer shares and
 every consumer can get wrong, so the optional `pool-stream` feature owns it:

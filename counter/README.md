@@ -1,8 +1,9 @@
 # orbit-counter
 
 `orbit-counter` provides keyed, signed 64-bit counters shared by every process
-in the same Orbit fleet. Applications normally use it through
-`orbitive::counter`; direct package access remains available.
+in the same Orbit fleet. Applications normally use it through the
+[Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::counter`;
+direct package access remains available.
 
 ```text
 "requests:total" -> AtomicI64

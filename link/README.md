@@ -1,8 +1,8 @@
 # orbit-link
 
 `orbit-link` provides named, bounded dispatch and reusable duplex sessions
-between members of one Orbit fleet. Applications normally use it through
-`orbitive::link`.
+between members of one Orbit fleet. Applications normally use it through the
+[Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::link`.
 
 It owns the layer immediately above `orbit-stream`:
 

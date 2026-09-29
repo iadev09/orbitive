@@ -16,7 +16,8 @@ updates the same 64 bits atomically, without a lock, without a copy and
 without publishing a frame. The id is the only thing that ever travels: in a
 message, in a cache, in a web page. Whoever opens it is looking at the same
 memory. `orbit-counter` is the keyed sibling; this is memory rather than a
-dictionary. Applications normally use it through `orbitive::cell`.
+dictionary. Applications normally use it through the
+[Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::cell`.
 
 ```rust
 use std::sync::Arc;

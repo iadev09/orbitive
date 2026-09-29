@@ -2,7 +2,8 @@
 
 `orbit-cache` keeps a bounded L1 byte cache in each process and propagates
 mutations between processes in the same Orbit fleet. Applications normally use
-it through `orbitive::cache`; direct package access remains available.
+it through the [Orbitive](https://github.com/iadev09/orbitive) facade as
+`orbitive::cache`; direct package access remains available.
 
 Each logical store has its own process-local L1. One shared mutation ring and
 one shared payload ring carry `Put`, `Delete`, and `Reset` operations between

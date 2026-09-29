@@ -4,7 +4,8 @@
 in Orbit shared memory, read by every process in the fleet without copying.
 `orbit-cache` keeps a private L1 per process and carries mutations between
 them; this keeps the bytes themselves in one place. Applications normally use
-it through `orbitive::arena`.
+it through the [Orbitive](https://github.com/iadev09/orbitive) facade as
+`orbitive::arena`.
 
 ```rust
 use std::sync::Arc;

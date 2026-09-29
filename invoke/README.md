@@ -1,8 +1,9 @@
 # orbit-invoke
 
 `orbit-invoke` carries invocation requests between processes of the same Orbit
-fleet over a dedicated bounded ring. Applications normally use it through
-`orbitive::invoke`; direct package access remains available.
+fleet over a dedicated bounded ring. Applications normally use it through the
+[Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::invoke`;
+direct package access remains available.
 
 An invocation is an operation name, opaque payload bytes, and the identity the
 ring assigned when the frame was committed:
