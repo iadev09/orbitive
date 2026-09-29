@@ -117,9 +117,9 @@ chunk size, body size and concurrency separately. A zero-copy receive result
 does not include application parsing or copying, and a same-process benchmark
 does not by itself prove a production routing benefit.
 
-The optional `orbit-pool` session binding is experimental. It is useful only
-when an application has already decided to execute against a remotely owned
-resource; it is not part of the stream transport contract.
+The optional `orbit-pool` session binding is used when an application has
+already decided to execute against a remotely owned resource. It remains
+outside the stream transport contract.
 
 
 ```rust

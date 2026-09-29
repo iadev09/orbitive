@@ -128,9 +128,9 @@ in its first bytes or in any setup message the application prefers. A
 local use goes nowhere: no stream, no shared-memory hop. HTTP, health,
 load-balancing weights and retry rules live above it.
 
-The optional `pool-stream` feature is experimental. It is an adapter for the
-case where a remotely owned resource must execute over a paired exchange;
-neither the pool nor the stream transport depends on that composition.
+The optional `pool-stream` feature adapts a remotely owned resource to a
+paired exchange. Neither the pool nor the stream transport depends on that
+composition.
 
 ## Waiting and death
 

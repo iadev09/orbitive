@@ -67,14 +67,14 @@ bus.publish("worker.ready", b"worker-1")?;
 | `metrics` | `orbitive::metrics` | current metrics snapshots across workers |
 | `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
 | `stream` / `stream-tokio` | `orbitive::stream` | bounded byte streams and paired exchanges between fleet members |
-| `pool-stream` **(experimental)** | `orbitive::pool` + `orbitive::stream` | optional binding between a fleet resource lease and a paired exchange |
+| `pool-stream` | `orbitive::pool` + `orbitive::stream` | binding between a fleet resource lease and a paired exchange |
 | `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls server sessions and rustls 0.24 client sessions |
 
 `stream` is the transport primitive: it provides bounded duplex byte flow and
 typed paired exchanges without deciding why an application moves those bytes.
-The optional `pool-stream` composition remains experimental. It binds a
-fleet-owned resource lease to an exchange, but it is not enabled by `full` and
-applications should opt in only when they need remote resource execution.
+The optional `pool-stream` composition binds a fleet-owned resource lease to
+an exchange. It is not enabled by `full`; applications opt in when remotely
+owned resources execute over Orbit streams.
 
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
