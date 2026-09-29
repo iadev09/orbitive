@@ -32,6 +32,8 @@ stream = ["dep:orbit-stream"]
 stream-tokio = ["stream", "orbit-stream?/tokio"]
 pool = ["dep:orbit-pool"]
 pool-stream = ["pool", "stream", "orbit-pool?/pool-stream"]
+client-pool = ["dep:orbit-client-pool"]
+client-pool-fleet = ["client-pool", "pool-stream", "stream-tokio", "orbit-client-pool?/fleet"]
 rustls_0_23 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_23"]
 rustls_0_24 = ["dep:orbit-rustls", "orbit-rustls/rustls_0_24"]
 full = [
@@ -62,6 +64,7 @@ orbit-invoke = { workspace = true, optional = true }
 orbit-link = { workspace = true, optional = true }
 orbit-metrics = { workspace = true, optional = true }
 orbit-pool = { workspace = true, optional = true }
+orbit-client-pool = { workspace = true, optional = true }
 orbit-rustls = { workspace = true, optional = true }
 orbit-stream = { workspace = true, optional = true }
 
@@ -81,6 +84,7 @@ members = [
     "metrics",
     "stream",
     "pool",
+    "client-pool",
 ]
 resolver = "3"
 
@@ -92,7 +96,7 @@ edition = "2024"
 authors = ["ilker Arabaci <iarabaci@claviron.dev>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/iadev09/orbitive"
-description = "Bounded same-host runtime state for process fleets."
+description = "Bounded same-host coordination for Rust process fleets."
 exclude = [
     "ARCHITECTURE.md",
     "*.local.md",
@@ -114,10 +118,12 @@ orbit-invoke = { version = "0.5.0", path = "invoke", default-features = false }
 orbit-link = { version = "0.5.0", path = "link", default-features = false }
 orbit-metrics = { version = "0.5.0", path = "metrics", default-features = false }
 orbit-pool = { version = "0.5.0", path = "pool", default-features = false }
+orbit-client-pool = { version = "0.5.0", path = "client-pool", default-features = false }
 orbit-stream = { version = "0.5.0", path = "stream", default-features = false }
 orbit-rustls = { version = "0.5.0", path = "rustls", default-features = false }
 
 bytes = "1.11"
+async-trait = "0.1"
 criterion = "0.8.2"
 dashmap = "6.1"
 libc = "0.2"
@@ -126,6 +132,9 @@ netid64 = "0.1.1"
 nix = { version = "0.31", features = ["process", "signal", "user", "fs"] }
 rustls_0_23 = { package = "rustls", version = "0.23", default-features = false, features = ["std"] }
 rustls_0_24 = { package = "rustls", version = "0.24.0-dev.1", default-features = false }
+thiserror = "2.0"
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tracing = "0.1.44"
 
 # Claviron's release settings, so what this crate measures on its own — its

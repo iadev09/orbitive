@@ -83,6 +83,11 @@ pub mod pool {
     pub use orbit_pool::*;
 }
 
+#[cfg(feature = "client-pool")]
+pub mod client_pool {
+    pub use orbit_client_pool::*;
+}
+
 #[cfg(any(feature = "rustls", feature = "rustls_0_23", feature = "rustls_0_24"))]
 pub mod rustls {
     pub use orbit_rustls::*;

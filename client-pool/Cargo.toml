@@ -1,0 +1,40 @@
+[package]
+autotests = false
+name = "orbit-client-pool"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Protocol-neutral local and fleet-wide outbound client pools for Orbit process fleets."
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/orbit-client-pool"
+keywords = ["pool", "client", "shm", "fleet", "orbit"]
+categories = ["asynchronous", "concurrency"]
+exclude.workspace = true
+
+[features]
+fleet = [
+    "dep:orbit-core",
+    "dep:orbit-pool",
+    "dep:orbit-stream",
+    "orbit-pool/pool-stream",
+    "orbit-stream/tokio",
+]
+
+[dependencies]
+async-trait.workspace = true
+orbit-core = { workspace = true, optional = true }
+orbit-pool = { workspace = true, optional = true }
+orbit-stream = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bench]]
+name = "cost"
+harness = false
+required-features = ["fleet"]

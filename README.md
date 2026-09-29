@@ -8,10 +8,14 @@
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="license">
 </p>
 
-> **Bounded same-host runtime state for Rust process fleets**
+> **Bounded same-host coordination for Rust process fleets**
 
-Orbitive is a Rust facade for bounded, same-host runtime state shared by a
-fleet of sibling processes.
+Orbitive is a Rust facade for bounded, same-host coordination shared by a
+fleet of sibling processes. `orbit-core` is the primitive substrate; the
+workspace also contains optional semantic and application-facing layers built
+from those primitives. Cache coherence, locks, reusable links, rustls session
+sharing and outbound client pools therefore remain separate crates while the
+`orbitive` facade provides one deliberate public entry point.
 
 It provides two storage shapes:
 
@@ -68,6 +72,8 @@ bus.publish("worker.ready", b"worker-1")?;
 | `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
 | `stream` / `stream-tokio` | `orbitive::stream` | bounded byte streams and paired exchanges between fleet members |
 | `pool-stream` | `orbitive::pool` + `orbitive::stream` | binding between a fleet resource lease and a paired exchange |
+| `client-pool` | `orbitive::client_pool` | Tokio-based process-local outbound client ownership and lifecycle |
+| `client-pool-fleet` | `orbitive::client_pool` | fleet-wide client admission and remote-owner execution over pool-stream |
 | `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls server sessions and rustls 0.24 client sessions |
 
 `stream` is the transport primitive: it provides bounded duplex byte flow and
@@ -76,12 +82,20 @@ The optional `pool-stream` composition binds a fleet-owned resource lease to
 an exchange. It is not enabled by `full`; applications opt in when remotely
 owned resources execute over Orbit streams.
 
+`client-pool` is also opt-in and requires Tokio. The base `orbitive` facade and
+`orbit-core` remain independent of an async runtime. The local layer owns real
+client objects inside their process; `client-pool-fleet` adds Orbit admission
+and carries operations to a remote owner without pretending that a client
+object can move through shared memory. Neither layer knows HTTP, database, mail
+or application protocol formats.
+
 The implementation crates are also published separately as
 [`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
 [`orbit-arena`](arena/README.md), [`orbit-cell`](cell/README.md), [`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
 [`orbit-invoke`](invoke/README.md), [`orbit-link`](link/README.md),
 [`orbit-lock`](lock/README.md),
 [`orbit-metrics`](metrics/README.md), [`orbit-pool`](pool/README.md),
+[`orbit-client-pool`](client-pool/README.md),
 [`orbit-rustls`](rustls/README.md), and
 [`orbit-stream`](stream/README.md). Direct dependencies are supported when an
 integration needs a single narrow layer; applications can otherwise use the
