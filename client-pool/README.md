@@ -30,14 +30,18 @@ orbit-client-pool = { version = "0.5.0", features = ["fleet"] }
 
 ## Protocol policy
 
-The pool does not interpret HTTP statuses, rate-limit headers, authentication,
-database errors or application payloads. A protocol adapter implements
-`ClientPolicy<O>` to reduce its domain-specific outcome to one of two admission
+Protocol-specific admission is extensible without making the pool depend on a
+protocol. A protocol adapter implements `ClientPolicy<O>` and maps any outcome
+it understands—such as an HTTP status or rate-limit header, an authentication
+failure, a database error, or an application payload—to one of two admission
 directives:
 
 - `PoolDirective::Continue` leaves admission unchanged.
 - `PoolDirective::Pause { reason }` pauses later acquisitions until the owner
   explicitly calls `resume()`.
+
+This keeps the pool generic while allowing each adapter to enforce its real
+protocol and application rules without changes to the pool itself.
 
 The directive cannot rewrite, retry, delay or cancel the operation that
 produced the outcome. That operation keeps its protocol result. Applying a
