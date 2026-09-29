@@ -241,6 +241,7 @@ impl<M: ClientManager> ClientPool<M> {
         }
     }
 
+    #[cfg(feature = "fleet")]
     pub(crate) async fn create(
         &self,
         active_policy: ActiveRequestPolicy
@@ -248,6 +249,7 @@ impl<M: ClientManager> ClientPool<M> {
         self.create_inner(active_policy, None).await
     }
 
+    #[cfg(feature = "fleet")]
     pub(crate) async fn create_cancellable(
         &self,
         active_policy: ActiveRequestPolicy,
@@ -256,6 +258,7 @@ impl<M: ClientManager> ClientPool<M> {
         self.create_inner(active_policy, Some(cancellation)).await
     }
 
+    #[cfg(feature = "fleet")]
     async fn create_inner(
         &self,
         active_policy: ActiveRequestPolicy,
@@ -297,6 +300,7 @@ impl<M: ClientManager> ClientPool<M> {
         }
     }
 
+    #[cfg(feature = "fleet")]
     pub(crate) async fn acquire_idle_where(
         &self,
         predicate: impl Fn(&M::Client) -> bool,
@@ -305,6 +309,7 @@ impl<M: ClientManager> ClientPool<M> {
         self.acquire_idle_where_inner(predicate, active_policy, None).await
     }
 
+    #[cfg(feature = "fleet")]
     pub(crate) async fn acquire_idle_where_cancellable(
         &self,
         predicate: impl Fn(&M::Client) -> bool,
@@ -314,6 +319,7 @@ impl<M: ClientManager> ClientPool<M> {
         self.acquire_idle_where_inner(predicate, active_policy, Some(cancellation)).await
     }
 
+    #[cfg(feature = "fleet")]
     async fn acquire_idle_where_inner(
         &self,
         predicate: impl Fn(&M::Client) -> bool,
@@ -349,6 +355,7 @@ impl<M: ClientManager> ClientPool<M> {
         Ok(Some(ClientLease::new(self.clone(), entry, active_policy)))
     }
 
+    #[cfg(feature = "fleet")]
     pub(crate) fn discard_idle_where(
         &self,
         predicate: impl Fn(&M::Client) -> bool
@@ -573,6 +580,7 @@ impl<M: ClientManager> ClientPool<M> {
         self.inner.changed.notify_waiters();
     }
 
+    #[cfg(feature = "fleet")]
     pub(crate) async fn wait_until_open(
         &self,
         deadline: Option<TokioInstant>,
@@ -601,6 +609,7 @@ impl<M: ClientManager> ClientPool<M> {
         }
     }
 
+    #[cfg(feature = "fleet")]
     pub(crate) async fn wait_until_open_for_maintenance(
         &self,
         cancellation: &CancellationToken
