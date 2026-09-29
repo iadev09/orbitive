@@ -105,8 +105,9 @@ impl ClientSessionStore for OrbitClientSessionStorage {
     ) -> Option<Tls13Session> {
         let (domain, server) = storage_key(key, TLS13_TICKET)?;
         for _ in 0..CLIENT_TLS13_TICKETS_PER_SERVER {
-            let Some(encoded) = self.primitive.take(&domain, &server).ok()? else {
-                return None;
+            let encoded = match self.primitive.take(&domain, &server) {
+                Ok(Some(encoded)) => encoded,
+                Ok(None) | Err(_) => return None
             };
             match Tls13Session::from_slice(&encoded, &self.provider) {
                 Ok(value) => return Some(value),

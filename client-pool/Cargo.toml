@@ -10,7 +10,7 @@ license.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/orbit-client-pool"
 keywords = ["pool", "client", "shm", "fleet", "orbit"]
-categories = ["asynchronous", "concurrency"]
+categories = ["asynchronous", "concurrency", "network-programming"]
 exclude.workspace = true
 
 [features]
