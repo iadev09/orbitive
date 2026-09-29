@@ -19,16 +19,24 @@ exchange instead of moving the client object through shared memory.
 
 ```toml
 [dependencies]
-orbit-client-pool = "0.5.0"
+orbitive = { version = "0.5.0", features = ["client-pool"] }
 ```
 
-Enable `fleet` only when the application supplies compatible Orbit pool and
-exchange surfaces:
+```rust
+use orbitive::client_pool::{ClientManager, ClientPool, PoolOptions};
+```
+
+Enable the fleet composition only when the application supplies compatible
+Orbit pool and exchange surfaces:
 
 ```toml
 [dependencies]
-orbit-client-pool = { version = "0.5.0", features = ["fleet"] }
+orbitive = { version = "0.5.0", features = ["client-pool-fleet"] }
 ```
+
+The separately published `orbit-client-pool` package remains available for
+consumers that intentionally want the component crate instead of the Orbitive
+facade.
 
 ## Capacity options
 
