@@ -1,4 +1,4 @@
-//! Orbit-backed opaque server-session table.
+//! Orbit-backed opaque rustls session tables.
 //!
 //! This module does not import rustls. Its relationship to rustls is indirect:
 //! the parent `session` module implements rustls' storage trait and passes
@@ -14,18 +14,24 @@ use orbit_core::shm::{ShmRegion, ring_segment_name};
 
 pub(super) const DOMAIN_MAX: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_DOMAIN_CAPACITY"), 64);
-pub(super) const KEY_MAX: usize =
+pub(super) const SERVER_KEY_MAX: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_KEY_CAPACITY"), 64);
+#[cfg(feature = "rustls_0_24")]
+pub(super) const CLIENT_KEY_MAX: usize = u8::MAX as usize;
 pub(super) const VALUE_MAX: usize = orbit_core::compile::usize_from_env(
     option_env!("ORBIT_RUSTLS_SESSION_VALUE_CAPACITY"),
     16 * 1024
 );
 
-const SESSION_STATE_KIND: u8 = 231;
+pub(super) const SERVER_SESSION_STATE_KIND: u8 = 231;
+#[cfg(feature = "rustls_0_24")]
+pub(super) const CLIENT_SESSION_STATE_KIND: u8 = 254;
 const SET_COUNT: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_SET_COUNT"), 256);
 const WAYS: usize =
     orbit_core::compile::usize_from_env(option_env!("ORBIT_RUSTLS_SESSION_WAYS"), 8);
+#[cfg(feature = "rustls_0_24")]
+pub(super) const CLIENT_TLS13_TICKETS_PER_SERVER: usize = WAYS;
 const CAPACITY: usize = SET_COUNT * WAYS;
 const MAGIC: u32 = 0x4F_54_53_53; // "OTSS"
 const VERSION: u16 = 1;
@@ -35,22 +41,31 @@ const SLOT_WRITING: u8 = 2;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-pub(super) struct SessionPrimitive {
-    backing: Backing
+pub(super) type ServerSessionPrimitive =
+    SessionPrimitive<SERVER_SESSION_STATE_KIND, SERVER_KEY_MAX>;
+#[cfg(feature = "rustls_0_24")]
+pub(super) type ClientSessionPrimitive =
+    SessionPrimitive<CLIENT_SESSION_STATE_KIND, CLIENT_KEY_MAX>;
+
+pub(super) struct SessionPrimitive<const KIND: u8, const KEY_CAPACITY: usize> {
+    backing: Backing<KEY_CAPACITY>
 }
 
-enum Backing {
-    Memory(Mutex<MemoryTable>),
-    Shm(ShmTable)
+enum Backing<const KEY_CAPACITY: usize> {
+    Memory(Mutex<MemoryTable<KEY_CAPACITY>>),
+    Shm(ShmTable<KEY_CAPACITY>)
 }
 
-impl SessionPrimitive {
+impl<const KIND: u8, const KEY_CAPACITY: usize> SessionPrimitive<KIND, KEY_CAPACITY> {
     pub(super) fn open(fleet: &Arc<Fleet>) -> io::Result<Self> {
+        if KEY_CAPACITY == 0 || KEY_CAPACITY > u8::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rustls session key capacity must fit in one byte"
+            ));
+        }
         let backing = if fleet.is_shm() {
-            Backing::Shm(ShmTable::open_or_create(&ring_segment_name(
-                fleet.name(),
-                SESSION_STATE_KIND
-            ))?)
+            Backing::Shm(ShmTable::open_or_create(&ring_segment_name(fleet.name(), KIND))?)
         } else {
             Backing::Memory(Mutex::new(MemoryTable::new()))
         };
@@ -64,7 +79,7 @@ impl SessionPrimitive {
         value: &[u8],
         ttl: Duration
     ) -> io::Result<bool> {
-        if !entry_fits(domain, key, value) || ttl.is_zero() {
+        if !entry_fits::<KEY_CAPACITY>(domain, key, value) || ttl.is_zero() {
             return Ok(false);
         }
         let now_ms = monotonic_ms()?;
@@ -96,6 +111,60 @@ impl SessionPrimitive {
         })
     }
 
+    /// Add another value for the same key without replacing earlier values.
+    ///
+    /// TLS 1.3 servers may issue multiple independent tickets for one server.
+    /// `max_values` bounds that queue inside the key's set.
+    #[cfg(feature = "rustls_0_24")]
+    pub(super) fn push(
+        &self,
+        domain: &[u8],
+        key: &[u8],
+        value: &[u8],
+        ttl: Duration,
+        max_values: usize
+    ) -> io::Result<bool> {
+        if !entry_fits::<KEY_CAPACITY>(domain, key, value) || ttl.is_zero() || max_values == 0 {
+            return Ok(false);
+        }
+        let now_ms = monotonic_ms()?;
+        let ttl_ms = u64::try_from(ttl.as_millis().max(1)).unwrap_or(u64::MAX);
+        let expires_at_ms = now_ms.saturating_add(ttl_ms);
+        self.with_slots(|slots| {
+            let hash = entry_hash(domain, key);
+            let set = set_slots_mut(slots, hash);
+            let mut matching = 0_usize;
+            let mut reusable = None;
+            let mut oldest_match = None;
+            let mut oldest = (0, u64::MAX);
+
+            for (index, slot) in set.iter_mut().enumerate() {
+                if slot.state() != SLOT_OCCUPIED || slot.expires_at_ms <= now_ms {
+                    slot.clear();
+                    reusable.get_or_insert(index);
+                    continue;
+                }
+                if slot.matches(hash, domain, key) {
+                    matching += 1;
+                    if oldest_match.is_none_or(|(_, inserted)| slot.inserted_at_ms < inserted) {
+                        oldest_match = Some((index, slot.inserted_at_ms));
+                    }
+                }
+                if slot.inserted_at_ms < oldest.1 {
+                    oldest = (index, slot.inserted_at_ms);
+                }
+            }
+
+            let candidate = if matching >= max_values {
+                oldest_match.map(|(index, _)| index).unwrap_or(oldest.0)
+            } else {
+                reusable.unwrap_or(oldest.0)
+            };
+            set[candidate].write(hash, domain, key, value, now_ms, expires_at_ms);
+            true
+        })
+    }
+
     pub(super) fn get(
         &self,
         domain: &[u8],
@@ -118,7 +187,11 @@ impl SessionPrimitive {
         key: &[u8],
         consume: bool
     ) -> io::Result<Option<Vec<u8>>> {
-        if domain.is_empty() || domain.len() > DOMAIN_MAX || key.is_empty() || key.len() > KEY_MAX {
+        if domain.is_empty()
+            || domain.len() > DOMAIN_MAX
+            || key.is_empty()
+            || key.len() > KEY_CAPACITY
+        {
             return Ok(None);
         }
         let now_ms = monotonic_ms()?;
@@ -159,7 +232,7 @@ impl SessionPrimitive {
 
     fn with_slots<T>(
         &self,
-        operation: impl FnOnce(&mut [SessionSlot]) -> T
+        operation: impl FnOnce(&mut [SessionSlot<KEY_CAPACITY>]) -> T
     ) -> io::Result<T> {
         match &self.backing {
             Backing::Memory(table) => {
@@ -171,40 +244,49 @@ impl SessionPrimitive {
     }
 }
 
-struct MemoryTable {
-    slots: Vec<SessionSlot>
+struct MemoryTable<const KEY_CAPACITY: usize> {
+    slots: Vec<SessionSlot<KEY_CAPACITY>>
 }
 
-impl MemoryTable {
+impl<const KEY_CAPACITY: usize> MemoryTable<KEY_CAPACITY> {
     fn new() -> Self {
         Self { slots: (0..CAPACITY).map(|_| SessionSlot::empty()).collect() }
     }
 }
 
-struct ShmTable {
+struct ShmTable<const KEY_CAPACITY: usize> {
     region: ShmRegion,
     local_lock: Mutex<()>
 }
 
-impl ShmTable {
+impl<const KEY_CAPACITY: usize> ShmTable<KEY_CAPACITY> {
     fn open_or_create(name: &str) -> io::Result<Self> {
         let (region, _initialization_lock) =
-            ShmRegion::open_or_create_locked(name, segment_size())?;
+            ShmRegion::open_or_create_locked(name, segment_size::<KEY_CAPACITY>())?;
         if region.created() {
             unsafe {
-                ptr::write(region.as_ptr().cast::<SessionHeader>(), SessionHeader::new());
+                ptr::write(
+                    region.as_ptr().cast::<SessionHeader>(),
+                    SessionHeader::new::<KEY_CAPACITY>()
+                );
                 let slots = region.as_ptr().add(std::mem::size_of::<SessionHeader>());
-                ptr::write_bytes(slots, 0, CAPACITY * std::mem::size_of::<SessionSlot>());
+                ptr::write_bytes(
+                    slots,
+                    0,
+                    CAPACITY * std::mem::size_of::<SessionSlot<KEY_CAPACITY>>()
+                );
             }
         } else {
-            validate_header(name, unsafe { &*region.as_ptr().cast::<SessionHeader>() })?;
+            validate_header::<KEY_CAPACITY>(name, unsafe {
+                &*region.as_ptr().cast::<SessionHeader>()
+            })?;
         }
         Ok(Self { region, local_lock: Mutex::new(()) })
     }
 
     fn with_slots<T>(
         &self,
-        operation: impl FnOnce(&mut [SessionSlot]) -> T
+        operation: impl FnOnce(&mut [SessionSlot<KEY_CAPACITY>]) -> T
     ) -> io::Result<T> {
         let _local = lock_unpoisoned(&self.local_lock);
         let _process = self.region.lock_exclusive()?;
@@ -213,7 +295,7 @@ impl ShmTable {
                 self.region
                     .as_ptr()
                     .add(std::mem::size_of::<SessionHeader>())
-                    .cast::<SessionSlot>(),
+                    .cast::<SessionSlot<KEY_CAPACITY>>(),
                 CAPACITY
             )
         };
@@ -237,17 +319,17 @@ struct SessionHeader {
 }
 
 impl SessionHeader {
-    fn new() -> Self {
+    fn new<const KEY_CAPACITY: usize>() -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
             header_size: std::mem::size_of::<Self>() as u16,
             capacity: CAPACITY as u32,
-            slot_size: std::mem::size_of::<SessionSlot>() as u32,
+            slot_size: std::mem::size_of::<SessionSlot<KEY_CAPACITY>>() as u32,
             set_count: SET_COUNT as u16,
             ways: WAYS as u16,
             domain_max: DOMAIN_MAX as u16,
-            key_max: KEY_MAX as u16,
+            key_max: KEY_CAPACITY as u16,
             value_max: VALUE_MAX as u32,
             _reserved: [0; 36]
         }
@@ -255,7 +337,7 @@ impl SessionHeader {
 }
 
 #[repr(C, align(64))]
-struct SessionSlot {
+struct SessionSlot<const KEY_CAPACITY: usize> {
     state: AtomicU8,
     domain_len: u8,
     key_len: u8,
@@ -265,11 +347,11 @@ struct SessionSlot {
     inserted_at_ms: u64,
     expires_at_ms: u64,
     domain: [u8; DOMAIN_MAX],
-    key: [u8; KEY_MAX],
+    key: [u8; KEY_CAPACITY],
     value: [u8; VALUE_MAX]
 }
 
-impl SessionSlot {
+impl<const KEY_CAPACITY: usize> SessionSlot<KEY_CAPACITY> {
     fn empty() -> Self {
         Self {
             state: AtomicU8::new(SLOT_EMPTY),
@@ -281,7 +363,7 @@ impl SessionSlot {
             inserted_at_ms: 0,
             expires_at_ms: 0,
             domain: [0; DOMAIN_MAX],
-            key: [0; KEY_MAX],
+            key: [0; KEY_CAPACITY],
             value: [0; VALUE_MAX]
         }
     }
@@ -346,7 +428,7 @@ impl SessionSlot {
     }
 }
 
-fn validate_header(
+fn validate_header<const KEY_CAPACITY: usize>(
     name: &str,
     header: &SessionHeader
 ) -> io::Result<()> {
@@ -362,11 +444,11 @@ fn validate_header(
     if header.version != VERSION
         || usize::from(header.header_size) != std::mem::size_of::<SessionHeader>()
         || header.capacity as usize != CAPACITY
-        || header.slot_size as usize != std::mem::size_of::<SessionSlot>()
+        || header.slot_size as usize != std::mem::size_of::<SessionSlot<KEY_CAPACITY>>()
         || header.set_count as usize != SET_COUNT
         || header.ways as usize != WAYS
         || header.domain_max as usize != DOMAIN_MAX
-        || header.key_max as usize != KEY_MAX
+        || header.key_max as usize != KEY_CAPACITY
         || header.value_max as usize != VALUE_MAX
     {
         return Err(io::Error::new(
@@ -377,7 +459,7 @@ fn validate_header(
     Ok(())
 }
 
-fn entry_fits(
+fn entry_fits<const KEY_CAPACITY: usize>(
     domain: &[u8],
     key: &[u8],
     value: &[u8]
@@ -385,7 +467,7 @@ fn entry_fits(
     !domain.is_empty()
         && domain.len() <= DOMAIN_MAX
         && !key.is_empty()
-        && key.len() <= KEY_MAX
+        && key.len() <= KEY_CAPACITY
         && !value.is_empty()
         && value.len() <= VALUE_MAX
 }
@@ -402,10 +484,10 @@ fn entry_hash(
     hash
 }
 
-fn set_slots_mut(
-    slots: &mut [SessionSlot],
+fn set_slots_mut<const KEY_CAPACITY: usize>(
+    slots: &mut [SessionSlot<KEY_CAPACITY>],
     hash: u64
-) -> &mut [SessionSlot] {
+) -> &mut [SessionSlot<KEY_CAPACITY>] {
     let start = set_index(hash) * WAYS;
     &mut slots[start..start + WAYS]
 }
@@ -414,8 +496,9 @@ fn set_index(hash: u64) -> usize {
     (hash as usize) & (SET_COUNT - 1)
 }
 
-fn segment_size() -> usize {
-    std::mem::size_of::<SessionHeader>() + CAPACITY * std::mem::size_of::<SessionSlot>()
+fn segment_size<const KEY_CAPACITY: usize>() -> usize {
+    std::mem::size_of::<SessionHeader>()
+        + CAPACITY * std::mem::size_of::<SessionSlot<KEY_CAPACITY>>()
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -441,16 +524,22 @@ const _: () = assert!(SET_COUNT <= u16::MAX as usize);
 const _: () = assert!(WAYS > 0 && WAYS <= u16::MAX as usize);
 const _: () = assert!(CAPACITY <= u32::MAX as usize);
 const _: () = assert!(DOMAIN_MAX > 0 && DOMAIN_MAX <= u8::MAX as usize);
-const _: () = assert!(KEY_MAX > 0 && KEY_MAX <= u8::MAX as usize);
+const _: () = assert!(SERVER_KEY_MAX > 0 && SERVER_KEY_MAX <= u8::MAX as usize);
+#[cfg(feature = "rustls_0_24")]
+const _: () = assert!(CLIENT_KEY_MAX > 0 && CLIENT_KEY_MAX <= u8::MAX as usize);
+#[cfg(feature = "rustls_0_24")]
+const _: () = assert!(DOMAIN_MAX >= 33);
 const _: () = assert!(VALUE_MAX > 0 && VALUE_MAX <= u32::MAX as usize);
 const _: () = assert!(std::mem::size_of::<SessionHeader>() == 64);
-const _: () = assert!(std::mem::size_of::<SessionSlot>() <= u32::MAX as usize);
+const _: () = assert!(std::mem::size_of::<SessionSlot<SERVER_KEY_MAX>>() <= u32::MAX as usize);
+#[cfg(feature = "rustls_0_24")]
+const _: () = assert!(std::mem::size_of::<SessionSlot<CLIENT_KEY_MAX>>() <= u32::MAX as usize);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn primitive() -> SessionPrimitive {
+    fn primitive() -> ServerSessionPrimitive {
         let fleet = Arc::new(Fleet::join("tls-primitive-unit", 1).expect("fleet"));
         SessionPrimitive::open(&fleet).expect("primitive")
     }
@@ -462,7 +551,7 @@ mod tests {
 
         assert!(
             !primitive
-                .put(domain, &[7; KEY_MAX + 1], b"secret", Duration::from_secs(1))
+                .put(domain, &[7; SERVER_KEY_MAX + 1], b"secret", Duration::from_secs(1))
                 .expect("oversized key")
         );
         assert!(
@@ -539,5 +628,36 @@ mod tests {
             assert_eq!(primitive.get(domain, key).expect("retained get"), Some(b"secret".to_vec()));
         }
         assert_eq!(primitive.get(domain, &keys[WAYS]).expect("new get"), Some(b"new".to_vec()));
+    }
+
+    #[cfg(feature = "rustls_0_24")]
+    #[test]
+    fn client_ticket_queue_is_bounded_and_single_use() {
+        let fleet = Arc::new(Fleet::join("tls-client-primitive-unit", 1).expect("fleet"));
+        let primitive = ClientSessionPrimitive::open(&fleet).expect("primitive");
+        let domain = &[9; 33];
+        let key = vec![7; CLIENT_KEY_MAX];
+
+        for ticket in 0_u8..=CLIENT_TLS13_TICKETS_PER_SERVER as u8 {
+            assert!(
+                primitive
+                    .push(
+                        domain,
+                        &key,
+                        &[ticket],
+                        Duration::from_secs(1),
+                        CLIENT_TLS13_TICKETS_PER_SERVER
+                    )
+                    .expect("push ticket")
+            );
+        }
+
+        let mut taken = Vec::new();
+        while let Some(ticket) = primitive.take(domain, &key).expect("take ticket") {
+            taken.push(ticket[0]);
+        }
+        assert_eq!(taken.len(), CLIENT_TLS13_TICKETS_PER_SERVER);
+        assert!(!taken.contains(&0), "oldest ticket should be evicted");
+        assert_eq!(primitive.take(domain, &key).expect("empty take"), None);
     }
 }

@@ -5,8 +5,12 @@ use std::{fmt, io};
 
 use orbit_core::Fleet;
 
-use self::store::{DOMAIN_MAX, SessionPrimitive};
+#[cfg(feature = "rustls_0_24")]
+use self::store::ClientSessionPrimitive;
+use self::store::{DOMAIN_MAX, ServerSessionPrimitive};
 
+#[cfg(feature = "rustls_0_24")]
+mod client_v24;
 mod store;
 #[cfg(feature = "rustls_0_23")]
 mod v23;
@@ -18,6 +22,9 @@ mod v24;
 /// This is no longer than rustls 0.23's stateful TLS 1.3 ticket lifetime.
 pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub const MAX_SESSION_TTL: Duration = DEFAULT_SESSION_TTL;
+pub const SERVER_SESSION_STATE_KIND: u8 = store::SERVER_SESSION_STATE_KIND;
+#[cfg(feature = "rustls_0_24")]
+pub const CLIENT_SESSION_STATE_KIND: u8 = store::CLIENT_SESSION_STATE_KIND;
 
 /// Stable isolation boundary for one equivalent set of rustls server configs.
 ///
@@ -64,7 +71,7 @@ impl fmt::Debug for SessionDomain {
 /// One fleet-wide session table from which isolated rustls views are made.
 #[derive(Clone)]
 pub struct FleetServerSessions {
-    primitive: Arc<SessionPrimitive>,
+    primitive: Arc<ServerSessionPrimitive>,
     ttl_ms: Arc<AtomicU64>
 }
 
@@ -79,7 +86,7 @@ impl FleetServerSessions {
     ) -> io::Result<Self> {
         let ttl_ms = validate_ttl(ttl)?;
         Ok(Self {
-            primitive: Arc::new(SessionPrimitive::open(&fleet)?),
+            primitive: Arc::new(ServerSessionPrimitive::open(&fleet)?),
             ttl_ms: Arc::new(AtomicU64::new(ttl_ms))
         })
     }
@@ -135,10 +142,15 @@ impl fmt::Debug for FleetServerSessions {
 }
 
 pub struct OrbitSessionStorage {
-    primitive: Arc<SessionPrimitive>,
+    primitive: Arc<ServerSessionPrimitive>,
     domain: SessionDomain,
     ttl_ms: Arc<AtomicU64>
 }
+
+/// Explicit server-side name for [`OrbitSessionStorage`].
+///
+/// The original name remains available for API compatibility.
+pub type OrbitServerSessionStorage = OrbitSessionStorage;
 
 impl fmt::Debug for OrbitSessionStorage {
     fn fmt(
@@ -250,6 +262,107 @@ impl OrbitSessionStorage {
                 None
             }
         }
+    }
+}
+
+/// One fleet-wide rustls 0.24 client-session table.
+///
+/// rustls 0.24 supplies a security-context hash and stable persistence codec
+/// for client sessions. Earlier rustls lines do not expose that codec, so this
+/// adapter is intentionally available only with `rustls_0_24`.
+#[cfg(feature = "rustls_0_24")]
+#[derive(Clone)]
+pub struct FleetClientSessions {
+    primitive: Arc<ClientSessionPrimitive>,
+    ttl_ms: Arc<AtomicU64>
+}
+
+#[cfg(feature = "rustls_0_24")]
+impl FleetClientSessions {
+    pub fn open(fleet: Arc<Fleet>) -> io::Result<Self> {
+        Self::with_ttl(fleet, DEFAULT_SESSION_TTL)
+    }
+
+    pub fn with_ttl(
+        fleet: Arc<Fleet>,
+        ttl: Duration
+    ) -> io::Result<Self> {
+        let ttl_ms = validate_ttl(ttl)?;
+        Ok(Self {
+            primitive: Arc::new(ClientSessionPrimitive::open(&fleet)?),
+            ttl_ms: Arc::new(AtomicU64::new(ttl_ms))
+        })
+    }
+
+    pub fn set_ttl(
+        &self,
+        ttl: Duration
+    ) -> io::Result<()> {
+        self.ttl_ms.store(validate_ttl(ttl)?, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn ttl(&self) -> Duration {
+        Duration::from_millis(self.ttl_ms.load(Ordering::Acquire))
+    }
+
+    pub fn storage(
+        &self,
+        provider: Arc<rustls_0_24::crypto::CryptoProvider>
+    ) -> Arc<OrbitClientSessionStorage> {
+        Arc::new(OrbitClientSessionStorage {
+            primitive: self.primitive.clone(),
+            provider,
+            ttl_ms: self.ttl_ms.clone()
+        })
+    }
+
+    pub fn reset(&self) -> io::Result<()> {
+        self.primitive.reset()
+    }
+
+    pub fn unlink(&self) -> io::Result<()> {
+        self.primitive.unlink()
+    }
+}
+
+#[cfg(feature = "rustls_0_24")]
+impl fmt::Debug for FleetClientSessions {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
+        formatter
+            .debug_struct("FleetClientSessions")
+            .field("ttl", &self.ttl())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "rustls_0_24")]
+pub struct OrbitClientSessionStorage {
+    primitive: Arc<ClientSessionPrimitive>,
+    provider: Arc<rustls_0_24::crypto::CryptoProvider>,
+    ttl_ms: Arc<AtomicU64>
+}
+
+#[cfg(feature = "rustls_0_24")]
+impl fmt::Debug for OrbitClientSessionStorage {
+    fn fmt(
+        &self,
+        formatter: &mut fmt::Formatter<'_>
+    ) -> fmt::Result {
+        formatter
+            .debug_struct("OrbitClientSessionStorage")
+            .field("ttl", &Duration::from_millis(self.ttl_ms.load(Ordering::Acquire)))
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "rustls_0_24")]
+impl OrbitClientSessionStorage {
+    fn ttl(&self) -> Duration {
+        Duration::from_millis(self.ttl_ms.load(Ordering::Acquire))
     }
 }
 

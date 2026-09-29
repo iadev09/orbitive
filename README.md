@@ -68,7 +68,7 @@ bus.publish("worker.ready", b"worker-1")?;
 | `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
 | `stream` / `stream-tokio` | `orbitive::stream` | bounded byte streams and paired exchanges between fleet members |
 | `pool-stream` **(experimental)** | `orbitive::pool` + `orbitive::stream` | optional binding between a fleet resource lease and a paired exchange |
-| `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls 0.23/0.24 server-session storage |
+| `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls server sessions and rustls 0.24 client sessions |
 
 `stream` is the transport primitive: it provides bounded duplex byte flow and
 typed paired exchanges without deciding why an application moves those bytes.
