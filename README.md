@@ -34,7 +34,7 @@ use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
 
 ```toml
 [dependencies]
-orbitive = { version = "0.5.1", features = ["events", "lock"] }
+orbitive = { version = "0.5.2", features = ["events", "lock"] }
 ```
 
 Core types used by most integrations are available at the crate root. The full
