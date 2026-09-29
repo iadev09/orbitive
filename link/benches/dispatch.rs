@@ -15,8 +15,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use orbit_link::{InboxGeometry, LinkBodies, LinkSegment, LinkSpec};
 use orbit_stream::{Endpoint, StreamSpec, Ticket};
 
+// Representative production geometry rather than a tiny test-only table.
+// The benchmark remains a c1 protocol-cost microbenchmark.
 const SPEC: LinkSpec =
-    LinkSpec::new(2, 196, InboxGeometry::new(64, 256), StreamSpec::new(197, 64, 4 * 1024));
+    LinkSpec::new(2, 196, InboxGeometry::new(128, 17 * 1024), StreamSpec::new(197, 128, 64 * 1024));
 const REQUEST: &[u8] = b"small request body";
 const RESPONSE: &[u8] = b"small response body";
 

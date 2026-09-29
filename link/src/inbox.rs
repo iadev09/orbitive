@@ -47,11 +47,13 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4F54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 4: a lane carries a reactor-listener word for descriptor-native async wake.
+///
 /// 3: a claimed lane's owner holds the lane's lock for as long as it lives, so
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 3;
+pub(crate) const INBOX_VERSION: u32 = 4;
 
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +97,11 @@ pub(crate) struct LaneHeader {
     /// process that wrote it.
     pub(crate) incarnation: AtomicU64,
     pub(crate) waiters: AtomicU32,
-    _padding: [u8; 20],
+    /// Set while the lane's Tokio receiver is waiting on its named socket.
+    /// A writer clears it before ringing that socket, so concurrent writes
+    /// coalesce into one reactor wake.
+    pub(crate) reactor: AtomicU32,
+    _padding: [u8; 16],
 
     // ── second line: identity, written once per claim ──────────────────
     /// Which service this lane serves.
@@ -243,7 +249,11 @@ pub struct Inbox {
     /// rest of the interface already speaks in lanes rather than nodes, so
     /// that change would not reach the edge.
     lanes: usize,
-    geometry: InboxGeometry
+    geometry: InboxGeometry,
+    /// Named descriptor wake used by a Tokio receiver. Memory-backed tables
+    /// keep using their process-local path.
+    #[cfg(unix)]
+    bell: Option<crate::bell::Bell>
 }
 
 // The pointer addresses shared memory whose only mutable state is atomics.
@@ -272,7 +282,13 @@ impl Inbox {
         geometry: InboxGeometry
     ) -> Result<Self> {
         geometry.validate()?;
-        let inbox = Self { base, lanes: fleet_capacity, geometry };
+        let inbox = Self {
+            base,
+            lanes: fleet_capacity,
+            geometry,
+            #[cfg(unix)]
+            bell: None
+        };
 
         let header = inbox.table_header();
         header.fleet_capacity.store(fleet_capacity as u32, Ordering::Relaxed);
@@ -296,7 +312,13 @@ impl Inbox {
         geometry: InboxGeometry
     ) -> Result<Self> {
         geometry.validate()?;
-        let inbox = Self { base, lanes: fleet_capacity, geometry };
+        let inbox = Self {
+            base,
+            lanes: fleet_capacity,
+            geometry,
+            #[cfg(unix)]
+            bell: None
+        };
         let header = inbox.table_header();
         if header.magic.load(Ordering::Acquire) != INBOX_MAGIC {
             return Err(Error::Malformed("inbox segment is not an inbox table"));
@@ -344,7 +366,7 @@ impl Inbox {
         let lane = self.lane_header(lane_index);
         lane.consumers.store(1, Ordering::Release);
         self.publish_identity(lane, service, role, incarnation);
-        self.wake(lane);
+        self.wake(lane_index, lane);
         Ok(())
     }
 
@@ -405,7 +427,7 @@ impl Inbox {
                 let _ = self.release_lane(lane_index);
                 return Err(conflict);
             }
-            self.wake(lane);
+            self.wake(lane_index, lane);
             return Ok((lane_index, held));
         }
         Err(Error::NoLane)
@@ -499,7 +521,7 @@ impl Inbox {
         lane_index: usize
     ) -> Result<()> {
         self.check_lane(lane_index)?;
-        self.wake(self.lane_header(lane_index));
+        self.wake(lane_index, self.lane_header(lane_index));
         Ok(())
     }
 
@@ -635,7 +657,7 @@ impl Inbox {
         lane.role_len.store(0, Ordering::Release);
         lane.pid.store(0, Ordering::Release);
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
-        self.wake(lane);
+        self.wake(lane_index, lane);
         Ok(())
     }
 
@@ -652,8 +674,13 @@ impl Inbox {
         if lane.consumers.load(Ordering::Acquire) == 0 {
             return Ok(Admission::NoConsumer);
         }
-        let reserve = lane.reserve.load(Ordering::Acquire);
         let read = lane.read.load(Ordering::Acquire);
+        // Read the consumer first. A producer may advance `reserve` between
+        // these loads, but that only makes the snapshot conservatively
+        // deeper. The opposite order can pair an old reserve with a newer
+        // read and wrap the subtraction, falsely reporting a nearly empty
+        // lane as full.
+        let reserve = lane.reserve.load(Ordering::Acquire);
         if reserve.wrapping_sub(read) >= self.geometry.capacity as u64 {
             return Ok(Admission::Full);
         }
@@ -671,8 +698,8 @@ impl Inbox {
     ) -> Result<u64> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
-        let reserve = lane.reserve.load(Ordering::Acquire);
         let read = lane.read.load(Ordering::Acquire);
+        let reserve = lane.reserve.load(Ordering::Acquire);
         Ok(reserve.wrapping_sub(read))
     }
 
@@ -714,8 +741,10 @@ impl Inbox {
             if lane.consumers.load(Ordering::Acquire) == 0 {
                 return Err(Error::InboxFull);
             }
-            let reserve = lane.reserve.load(Ordering::Acquire);
             let read = lane.read.load(Ordering::Acquire);
+            // See `admits`: an old read with a new reserve is a safe upper
+            // bound; an old reserve with a new read underflows.
+            let reserve = lane.reserve.load(Ordering::Acquire);
             if reserve.wrapping_sub(read) >= capacity {
                 return Err(Error::InboxFull);
             }
@@ -748,7 +777,7 @@ impl Inbox {
         // Publishes the payload: a reader that sees this sequence sees the
         // bytes written before it.
         slot.seq.store(position + 1, Ordering::Release);
-        self.wake(lane);
+        self.wake(lane_index, lane);
         Ok(position)
     }
 
@@ -817,6 +846,7 @@ impl Inbox {
         lane.service_len.store(0, Ordering::Relaxed);
         lane.role_len.store(0, Ordering::Relaxed);
         lane.waiters.store(0, Ordering::Relaxed);
+        lane.reactor.store(0, Ordering::Relaxed);
         for position in 0..self.geometry.capacity {
             let slot = self.slot_header(lane_index, position as u64);
             slot.len.store(0, Ordering::Relaxed);
@@ -859,11 +889,78 @@ impl Inbox {
     /// after finds the word already moved and does not start the wait.
     fn wake(
         &self,
+        lane_index: usize,
         lane: &LaneHeader
     ) {
-        lane.changes.fetch_add(1, Ordering::Release);
-        if lane.waiters.load(Ordering::Acquire) > 0 {
+        lane.changes.fetch_add(1, Ordering::SeqCst);
+        if lane.waiters.load(Ordering::SeqCst) > 0 {
             let _ = orbit_core::sync::wake_word(&lane.changes);
+        }
+        #[cfg(unix)]
+        if lane.reactor.swap(0, Ordering::SeqCst) != 0
+            && let Some(bell) = &self.bell
+        {
+            bell.ring(lane_index);
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn install_bell(
+        &mut self,
+        segment: &str
+    ) -> Result<()> {
+        self.bell = Some(crate::bell::Bell::new(segment).map_err(Error::Io)?);
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn bind_receiver(
+        &self,
+        lane_index: usize
+    ) -> Result<tokio::net::UnixDatagram> {
+        self.check_lane(lane_index)?;
+        let bell = self.bell.as_ref().ok_or(Error::Malformed("the inbox has no reactor bell"))?;
+        let socket = bell.bind(lane_index).map_err(Error::Io)?;
+        tokio::net::UnixDatagram::from_std(socket).map_err(Error::Io)
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn unbind_receiver(
+        &self,
+        lane_index: usize
+    ) {
+        self.disarm_receiver(lane_index);
+        if let Some(bell) = &self.bell {
+            bell.unbind(lane_index);
+        }
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn receiver_generation(
+        &self,
+        lane_index: usize
+    ) -> Result<u32> {
+        self.check_lane(lane_index)?;
+        Ok(self.lane_header(lane_index).changes.load(Ordering::SeqCst))
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn arm_receiver(
+        &self,
+        lane_index: usize
+    ) -> Result<()> {
+        self.check_lane(lane_index)?;
+        self.lane_header(lane_index).reactor.store(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn disarm_receiver(
+        &self,
+        lane_index: usize
+    ) {
+        if lane_index < self.lanes {
+            self.lane_header(lane_index).reactor.store(0, Ordering::SeqCst);
         }
     }
 

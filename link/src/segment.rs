@@ -1,6 +1,10 @@
 //! Bind the lossless inbox layout to one named shared-memory segment.
 
+#[cfg(feature = "tokio")]
+use std::collections::HashSet;
 use std::sync::Arc;
+#[cfg(feature = "tokio")]
+use std::sync::Mutex;
 
 use orbit_core::shm::{LaneHold, ShmRegion, ring_segment_name, try_hold_lane};
 
@@ -11,7 +15,9 @@ pub struct LinkSegment {
     region: ShmRegion,
     inbox: Inbox,
     name: String,
-    spec: LinkSpec
+    spec: LinkSpec,
+    #[cfg(feature = "tokio")]
+    receivers: Mutex<HashSet<usize>>
 }
 
 /// A lane this process holds.
@@ -40,13 +46,21 @@ impl LinkSegment {
         let segment_name = ring_segment_name(name, spec.inbox_kind);
         let bytes = spec.inbox_segment_bytes();
         let (region, lock) = ShmRegion::open_or_create_locked(&segment_name, bytes)?;
-        let inbox = if region.created() {
+        let mut inbox = if region.created() {
             unsafe { Inbox::initialize(region.as_ptr(), spec.fleet_capacity as usize, spec.inbox)? }
         } else {
             unsafe { Inbox::attach(region.as_ptr(), spec.fleet_capacity as usize, spec.inbox)? }
         };
+        inbox.install_bell(&segment_name)?;
         drop(lock);
-        Ok(Self { region, inbox, name: segment_name, spec })
+        Ok(Self {
+            region,
+            inbox,
+            name: segment_name,
+            spec,
+            #[cfg(feature = "tokio")]
+            receivers: Mutex::new(HashSet::new())
+        })
     }
 
     /// Take a lane after reclaiming every claimed lane whose kernel hold is
@@ -81,6 +95,44 @@ impl LinkSegment {
 
     pub fn inbox(&self) -> &Inbox {
         &self.inbox
+    }
+
+    /// Bind this process's claimed lane to the current Tokio reactor.
+    ///
+    /// One receiver owns one lane. Frames remain authoritative in SHM; the
+    /// named datagram is only a coalescing wake that tells the task to inspect
+    /// them. The receiver therefore loses neither a frame committed before it
+    /// binds nor one committed while its future is cancelled.
+    #[cfg(feature = "tokio")]
+    pub fn receiver(
+        self: &Arc<Self>,
+        lane: usize
+    ) -> Result<crate::InboxReceiver> {
+        self.inbox.wait_word(lane)?;
+        let mut held = self.receivers.lock().map_err(|_| {
+            Error::Malformed("the process-local inbox receiver registry is poisoned")
+        })?;
+        if !held.insert(lane) {
+            return Err(Error::Malformed("this process already receives the inbox lane"));
+        }
+        drop(held);
+        match crate::InboxReceiver::bind(Arc::clone(self), lane) {
+            Ok(receiver) => Ok(receiver),
+            Err(error) => {
+                self.release_receiver(lane);
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(feature = "tokio")]
+    pub(crate) fn release_receiver(
+        &self,
+        lane: usize
+    ) {
+        if let Ok(mut held) = self.receivers.lock() {
+            held.remove(&lane);
+        }
     }
 
     pub fn spec(&self) -> LinkSpec {

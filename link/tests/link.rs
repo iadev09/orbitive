@@ -142,3 +142,29 @@ fn a_join_reclaims_the_exact_dead_incarnation_and_ends_its_streams() {
     drop((live.hold, replacement.hold));
     live_bodies.unlink().unwrap();
 }
+
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn a_tokio_receiver_observes_queued_and_reactor_woken_frames() {
+    let name = fleet_name("async");
+    let owner = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+    owner.inbox().claim_lane(0, "checkout", "worker", 1).unwrap();
+    let peer = LinkSegment::open(&name, SPEC).unwrap();
+
+    peer.inbox().write(0, b"already queued").unwrap();
+    let mut receiver = owner.receiver(0).unwrap();
+    let mut frame = Vec::new();
+    receiver.recv(&mut frame).await.unwrap();
+    assert_eq!(frame, b"already queued");
+
+    let waiting = tokio::spawn(async move {
+        receiver.recv(&mut frame).await.unwrap();
+        frame
+    });
+    tokio::task::yield_now().await;
+    peer.inbox().write(0, b"reactor wake").unwrap();
+    assert_eq!(waiting.await.unwrap(), b"reactor wake");
+
+    owner.inbox().release_lane(0).unwrap();
+    owner.unlink().unwrap();
+}

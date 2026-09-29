@@ -21,13 +21,19 @@ use std::fmt;
 
 use orbit_stream::StreamSpec;
 
+#[cfg(unix)]
+mod bell;
 mod body;
 mod inbox;
+#[cfg(all(unix, feature = "tokio"))]
+mod receiver;
 #[cfg(unix)]
 mod segment;
 
 pub use body::LinkBodies;
 pub use inbox::{Admission, Inbox, InboxGeometry, LANE_NAME_MAX, LANE_ROLE_MAX, Reclaimed};
+#[cfg(all(unix, feature = "tokio"))]
+pub use receiver::InboxReceiver;
 #[cfg(unix)]
 pub use segment::{Joined, LinkSegment, LinkSegmentHandle, check_name};
 

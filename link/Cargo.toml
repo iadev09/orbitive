@@ -13,15 +13,19 @@ documentation = "https://docs.rs/orbit-link"
 exclude.workspace = true
 
 [features]
-tokio = ["orbit-stream/tokio"]
+tokio = ["orbit-stream/tokio", "dep:tokio"]
 
 [dependencies]
 orbit-core.workspace = true
 orbit-stream.workspace = true
+tokio = { version = "1", default-features = false, features = ["net", "rt"], optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [[bench]]
 name = "dispatch"
