@@ -103,3 +103,8 @@ Shared trust can span domains; cookies cannot span different registrable domains
   entries, configurable at build time with `ORBIT_AUTH_STATE_CAPACITY`.
 
 [Performance measurements](benches/README.md)
+
+For a validator stored in a service, use
+`authority.validator(policy).into_owned()`. The resulting `OwnedValidator`
+keeps the prepared policy and derived keys without borrowing the authority.
+Borrowed `Validator` usage remains unchanged.

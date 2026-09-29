@@ -415,7 +415,7 @@ fn mac(
     key: &[u8],
     value: &[u8]
 ) -> [u64; 4] {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC key");
+    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key).expect("HMAC key");
     mac.update(value);
     let bytes = mac.finalize().into_bytes();
     std::array::from_fn(|i| {

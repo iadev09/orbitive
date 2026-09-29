@@ -9,6 +9,7 @@ mod principal;
 mod protection;
 mod table;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -160,8 +161,8 @@ impl Authority {
                 (*id, derive(key, &info))
             })
             .collect();
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(self.cache_seed.as_ref()).expect("HMAC key");
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.cache_seed.as_ref())
+            .expect("HMAC key");
         mac.update(&context(&[
             b"orbit-auth/v1/cache-policy",
             validation.audience.as_str().as_bytes(),
@@ -171,7 +172,13 @@ impl Authority {
             mac.update(&context(&[capability.as_str().as_bytes()]));
         }
         let cache_secret = Zeroizing::new(mac.finalize().into_bytes().into());
-        Validator { authority: self, validation, keys, cache_secret }
+        Validator {
+            realm: Cow::Borrowed(&self.realm),
+            issuer: Cow::Borrowed(&self.issuer),
+            validation,
+            keys,
+            cache_secret
+        }
     }
 
     fn scope(
@@ -180,26 +187,38 @@ impl Authority {
         purpose: Purpose,
         id: KeyId
     ) -> Vec<u8> {
-        context(&[
-            b"orbit-auth/v1/xchacha20poly1305",
-            self.realm.as_bytes(),
-            self.issuer.as_bytes(),
-            audience.as_str().as_bytes(),
-            purpose.as_bytes(),
-            &id.to_be_bytes()
-        ])
+        token_scope(&self.realm, &self.issuer, audience, purpose, id)
     }
 }
 
 /// Prepared validator with mandatory audience/purpose and optional exact capabilities.
 pub struct Validator<'a> {
-    authority: &'a Authority,
+    realm: Cow<'a, str>,
+    issuer: Cow<'a, str>,
     validation: Validation,
     keys: BTreeMap<KeyId, Zeroizing<[u8; 32]>>,
     cache_secret: Zeroizing<[u8; 32]>
 }
 
+/// A prepared validator independent of the issuing Authority's lifetime.
+/// Retains policy-scoped derived secrets, not the authority's root keyring.
+pub type OwnedValidator = Validator<'static>;
+
 impl Validator<'_> {
+    /// Take ownership of the realm/issuer labels and move the prepared policy and
+    /// derived keys unchanged. No key derivation or cache namespace change occurs.
+    /// The result may outlive the Authority and be stored in a long-lived service.
+    /// Like any prepared validator, it retains its trust snapshot until replaced.
+    pub fn into_owned(self) -> OwnedValidator {
+        Validator {
+            realm: Cow::Owned(self.realm.into_owned()),
+            issuer: Cow::Owned(self.issuer.into_owned()),
+            validation: self.validation,
+            keys: self.keys,
+            cache_secret: self.cache_secret
+        }
+    }
+
     pub fn validate(
         &self,
         token: &str,
@@ -258,8 +277,8 @@ impl Validator<'_> {
         token: &str
     ) -> Result<CacheKey> {
         check_size(token)?;
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(self.cache_secret.as_ref()).expect("HMAC key");
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.cache_secret.as_ref())
+            .expect("HMAC key");
         mac.update(token.as_bytes());
         Ok(CacheKey(mac.finalize().into_bytes().into()))
     }
@@ -276,7 +295,13 @@ impl Validator<'_> {
         }
         let id = KeyId::from_be_bytes(wire[..4].try_into().expect("checked header length"));
         let key = self.keys.get(&id).ok_or(Error::InvalidToken)?;
-        let info = self.authority.scope(&self.validation.audience, self.validation.purpose, id);
+        let info = token_scope(
+            &self.realm,
+            &self.issuer,
+            &self.validation.audience,
+            self.validation.purpose,
+            id
+        );
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref()).expect("256-bit key");
         let plaintext = Zeroizing::new(
             cipher
@@ -296,8 +321,8 @@ impl Validator<'_> {
     ) -> Result<()> {
         let claims = &principal.claims;
         claims.check_shape().map_err(|_| Error::InvalidToken)?;
-        if principal.realm != self.authority.realm
-            || principal.issuer != self.authority.issuer
+        if principal.realm != self.realm
+            || principal.issuer != self.issuer
             || claims.audience != self.validation.audience
             || claims.purpose != self.validation.purpose
         {
@@ -324,4 +349,21 @@ fn check_size(token: &str) -> Result<()> {
         return Err(Error::InvalidToken);
     }
     Ok(())
+}
+
+fn token_scope(
+    realm: &str,
+    issuer: &str,
+    audience: &Audience,
+    purpose: Purpose,
+    id: KeyId
+) -> Vec<u8> {
+    context(&[
+        b"orbit-auth/v1/xchacha20poly1305",
+        realm.as_bytes(),
+        issuer.as_bytes(),
+        audience.as_str().as_bytes(),
+        purpose.as_bytes(),
+        &id.to_be_bytes()
+    ])
 }

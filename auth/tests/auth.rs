@@ -378,3 +378,92 @@ fn bounded_eviction_zero_ttl_and_wrong_cached_entry_are_safe() {
         .unwrap();
     assert!(!Arc::ptr_eq(&correct, &uncached));
 }
+
+#[test]
+fn owned_validator_outlives_authority_and_preserves_warm_cache_and_hooks() {
+    fn assert_service_owned<T: Send + Sync + 'static>(_: &T) {}
+    struct Reject;
+    impl ValidationHook for Reject {
+        fn check(
+            &self,
+            _: &Principal,
+            _: u64
+        ) -> Result<()> {
+            Err(Error::Revoked)
+        }
+    }
+    let authority = standard();
+    let token = authority.issue(claims()).unwrap();
+    let validator = authority.validator(policy("api", Purpose::Access));
+    let cache = cache();
+    let ttl = Duration::from_secs(90);
+    let key = validator.cache_key(token.expose()).unwrap();
+    let cached =
+        validator.validate_cached(token.expose(), 110, &cache, ttl, &AllowReusable).unwrap();
+    let owned: OwnedValidator = validator.into_owned();
+    assert_service_owned(&owned);
+    drop(authority);
+    assert_eq!(owned.cache_key(token.expose()).unwrap(), key);
+    let hit = owned.validate_cached(token.expose(), 111, &cache, ttl, &AllowReusable).unwrap();
+    assert!(Arc::ptr_eq(&cached, &hit));
+    assert_eq!(
+        owned.validate_cached(token.expose(), 112, &cache, ttl, &Reject),
+        Err(Error::Revoked)
+    );
+    assert_eq!(
+        owned.validate_cached(token.expose(), 200, &cache, ttl, &AllowReusable),
+        Err(Error::Expired)
+    );
+    // Cold verification also works without the root keyring.
+    assert_eq!(*owned.validate(token.expose(), 110, &AllowReusable).unwrap(), *cached);
+}
+
+#[test]
+fn owned_validator_keeps_domain_capability_and_key_rotation_boundaries() {
+    let authority = standard();
+    let token = authority.issue(claims()).unwrap();
+    let owned = authority.validator(policy("api", Purpose::Access)).into_owned();
+    let wrong_audience = authority.validator(policy("other", Purpose::Access)).into_owned();
+    let wrong_purpose = authority.validator(policy("api", Purpose::Internal)).into_owned();
+    let mut restricted = policy("api", Purpose::Access);
+    restricted.required_capabilities.insert(Capability::new("write").unwrap());
+    let restricted = authority.validator(restricted).into_owned();
+    drop(authority);
+    assert_eq!(
+        wrong_audience.validate(token.expose(), 110, &AllowReusable),
+        Err(Error::InvalidToken)
+    );
+    assert_eq!(
+        wrong_purpose.validate(token.expose(), 110, &AllowReusable),
+        Err(Error::InvalidToken)
+    );
+    assert_eq!(
+        restricted.validate(token.expose(), 110, &AllowReusable),
+        Err(Error::MissingCapability)
+    );
+    let replacement = super_authority_for_rotation();
+    let replacement = replacement.validator(policy("api", Purpose::Access)).into_owned();
+    assert_ne!(
+        owned.cache_key(token.expose()).unwrap(),
+        replacement.cache_key(token.expose()).unwrap()
+    );
+    assert!(owned.validate(token.expose(), 110, &AllowReusable).is_ok());
+    assert!(replacement.validate(token.expose(), 110, &AllowReusable).is_err());
+}
+
+fn super_authority_for_rotation() -> Authority {
+    authority("prod", "login", 1, &[(1, 8)])
+}
+
+#[test]
+fn release_052_wire_fixture() {
+    let authority = standard();
+    // Minted with the pre-upgrade crypto dependencies and the public fixture key [7; 32].
+    let token = "oa1.AAAAAVicZqEAo3aL0otDA0krivP-SnqjUSHwYR9egHOAbXtmVClzb1QgovRS3FIR5G2uEFGDtbD4-4H9uGIJ_1hVPt5V-64hK6vtu6-RaGh7w0lkSXwfC4hq_0z83VLS_WWeA1mevwz9D64ppy0Cv0M1OP0zG-86oiECuPjXiSbxY5_zvLlnvDLsG1WiLVwztZRskqI7TxziGBzAl8lSmVKVUVe1cWdaSE7zDQb8pp_Ru99YhkRnYfWNVEzxgMdapCKgDhdqi-ftk7bXZwL_5Pl9Wb4XTkhgptFLn9-m3EWj3SUuMNQgj3nM38TUG0EQiq8wbehbqohwwAiGE2OuP5nWCr7tqHjbWQ74gC7uzTk52hQ9EoDvEhyAAGHUpfY";
+    let validator = authority.validator(policy("api", Purpose::Access));
+    assert_eq!(validator.validate(token, 110, &AllowReusable).unwrap().claims(), &claims());
+    assert_eq!(
+        format!("{:?}", validator.cache_key(token).unwrap()),
+        "CacheKey([39, 175, 110, 218, 106, 44, 114, 92, 173, 125, 12, 222, 207, 221, 189, 198, 163, 26, 162, 201, 167, 175, 226, 212, 53, 102, 184, 167, 144, 252, 159, 175])"
+    );
+}
