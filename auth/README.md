@@ -82,6 +82,13 @@ unchanged protected records reuse local verification without repeating crypto.
 - `revoke_session` rejects linked tokens on subsequent checks, including cache hits.
 - `refresh` consumes one refresh generation atomically. Existing access tokens
   remain valid until their own expiry or session revocation.
+- `extend_session` moves a live session's horizon forward on activity the
+  application trusts, with no credential and no generation change. Tokens issued
+  before keep their own expiry; the returned handle issues ones that reach the
+  new horizon. `session` reads a live session's handle by id for its subject.
+- `Validator::validate_lapsed` authenticates a credential past its own expiry
+  and still asks the hook, so a carrier whose session outlived it can be
+  replaced; it admits nothing on the lapsed credential itself.
 - `replay_guard` admits a token's `jti` once. Full tables reject new state rather
   than evict live records.
 

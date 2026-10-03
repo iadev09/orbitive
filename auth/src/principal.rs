@@ -162,6 +162,16 @@ pub trait ValidationHook {
         principal: &Principal,
         now: u64
     ) -> Result<()>;
+
+    /// `Validator::validate_lapsed`: policy for a credential past its own
+    /// expiry. Hooks must opt in explicitly; the default fails closed.
+    fn check_lapsed(
+        &self,
+        _: &Principal,
+        _: u64
+    ) -> Result<()> {
+        Err(Error::Expired)
+    }
 }
 
 /// Explicitly permits token reuse until expiry; provides no revocation or replay protection.

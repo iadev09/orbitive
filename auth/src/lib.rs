@@ -231,6 +231,24 @@ impl Validator<'_> {
         Ok(Arc::new(principal))
     }
 
+    /// A credential past its own expiry whose session may still be live:
+    /// the envelope is authenticated and every check but the credential's
+    /// expiry runs, then the hook decides from the shared state (a revoked or
+    /// expired session still refuses). For reissuing a carrier whose session
+    /// outlived it, never for admitting work on the lapsed credential itself.
+    /// Not cached: a lapsed credential is answered once, with a new one.
+    pub fn validate_lapsed(
+        &self,
+        token: &str,
+        now: u64,
+        hook: &dyn ValidationHook
+    ) -> Result<Arc<Principal>> {
+        let principal = self.decrypt(token)?;
+        self.check_lapsed(&principal, now)?;
+        hook.check_lapsed(&principal, now)?;
+        Ok(Arc::new(principal))
+    }
+
     /// No token decryption, base64 or claims decoding on a warm cache hit.
     /// Hooks still consult current policy; FleetAuth checks its authenticated shared state.
     ///
@@ -319,6 +337,19 @@ impl Validator<'_> {
         principal: &Principal,
         now: u64
     ) -> Result<()> {
+        self.check_lapsed(principal, now)?;
+        if now >= principal.claims.expires_at {
+            return Err(Error::Expired);
+        }
+        Ok(())
+    }
+
+    /// Every static check but the credential's own expiry.
+    fn check_lapsed(
+        &self,
+        principal: &Principal,
+        now: u64
+    ) -> Result<()> {
         let claims = &principal.claims;
         claims.check_shape().map_err(|_| Error::InvalidToken)?;
         if principal.realm != self.realm
@@ -327,9 +358,6 @@ impl Validator<'_> {
             || claims.purpose != self.validation.purpose
         {
             return Err(Error::InvalidToken);
-        }
-        if now >= claims.expires_at {
-            return Err(Error::Expired);
         }
         if now < claims.not_before || now < claims.issued_at {
             return Err(Error::NotYetValid);

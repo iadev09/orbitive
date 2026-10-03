@@ -45,6 +45,9 @@ impl Session {
     pub fn subject(&self) -> &str {
         &self.subject
     }
+    pub fn created_at(&self) -> u64 {
+        self.created_at
+    }
     pub fn expires_at(&self) -> u64 {
         self.expires_at
     }
@@ -170,7 +173,7 @@ impl<P: StateProtection> FleetAuth<P> {
             }
             insert(slots, record, now, &self.protection)
         })?;
-        Ok(self.session(id, subject, record))
+        Ok(self.handle(id, subject, record))
     }
 
     /// Atomically publish revocation. Every subsequent validation rechecks the
@@ -194,6 +197,62 @@ impl<P: StateProtection> FleetAuth<P> {
             record.status = REVOKED;
             slots[snapshot.index].store(record, snapshot.index, &self.protection)?;
             Ok(())
+        })
+    }
+
+    /// The live session behind an id, for the subject that owns it: a handle
+    /// a worker that did not create the session uses to issue its credentials
+    /// or read its horizon. Lock-free; a raced read takes one locked retry.
+    pub fn session(
+        &self,
+        id: SessionId,
+        subject: &str,
+        now: u64
+    ) -> Result<Session> {
+        if !crate::principal::valid_label(subject) {
+            return Err(Error::InvalidInput);
+        }
+        let snapshot =
+            self.table.lookup(self.session_key(id), &self.protection)?.ok_or(Error::Revoked)?;
+        if snapshot.record.subject != self.subject_tag(subject) {
+            return Err(Error::InvalidInput);
+        }
+        self.check_live(snapshot.record, now)?;
+        Ok(self.handle(id, subject.to_owned(), snapshot.record))
+    }
+
+    /// Move a live session's horizon forward on activity the application
+    /// trusts, without a credential and without consuming a refresh generation.
+    /// `subject` must own the session. The horizon never moves back: shortening
+    /// a session is revocation. Credentials issued earlier keep their own
+    /// expiry; the returned handle issues ones that reach the new horizon.
+    pub fn extend_session(
+        &self,
+        id: SessionId,
+        subject: &str,
+        now: u64,
+        expires_at: u64
+    ) -> Result<Session> {
+        if !crate::principal::valid_label(subject) || now >= expires_at {
+            return Err(Error::InvalidInput);
+        }
+        let key = self.session_key(id);
+        let tag = self.subject_tag(subject);
+        self.table.write(|slots| {
+            let snapshot = find(slots, key, &self.protection)?.ok_or(Error::Revoked)?;
+            let mut record = snapshot.record;
+            if record.subject != tag {
+                return Err(Error::InvalidInput);
+            }
+            self.check_live(record, now)?;
+            if expires_at < record.expires_at {
+                return Err(Error::InvalidInput);
+            }
+            if expires_at > record.expires_at {
+                record.expires_at = expires_at;
+                slots[snapshot.index].store(record, snapshot.index, &self.protection)?;
+            }
+            Ok(self.handle(id, subject.to_owned(), record))
         })
     }
 
@@ -226,7 +285,7 @@ impl<P: StateProtection> FleetAuth<P> {
             record.generation = record.generation.checked_add(1).ok_or(Error::PolicyUnavailable)?;
             record.expires_at = expires_at;
             slots[snapshot.index].store(record, snapshot.index, &self.protection)?;
-            Ok(self.session(binding.id, principal.subject().to_owned(), record))
+            Ok(self.handle(binding.id, principal.subject().to_owned(), record))
         })
     }
 
@@ -235,7 +294,7 @@ impl<P: StateProtection> FleetAuth<P> {
         ReplayGuard(self)
     }
 
-    fn session(
+    fn handle(
         &self,
         id: SessionId,
         subject: String,
@@ -267,15 +326,51 @@ impl<P: StateProtection> FleetAuth<P> {
         principal: &Principal,
         now: u64
     ) -> Result<()> {
-        if principal.realm != self.realm || principal.issuer != self.issuer {
-            return Err(Error::InvalidToken);
-        }
+        self.check_scope_lapsed(principal, now)?;
         if now >= principal.claims.expires_at {
             return Err(Error::Expired);
+        }
+        Ok(())
+    }
+    fn check_scope_lapsed(
+        &self,
+        principal: &Principal,
+        now: u64
+    ) -> Result<()> {
+        if principal.realm != self.realm || principal.issuer != self.issuer {
+            return Err(Error::InvalidToken);
         }
         if now < principal.claims.not_before || now < principal.claims.issued_at {
             return Err(Error::NotYetValid);
         }
+        Ok(())
+    }
+    /// The live-session part of `check`, after the scope was accepted.
+    fn check_session(
+        &self,
+        principal: &Principal,
+        now: u64
+    ) -> Result<()> {
+        let binding = principal.session.as_ref().ok_or(Error::InvalidToken)?;
+        {
+            let mut views = self.sessions.lock().map_err(|_| Error::PolicyUnavailable)?;
+            if let Some(view) = views.get(&binding.id) {
+                if self.table.unchanged::<P>(&view.snapshot)? {
+                    if view.subject != principal.subject() {
+                        return Err(Error::InvalidToken);
+                    }
+                    return self.check_metadata(view.snapshot.record, principal, now);
+                }
+                views.pop(&binding.id);
+            }
+        }
+        let key = self.session_key(binding.id);
+        let snapshot = self.table.lookup(key, &self.protection)?.ok_or(Error::Revoked)?;
+        self.check_record(snapshot.record, self.subject_tag(principal.subject()), principal, now)?;
+        self.sessions
+            .lock()
+            .map_err(|_| Error::PolicyUnavailable)?
+            .put(binding.id, SessionView { snapshot, subject: principal.subject().to_owned() });
         Ok(())
     }
     fn check_record(
@@ -290,10 +385,9 @@ impl<P: StateProtection> FleetAuth<P> {
         }
         self.check_metadata(record, principal, now)
     }
-    fn check_metadata(
+    fn check_live(
         &self,
         record: Record,
-        principal: &Principal,
         now: u64
     ) -> Result<()> {
         match record.status {
@@ -307,6 +401,15 @@ impl<P: StateProtection> FleetAuth<P> {
         if now < record.created_at {
             return Err(Error::NotYetValid);
         }
+        Ok(())
+    }
+    fn check_metadata(
+        &self,
+        record: Record,
+        principal: &Principal,
+        now: u64
+    ) -> Result<()> {
+        self.check_live(record, now)?;
         if principal.claims.issued_at < record.created_at
             || principal.claims.expires_at > record.expires_at
         {
@@ -345,27 +448,18 @@ impl<P: StateProtection> ValidationHook for FleetAuth<P> {
         now: u64
     ) -> Result<()> {
         self.check_scope(principal, now)?;
-        let binding = principal.session.as_ref().ok_or(Error::InvalidToken)?;
-        {
-            let mut views = self.sessions.lock().map_err(|_| Error::PolicyUnavailable)?;
-            if let Some(view) = views.get(&binding.id) {
-                if self.table.unchanged::<P>(&view.snapshot)? {
-                    if view.subject != principal.subject() {
-                        return Err(Error::InvalidToken);
-                    }
-                    return self.check_metadata(view.snapshot.record, principal, now);
-                }
-                views.pop(&binding.id);
-            }
-        }
-        let key = self.session_key(binding.id);
-        let snapshot = self.table.lookup(key, &self.protection)?.ok_or(Error::Revoked)?;
-        self.check_record(snapshot.record, self.subject_tag(principal.subject()), principal, now)?;
-        self.sessions
-            .lock()
-            .map_err(|_| Error::PolicyUnavailable)?
-            .put(binding.id, SessionView { snapshot, subject: principal.subject().to_owned() });
-        Ok(())
+        self.check_session(principal, now)
+    }
+
+    /// A lapsed credential of a live session passes the session checks; the
+    /// record's own horizon, revocation and subject still decide.
+    fn check_lapsed(
+        &self,
+        principal: &Principal,
+        now: u64
+    ) -> Result<()> {
+        self.check_scope_lapsed(principal, now)?;
+        self.check_session(principal, now)
     }
 }
 

@@ -99,6 +99,15 @@ fn time_and_capabilities_are_enforced() {
 }
 
 #[test]
+fn lapsed_validation_requires_an_explicit_hook_opt_in() {
+    let authority = standard();
+    let token = authority.issue(claims()).unwrap();
+    let validator = authority.validator(policy("api", Purpose::Access));
+
+    assert_eq!(validator.validate_lapsed(token.expose(), 200, &AllowReusable), Err(Error::Expired));
+}
+
+#[test]
 fn tampering_every_wire_byte_and_malformed_tokens_fail() {
     let authority = standard();
     let token = authority.issue(claims()).unwrap();

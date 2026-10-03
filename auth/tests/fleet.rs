@@ -116,6 +116,64 @@ fn refresh_rotation_preserves_access_and_revocation_survives_token_key_rotation(
 }
 
 #[test]
+fn activity_extends_the_horizon_a_peer_already_cached_and_new_credentials_reach_it() {
+    let authority = authority();
+    let fleet = Arc::new(Fleet::join("auth-extend", 1).unwrap());
+    let state = auth(fleet.clone(), &authority);
+    let peer = auth(fleet, &authority);
+    let validator = authority.validator(policy(Purpose::Access));
+    let session = state.create_session("user:42", 100, 200).unwrap();
+    let first = authority.issue_session(claims(Purpose::Access), &session).unwrap();
+    // The peer holds a warm view of the record before it changes.
+    assert!(validator.validate(first.expose(), 110, &peer).is_ok());
+    assert_eq!(
+        state.extend_session(session.id(), "user:41", 150, 300).err(),
+        Some(Error::InvalidInput)
+    );
+    assert_eq!(
+        state.extend_session(session.id(), "user:42", 150, 150).err(),
+        Some(Error::InvalidInput)
+    );
+    let extended = state.extend_session(session.id(), "user:42", 150, 300).unwrap();
+    assert_eq!((extended.id(), extended.expires_at()), (session.id(), 300));
+    // A peer reads the extended session by id and issues from the handle.
+    let read = peer.session(session.id(), "user:42", 160).unwrap();
+    assert_eq!((read.created_at(), read.expires_at()), (100, 300));
+    assert_eq!(peer.session(session.id(), "user:41", 160).err(), Some(Error::InvalidInput));
+    // Moving back is not an extension; the same horizon is a no-op.
+    assert_eq!(
+        state.extend_session(session.id(), "user:42", 151, 250).err(),
+        Some(Error::InvalidInput)
+    );
+    assert_eq!(state.extend_session(session.id(), "user:42", 151, 300).unwrap().expires_at(), 300);
+    // The credential issued before keeps its own expiry; a credential reaching
+    // the new horizon has to come from the extended handle.
+    assert_eq!(validator.validate(first.expose(), 200, &state), Err(Error::Expired));
+    assert!(
+        authority
+            .issue_session(Claims { expires_at: 300, ..claims(Purpose::Access) }, &session)
+            .is_err()
+    );
+    let second = authority
+        .issue_session(
+            Claims { issued_at: 150, not_before: 150, expires_at: 300, ..claims(Purpose::Access) },
+            &extended
+        )
+        .unwrap();
+    assert!(validator.validate(second.expose(), 250, &peer).is_ok());
+    // The first credential lapsed while its session lived on: the lapsed
+    // path accepts it (a new carrier may be issued), the normal path does not.
+    assert!(validator.validate_lapsed(first.expose(), 250, &peer).is_ok());
+    assert_eq!(validator.validate(first.expose(), 250, &peer), Err(Error::Expired));
+    assert_eq!(validator.validate_lapsed(first.expose(), 300, &peer), Err(Error::Expired));
+    peer.revoke_session(session.id(), 260).unwrap();
+    assert_eq!(validator.validate_lapsed(first.expose(), 261, &peer), Err(Error::Revoked));
+    assert_eq!(state.extend_session(session.id(), "user:42", 261, 400).err(), Some(Error::Revoked));
+    let other = state.create_session("user:7", 100, 200).unwrap();
+    assert_eq!(state.extend_session(other.id(), "user:7", 200, 400).err(), Some(Error::Expired));
+}
+
+#[test]
 fn replay_guard_is_authoritative_across_handles_and_cache_hits() {
     let authority = authority();
     let fleet = Arc::new(Fleet::join("auth-replay", 1).unwrap());
