@@ -1,6 +1,6 @@
 [package]
 name = "orbit-metrics"
-version.workspace = true
+version = "0.5.3"
 publish.workspace = true
 edition.workspace = true
 authors.workspace = true

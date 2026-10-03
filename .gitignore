@@ -42,7 +42,6 @@ composer.phar
 *.sock
 *.pid
 *.lock
-!Cargo.lock
 *.log
 logs/
 /tmp/

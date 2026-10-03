@@ -19,7 +19,7 @@ exchange instead of moving the client object through shared memory.
 
 ```toml
 [dependencies]
-orbitive = { version = "0.5.3", features = ["client-pool"] }
+orbitive = { version = "0.5.4", features = ["client-pool"] }
 ```
 
 ```rust
@@ -31,7 +31,7 @@ Orbit pool and exchange surfaces:
 
 ```toml
 [dependencies]
-orbitive = { version = "0.5.3", features = ["client-pool-fleet"] }
+orbitive = { version = "0.5.4", features = ["client-pool-fleet"] }
 ```
 
 The separately published `orbit-client-pool` package remains available for

@@ -34,7 +34,7 @@ use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
 
 ```toml
 [dependencies]
-orbitive = { version = "0.5.3", features = ["events", "lock"] }
+orbitive = { version = "0.5.4", features = ["events", "lock"] }
 ```
 
 Core types used by most integrations are available at the crate root. The full
@@ -110,6 +110,12 @@ facade and enable only the modules they need.
 
 The optional [`orbit-auth`](auth/README.md) implementation is also available as
 a narrow direct dependency, with backing selected by the supplied Fleet.
+
+The facade and implementation crates are versioned independently. A change to
+one `orbit-*` crate does not bump unrelated packages; `orbitive` advances only
+when its own public surface or one of its selected component requirements
+changes. Direct users should therefore pin the package they consume rather
+than assume every package in the repository has the facade's version.
 
 ## Compile-time geometry
 

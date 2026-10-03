@@ -10,13 +10,13 @@ and 0.24; client-session storage requires rustls 0.24.
 rustls 0.23 is the default:
 
 ```toml
-orbitive = { version = "0.5.3", features = ["rustls"] }
+orbitive = { version = "0.5.4", features = ["rustls"] }
 ```
 
 Select rustls 0.24 explicitly when the consuming TLS stack uses that line:
 
 ```toml
-orbitive = { version = "0.5.3", default-features = false, features = ["rustls_0_24"] }
+orbitive = { version = "0.5.4", default-features = false, features = ["rustls_0_24"] }
 ```
 
 The version features are additive. Enabling both is supported for workspaces
