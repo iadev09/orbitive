@@ -42,7 +42,7 @@ pub use epoch::OrbitEpoch;
 pub use error::{Error, Result};
 #[cfg(unix)]
 pub use fleet::FleetObserver;
-pub use fleet::{Fleet, NodeId};
+pub use fleet::{Fleet, FleetName, InvalidFleetName, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};
 #[cfg(unix)]

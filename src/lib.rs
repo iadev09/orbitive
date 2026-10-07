@@ -17,7 +17,7 @@ pub mod core {
 #[cfg(unix)]
 pub use orbit_core::FleetObserver;
 pub use orbit_core::{
-    Error, Fleet, Frame, NetId64, NodeId, OrbitEpoch, OrbitTyped, Result, RingSpec
+    Error, Fleet, FleetName, InvalidFleetName, Frame, NetId64, NodeId, OrbitEpoch, OrbitTyped, Result, RingSpec
 };
 
 pub mod ring {

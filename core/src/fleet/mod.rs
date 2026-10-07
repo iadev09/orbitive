@@ -18,6 +18,8 @@ use crate::ring::{ParkedRingEventFd, RingEventFd};
 
 mod cursor;
 pub use cursor::{FleetLaneCursor, FleetLanePoll};
+mod name;
+pub use name::{FleetName, InvalidFleetName};
 
 /// Read-only namespace handle for inspecting an existing SHM fleet.
 ///
