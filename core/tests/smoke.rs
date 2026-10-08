@@ -23,7 +23,10 @@ fn join_single_member_succeeds() {
 #[test]
 fn node_must_fit_inside_the_declared_fleet() {
     let err = Fleet::join_as("test", 2, NodeId::new(2)).unwrap_err();
-    assert!(matches!(err, orbit_core::Error::NodeOutsideFleet { node_id: 2, fleet_capacity: 2 }));
+    assert!(matches!(
+        err,
+        orbit_core::Error::NodeOutsideFleet { node_id: 2, fleet_capacity: 2 }
+    ));
 }
 
 #[test]
@@ -129,7 +132,8 @@ fn publish_increments_counter_per_kind() {
 #[test]
 fn read_returns_published_frame() {
     let fleet = Fleet::join("test", 1).unwrap();
-    let id = fleet.publish::<CurrencyRate>(0, 7, Bytes::from_static(b"payload"));
+    let id =
+        fleet.publish::<CurrencyRate>(0, 7, Bytes::from_static(b"payload"));
     let frame = fleet.read(id).expect("frame should be present");
     assert_eq!(frame.id, id);
     assert_eq!(frame.kind, 0);
@@ -150,7 +154,11 @@ fn ring_wraparound_overwrites_old_frames() {
     let fleet = Fleet::join("test", 1).unwrap();
     let mut ids = Vec::new();
     for i in 0..6 {
-        ids.push(fleet.publish::<CurrencyRate>(0, i as u64, Bytes::from(vec![i as u8])));
+        ids.push(fleet.publish::<CurrencyRate>(
+            0,
+            i as u64,
+            Bytes::from(vec![i as u8]),
+        ));
     }
 
     // Counters 0 and 1 have been overwritten by 4 and 5 (capacity = 4).
@@ -166,7 +174,8 @@ fn ring_wraparound_overwrites_old_frames() {
 fn ring_per_kind_is_independent() {
     let fleet = Fleet::join("test", 1).unwrap();
     let r_id = fleet.publish::<CurrencyRate>(0, 0, Bytes::from_static(b"rate"));
-    let s_id = fleet.publish::<UserSession>(0, 0, Bytes::from_static(b"session"));
+    let s_id =
+        fleet.publish::<UserSession>(0, 0, Bytes::from_static(b"session"));
     assert_eq!(r_id.kind(), CurrencyRate::KIND);
     assert_eq!(s_id.kind(), UserSession::KIND);
     // Both still readable from their respective rings.
@@ -192,7 +201,8 @@ fn ring_read_head_returns_latest_frame() {
     assert!(ring.read_head().is_none());
 
     fleet.publish::<CurrencyRate>(0, 0, Bytes::from_static(b"first"));
-    let last_id = fleet.publish::<CurrencyRate>(0, 0, Bytes::from_static(b"second"));
+    let last_id =
+        fleet.publish::<CurrencyRate>(0, 0, Bytes::from_static(b"second"));
 
     let head_frame = ring.read_head().expect("ring has head after writes");
     assert_eq!(head_frame.id, last_id);

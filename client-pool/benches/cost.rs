@@ -15,11 +15,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use orbit_client_pool::{
-    ActiveRequestPolicy, ClientManager, ClientPool, FleetClient, FleetClientPool, FleetPoolOptions,
-    PoolOptions
+    ActiveRequestPolicy, ClientManager, ClientPool, FleetClient,
+    FleetClientPool, FleetPoolOptions, PoolOptions,
 };
 use orbit_core::Fleet;
-use orbit_pool::{Incarnation as PoolIncarnation, Key, LocalFirst, Pool, PoolSpec};
+use orbit_pool::{
+    Incarnation as PoolIncarnation, Key, LocalFirst, Pool, PoolSpec,
+};
 use orbit_stream::exchange::{ExchangeSpec, Exchanges, PayloadArenaSpec};
 use orbit_stream::{Incarnation as StreamIncarnation, StreamSpec};
 
@@ -42,7 +44,7 @@ impl ClientManager for Manager {
 
     async fn recycle(
         &self,
-        _client: &mut Self::Client
+        _client: &mut Self::Client,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -50,7 +52,7 @@ impl ClientManager for Manager {
 
 struct Measurements {
     samples: Vec<Duration>,
-    operations: usize
+    operations: usize,
 }
 
 impl Measurements {
@@ -60,7 +62,7 @@ impl Measurements {
 
     fn push(
         &mut self,
-        elapsed: Duration
+        elapsed: Duration,
     ) {
         self.samples.push(elapsed);
     }
@@ -73,7 +75,7 @@ impl Measurements {
 
     fn report(
         &self,
-        name: &str
+        name: &str,
     ) {
         let elapsed = self.median();
         let min = self.samples.iter().min().expect("at least one sample");
@@ -94,16 +96,20 @@ fn fleet_options() -> FleetPoolOptions {
     FleetPoolOptions::new(0, 1, 1, 1, 0, 1)
 }
 
-fn fleet_pool(manager: Manager) -> (FleetClientPool<Manager>, Arc<Pool>, Arc<Exchanges>) {
+fn fleet_pool(
+    manager: Manager
+) -> (FleetClientPool<Manager>, Arc<Pool>, Arc<Exchanges>) {
     let fleet_name = format!("cc{:x}", std::process::id());
     let fleet = Arc::new(Fleet::join_shm(&fleet_name, 1).expect("fleet"));
     let pool = Arc::new(
         Pool::with_spec(
             Arc::clone(&fleet),
             PoolIncarnation::new(1),
-            PoolSpec::new(POOL_KIND, 4, 4).with_fleet_availability().with_fleet_concurrency()
+            PoolSpec::new(POOL_KIND, 4, 4)
+                .with_fleet_availability()
+                .with_fleet_concurrency(),
         )
-        .expect("pool")
+        .expect("pool"),
     );
     let exchanges = Arc::new(
         Exchanges::open(
@@ -111,10 +117,10 @@ fn fleet_pool(manager: Manager) -> (FleetClientPool<Manager>, Arc<Pool>, Arc<Exc
             StreamIncarnation::new(1),
             ExchangeSpec::new(
                 StreamSpec::new(CONTROL_KIND, 4, 4_096),
-                PayloadArenaSpec::new(PAYLOAD_KIND, 4, 4_096)
-            )
+                PayloadArenaSpec::new(PAYLOAD_KIND, 4, 4_096),
+            ),
         )
-        .expect("exchanges")
+        .expect("exchanges"),
     );
     let clients = FleetClientPool::new(
         manager,
@@ -122,7 +128,7 @@ fn fleet_pool(manager: Manager) -> (FleetClientPool<Manager>, Arc<Pool>, Arc<Exc
         Arc::clone(&exchanges),
         KEY,
         Arc::new(LocalFirst),
-        fleet_options()
+        fleet_options(),
     )
     .expect("fleet client pool");
     (clients, pool, exchanges)
@@ -130,11 +136,14 @@ fn fleet_pool(manager: Manager) -> (FleetClientPool<Manager>, Arc<Pool>, Arc<Exc
 
 async fn measure_local(
     pool: &ClientPool<Manager>,
-    operations: usize
+    operations: usize,
 ) -> Duration {
     let started = Instant::now();
     for _ in 0..operations {
-        let client = pool.acquire(ActiveRequestPolicy::Preserve).await.expect("local acquire");
+        let client = pool
+            .acquire(ActiveRequestPolicy::Preserve)
+            .await
+            .expect("local acquire");
         black_box(*client);
         drop(client);
     }
@@ -143,12 +152,14 @@ async fn measure_local(
 
 async fn measure_fleet(
     pool: &FleetClientPool<Manager>,
-    operations: usize
+    operations: usize,
 ) -> Duration {
     let started = Instant::now();
     for _ in 0..operations {
-        let FleetClient::Local(client) =
-            pool.acquire(&[], ActiveRequestPolicy::Preserve).await.expect("fleet acquire")
+        let FleetClient::Local(client) = pool
+            .acquire(&[], ActiveRequestPolicy::Preserve)
+            .await
+            .expect("fleet acquire")
         else {
             panic!("one-node benchmark unexpectedly selected a remote client");
         };
@@ -159,13 +170,21 @@ async fn measure_fleet(
 }
 
 fn main() {
-    let operations =
-        std::env::args().nth(1).and_then(|value| value.parse().ok()).unwrap_or(1_000_000);
-    let samples = std::env::args().nth(2).and_then(|value| value.parse().ok()).unwrap_or(7);
+    let operations = std::env::args()
+        .nth(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1_000_000);
+    let samples = std::env::args()
+        .nth(2)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(7);
     assert!(operations > 0, "operation count must be greater than zero");
     assert!(samples > 0, "sample count must be greater than zero");
 
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let local_creates = Arc::new(AtomicUsize::new(0));
         let local = ClientPool::new(Manager(Arc::clone(&local_creates)), local_options())

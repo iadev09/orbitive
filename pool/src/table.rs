@@ -16,24 +16,26 @@ use orbit_core::shm::{ShmRegion, ring_segment_name};
 use orbit_core::{Fleet, OrbitEpoch};
 
 use crate::layout::{
-    Doorbell, Geometry, Header, KEY_EMPTY, KEY_LIVE, KeySlot, RESOURCE_EMPTY, ResourceSlot
+    Doorbell, Geometry, Header, KEY_EMPTY, KEY_LIVE, KeySlot, RESOURCE_EMPTY,
+    ResourceSlot,
 };
 use crate::{Error, Incarnation, PoolSpec, Result, lock_unpoisoned};
 
 enum Backing {
     Memory(AlignedBytes),
     #[cfg(unix)]
-    Shm(ShmRegion)
+    Shm(ShmRegion),
 }
 
 struct AlignedBytes {
     ptr: *mut u8,
-    layout: std::alloc::Layout
+    layout: std::alloc::Layout,
 }
 
 impl AlignedBytes {
     fn zeroed(size: usize) -> Self {
-        let layout = std::alloc::Layout::from_size_align(size, 64).expect("segment layout");
+        let layout = std::alloc::Layout::from_size_align(size, 64)
+            .expect("segment layout");
         // SAFETY: the layout has a nonzero size (a header at least).
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!ptr.is_null(), "pool table allocation failed");
@@ -58,7 +60,7 @@ unsafe impl Sync for AlignedBytes {}
 struct Driver {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    pid: u32
+    pid: u32,
 }
 
 pub(crate) struct Table {
@@ -78,7 +80,7 @@ pub(crate) struct Table {
     /// The signalling end of this process's readiness descriptor, once
     /// somebody has asked for one.
     readiness: std::sync::OnceLock<Signal>,
-    driver: Mutex<Option<Driver>>
+    driver: Mutex<Option<Driver>>,
 }
 
 impl Table {
@@ -86,7 +88,7 @@ impl Table {
         match &self.backing {
             Backing::Memory(bytes) => bytes.ptr,
             #[cfg(unix)]
-            Backing::Shm(region) => region.as_ptr()
+            Backing::Shm(region) => region.as_ptr(),
         }
     }
 
@@ -94,7 +96,7 @@ impl Table {
         match &self.backing {
             Backing::Memory(_) => false,
             #[cfg(unix)]
-            Backing::Shm(_) => true
+            Backing::Shm(_) => true,
         }
     }
 
@@ -126,14 +128,17 @@ impl Table {
 
     fn doorbell(
         &self,
-        node: usize
+        node: usize,
     ) -> &Doorbell {
         debug_assert!(node < self.geometry.fleet_capacity);
         // SAFETY: `fleet_capacity` doorbells follow the header; atomics only.
         unsafe {
             &*self
                 .base()
-                .add(self.geometry.doorbells_offset + node * size_of::<Doorbell>())
+                .add(
+                    self.geometry.doorbells_offset
+                        + node * size_of::<Doorbell>(),
+                )
                 .cast::<Doorbell>()
         }
     }
@@ -142,14 +147,21 @@ impl Table {
         &self,
         offset: usize,
         node: usize,
-        word: usize
+        word: usize,
     ) -> &AtomicU64 {
-        debug_assert!(node < self.geometry.fleet_capacity && word < self.geometry.key_words);
+        debug_assert!(
+            node < self.geometry.fleet_capacity
+                && word < self.geometry.key_words
+        );
         // SAFETY: inside the bitmaps by construction of `Geometry`.
         unsafe {
             &*self
                 .base()
-                .add(offset + (node * self.geometry.key_words + word) * size_of::<AtomicU64>())
+                .add(
+                    offset
+                        + (node * self.geometry.key_words + word)
+                            * size_of::<AtomicU64>(),
+                )
                 .cast::<AtomicU64>()
         }
     }
@@ -157,7 +169,7 @@ impl Table {
     fn pending_word(
         &self,
         node: usize,
-        word: usize
+        word: usize,
     ) -> &AtomicU64 {
         self.key_word(self.geometry.pending_offset, node, word)
     }
@@ -165,7 +177,7 @@ impl Table {
     fn interest_word(
         &self,
         node: usize,
-        word: usize
+        word: usize,
     ) -> &AtomicU64 {
         self.key_word(self.geometry.interest_offset, node, word)
     }
@@ -174,10 +186,11 @@ impl Table {
     pub(crate) fn claims(
         &self,
         node: usize,
-        key_index: usize
+        key_index: usize,
     ) -> &AtomicU32 {
         debug_assert!(
-            node < self.geometry.fleet_capacity && key_index < self.geometry.key_capacity
+            node < self.geometry.fleet_capacity
+                && key_index < self.geometry.key_capacity
         );
         // SAFETY: inside the claims area by construction of `Geometry`.
         unsafe {
@@ -185,7 +198,8 @@ impl Table {
                 .base()
                 .add(
                     self.geometry.claims_offset
-                        + (node * self.geometry.key_capacity + key_index) * size_of::<AtomicU32>()
+                        + (node * self.geometry.key_capacity + key_index)
+                            * size_of::<AtomicU32>(),
                 )
                 .cast::<AtomicU32>()
         }
@@ -195,11 +209,12 @@ impl Table {
     pub(crate) fn admissions(
         &self,
         node: usize,
-        key_index: usize
+        key_index: usize,
     ) -> &AtomicU32 {
         debug_assert!(self.geometry.fleet_concurrency);
         debug_assert!(
-            node < self.geometry.fleet_capacity && key_index < self.geometry.key_capacity
+            node < self.geometry.fleet_capacity
+                && key_index < self.geometry.key_capacity
         );
         // SAFETY: inside the optional admissions area by construction of
         // `Geometry`; callers only use it when the feature is enabled.
@@ -208,7 +223,8 @@ impl Table {
                 .base()
                 .add(
                     self.geometry.admissions_offset
-                        + (node * self.geometry.key_capacity + key_index) * size_of::<AtomicU32>()
+                        + (node * self.geometry.key_capacity + key_index)
+                            * size_of::<AtomicU32>(),
                 )
                 .cast::<AtomicU32>()
         }
@@ -216,7 +232,7 @@ impl Table {
 
     pub(crate) fn key(
         &self,
-        index: usize
+        index: usize,
     ) -> &KeySlot {
         debug_assert!(index < self.geometry.key_capacity);
         // SAFETY: key slots are `key_stride` apart from `keys_offset`;
@@ -224,7 +240,10 @@ impl Table {
         unsafe {
             &*self
                 .base()
-                .add(self.geometry.keys_offset + index * self.geometry.key_stride)
+                .add(
+                    self.geometry.keys_offset
+                        + index * self.geometry.key_stride,
+                )
                 .cast::<KeySlot>()
         }
     }
@@ -232,16 +251,19 @@ impl Table {
     /// The resource-slot bitmap that follows key slot `index`.
     pub(crate) fn members(
         &self,
-        index: usize
+        index: usize,
     ) -> &[AtomicU64] {
         // SAFETY: `member_words` words follow each key slot inside its stride.
         unsafe {
             std::slice::from_raw_parts(
                 self.base()
-                    .add(self.geometry.keys_offset + index * self.geometry.key_stride)
+                    .add(
+                        self.geometry.keys_offset
+                            + index * self.geometry.key_stride,
+                    )
                     .add(size_of::<KeySlot>())
                     .cast::<AtomicU64>(),
-                self.geometry.member_words
+                self.geometry.member_words,
             )
         }
     }
@@ -250,8 +272,10 @@ impl Table {
         // SAFETY: `total_resources` slots follow the keys; atomics only.
         unsafe {
             std::slice::from_raw_parts(
-                self.base().add(self.geometry.resources_offset).cast::<ResourceSlot>(),
-                self.geometry.total_resources
+                self.base()
+                    .add(self.geometry.resources_offset)
+                    .cast::<ResourceSlot>(),
+                self.geometry.total_resources,
             )
         }
     }
@@ -261,7 +285,7 @@ impl Table {
     pub(crate) fn key_index(
         &self,
         lo: u64,
-        hi: u64
+        hi: u64,
     ) -> Result<usize> {
         if let Some(index) = self.find_key(lo, hi) {
             return Ok(index);
@@ -270,11 +294,12 @@ impl Table {
         #[cfg(unix)]
         let _shared = match &self.backing {
             Backing::Shm(region) => Some(region.lock_exclusive()?),
-            Backing::Memory(_) => None
+            Backing::Memory(_) => None,
         };
         let hash = mix(lo, hi);
         for offset in 0..self.geometry.key_capacity {
-            let index = (hash as usize).wrapping_add(offset) & (self.geometry.key_capacity - 1);
+            let index = (hash as usize).wrapping_add(offset)
+                & (self.geometry.key_capacity - 1);
             let slot = self.key(index);
             match slot.state.load(Ordering::Acquire) {
                 KEY_LIVE if slot.holds(lo, hi) => return Ok(index),
@@ -301,11 +326,12 @@ impl Table {
     fn find_key(
         &self,
         lo: u64,
-        hi: u64
+        hi: u64,
     ) -> Option<usize> {
         let hash = mix(lo, hi);
         for offset in 0..self.geometry.key_capacity {
-            let index = (hash as usize).wrapping_add(offset) & (self.geometry.key_capacity - 1);
+            let index = (hash as usize).wrapping_add(offset)
+                & (self.geometry.key_capacity - 1);
             let slot = self.key(index);
             match slot.state.load(Ordering::Acquire) {
                 KEY_LIVE if slot.holds(lo, hi) => return Some(index),
@@ -322,21 +348,30 @@ impl Table {
         &self,
         key: (u64, u64),
         key_index: usize,
-        capacity: u32
+        capacity: u32,
     ) -> Result<(usize, u32)> {
         let mut hint = lock_unpoisoned(&self.structural);
         let lane_start = usize::from(self.node) * self.geometry.lane_capacity;
         let slots = self.resources();
         let now = OrbitEpoch::now().as_unix_ms();
         for offset in 0..self.geometry.lane_capacity {
-            let index = lane_start + ((*hint + offset) & (self.geometry.lane_capacity - 1));
+            let index = lane_start
+                + ((*hint + offset) & (self.geometry.lane_capacity - 1));
             let slot = &slots[index];
             let state = slot.state.load(Ordering::Acquire);
-            if (state == RESOURCE_EMPTY || state == crate::layout::RESOURCE_CLOSED)
-                && let Some(generation) =
-                    slot.install(self.node, self.incarnation, key, key_index as u32, capacity, now)
+            if (state == RESOURCE_EMPTY
+                || state == crate::layout::RESOURCE_CLOSED)
+                && let Some(generation) = slot.install(
+                    self.node,
+                    self.incarnation,
+                    key,
+                    key_index as u32,
+                    capacity,
+                    now,
+                )
             {
-                *hint = (index - lane_start + 1) & (self.geometry.lane_capacity - 1);
+                *hint = (index - lane_start + 1)
+                    & (self.geometry.lane_capacity - 1);
                 return Ok((index, generation));
             }
         }
@@ -347,7 +382,7 @@ impl Table {
     /// waiters and ring every node that registered interest.
     pub(crate) fn key_changed(
         &self,
-        key_index: usize
+        key_index: usize,
     ) {
         self.key_changed_with(key_index, false);
     }
@@ -357,7 +392,7 @@ impl Table {
     /// doorbells.
     pub(crate) fn key_changed_one(
         &self,
-        key_index: usize
+        key_index: usize,
     ) {
         self.key_changed_with(key_index, true);
     }
@@ -365,7 +400,7 @@ impl Table {
     fn key_changed_with(
         &self,
         key_index: usize,
-        one: bool
+        one: bool,
     ) {
         let key = self.key(key_index);
         key.changes.fetch_add(1, Ordering::SeqCst);
@@ -384,7 +419,8 @@ impl Table {
             return;
         }
         for node in 0..self.geometry.fleet_capacity {
-            if self.interest_word(node, word).load(Ordering::SeqCst) & bit != 0 {
+            if self.interest_word(node, word).load(Ordering::SeqCst) & bit != 0
+            {
                 self.pending_word(node, word).fetch_or(bit, Ordering::SeqCst);
                 let doorbell = self.doorbell(node);
                 doorbell.generation.fetch_add(1, Ordering::SeqCst);
@@ -397,7 +433,7 @@ impl Table {
 
     pub(crate) fn take_available(
         &self,
-        key_index: usize
+        key_index: usize,
     ) -> bool {
         if !self.geometry.fleet_availability {
             return true;
@@ -413,7 +449,7 @@ impl Table {
     pub(crate) fn add_available(
         &self,
         key_index: usize,
-        units: u32
+        units: u32,
     ) {
         if self.geometry.fleet_availability && units > 0 {
             self.key(key_index).available.fetch_add(units, Ordering::SeqCst);
@@ -423,13 +459,13 @@ impl Table {
     pub(crate) fn remove_available(
         &self,
         key_index: usize,
-        units: u32
+        units: u32,
     ) {
         if self.geometry.fleet_availability && units > 0 {
             let _ = self.key(key_index).available.try_update(
                 Ordering::SeqCst,
                 Ordering::SeqCst,
-                |available| Some(available.saturating_sub(units))
+                |available| Some(available.saturating_sub(units)),
             );
         }
     }
@@ -437,7 +473,7 @@ impl Table {
     pub(crate) fn retain_available_below(
         &self,
         key_index: usize,
-        max: u32
+        max: u32,
     ) -> bool {
         if !self.geometry.fleet_availability {
             return true;
@@ -452,9 +488,10 @@ impl Table {
 
     fn wake(
         &self,
-        key_index: usize
+        key_index: usize,
     ) {
-        let taken = std::mem::take(&mut *lock_unpoisoned(&self.wakers[key_index]));
+        let taken =
+            std::mem::take(&mut *lock_unpoisoned(&self.wakers[key_index]));
         for waker in taken {
             waker.wake();
         }
@@ -483,7 +520,7 @@ impl Table {
     /// driver drains it, so this is re-armed before each wait.
     pub(crate) fn watch(
         self: &Arc<Self>,
-        key_index: usize
+        key_index: usize,
     ) -> Result<()> {
         if !self.is_shared() {
             return Ok(());
@@ -509,7 +546,7 @@ impl Table {
     pub(crate) fn register(
         self: &Arc<Self>,
         key_index: usize,
-        waker: &Waker
+        waker: &Waker,
     ) -> Result<()> {
         {
             let mut wakers = lock_unpoisoned(&self.wakers[key_index]);
@@ -536,18 +573,18 @@ impl Table {
         let thread = std::thread::Builder::new()
             .name(format!("orbit-pool-{}-driver", self.node))
             .spawn(move || {
-            let target = target;
-            // SAFETY: `Table::drop` stops and joins this thread before
-            // the mapping goes away.
-            let table = unsafe { &*target.0 };
-            table.run_driver(&thread_stop);
-        })?;
+                let target = target;
+                // SAFETY: `Table::drop` stops and joins this thread before
+                // the mapping goes away.
+                let table = unsafe { &*target.0 };
+                table.run_driver(&thread_stop);
+            })?;
         Ok(Driver { stop, thread: Some(thread), pid: std::process::id() })
     }
 
     fn run_driver(
         &self,
-        stop: &std::sync::atomic::AtomicBool
+        stop: &std::sync::atomic::AtomicBool,
     ) {
         let node = usize::from(self.node);
         let doorbell = self.doorbell(node);
@@ -557,11 +594,13 @@ impl Table {
         while !stop.load(Ordering::Acquire) {
             let mut drained = false;
             for word in 0..self.geometry.key_words {
-                let mut bits = self.pending_word(node, word).swap(0, Ordering::SeqCst);
+                let mut bits =
+                    self.pending_word(node, word).swap(0, Ordering::SeqCst);
                 if bits != 0 {
                     drained = true;
                     // Interest is re-registered by whoever polls again.
-                    self.interest_word(node, word).fetch_and(!bits, Ordering::SeqCst);
+                    self.interest_word(node, word)
+                        .fetch_and(!bits, Ordering::SeqCst);
                 }
                 while bits != 0 {
                     let bit = bits.trailing_zeros() as usize;
@@ -598,11 +637,12 @@ impl Table {
     pub(crate) fn node_dead(
         &self,
         node: u16,
-        incarnation: u64
+        incarnation: u64,
     ) {
         for (index, slot) in self.resources().iter().enumerate() {
             let state = slot.state.load(Ordering::Acquire);
-            if (state != crate::layout::RESOURCE_LIVE && state != crate::layout::RESOURCE_DRAINING)
+            if (state != crate::layout::RESOURCE_LIVE
+                && state != crate::layout::RESOURCE_DRAINING)
                 || slot.owner_node.load(Ordering::Acquire) != node
                 || slot.owner_incarnation.load(Ordering::Acquire) != incarnation
             {
@@ -611,22 +651,34 @@ impl Table {
             self.close_resource(index, slot);
         }
         for key_index in 0..self.geometry.key_capacity {
-            let held = self.claims(usize::from(node), key_index).swap(0, Ordering::SeqCst);
+            let held = self
+                .claims(usize::from(node), key_index)
+                .swap(0, Ordering::SeqCst);
             if held > 0 {
                 let key = self.key(key_index);
-                let _ = key.counts.try_update(Ordering::SeqCst, Ordering::SeqCst, |counts| {
-                    let (live, creating) = crate::layout::unpack_counts(counts);
-                    Some(crate::layout::pack_counts(live, creating.saturating_sub(held)))
-                });
+                let _ = key.counts.try_update(
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    |counts| {
+                        let (live, creating) =
+                            crate::layout::unpack_counts(counts);
+                        Some(crate::layout::pack_counts(
+                            live,
+                            creating.saturating_sub(held),
+                        ))
+                    },
+                );
                 self.key_changed(key_index);
             }
             if self.geometry.fleet_concurrency {
-                let held = self.admissions(usize::from(node), key_index).swap(0, Ordering::SeqCst);
+                let held = self
+                    .admissions(usize::from(node), key_index)
+                    .swap(0, Ordering::SeqCst);
                 if held > 0 {
                     let _ = self.key(key_index).admitted.try_update(
                         Ordering::SeqCst,
                         Ordering::SeqCst,
-                        |admitted| Some(admitted.saturating_sub(held))
+                        |admitted| Some(admitted.saturating_sub(held)),
                     );
                     self.key_changed(key_index);
                 }
@@ -644,12 +696,13 @@ impl Table {
     pub(crate) fn close_resource(
         &self,
         index: usize,
-        slot: &ResourceSlot
+        slot: &ResourceSlot,
     ) {
         if slot
             .state
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
-                (state == crate::layout::RESOURCE_LIVE || state == crate::layout::RESOURCE_DRAINING)
+                (state == crate::layout::RESOURCE_LIVE
+                    || state == crate::layout::RESOURCE_DRAINING)
                     .then_some(crate::layout::RESOURCE_CLOSED)
             })
             .is_err()
@@ -657,18 +710,29 @@ impl Table {
             return;
         }
         let key_index = slot.key_index.load(Ordering::Acquire) as usize;
-        self.members(key_index)[index / 64].fetch_and(!(1_u64 << (index % 64)), Ordering::SeqCst);
+        self.members(key_index)[index / 64]
+            .fetch_and(!(1_u64 << (index % 64)), Ordering::SeqCst);
         let key = self.key(key_index);
         if self.geometry.fleet_availability {
             let (reserved, active) =
                 crate::layout::unpack_counts(slot.units.load(Ordering::SeqCst));
-            let free = slot.capacity.load(Ordering::Relaxed).saturating_sub(reserved + active);
+            let free = slot
+                .capacity
+                .load(Ordering::Relaxed)
+                .saturating_sub(reserved + active);
             self.remove_available(key_index, free);
         }
-        let _ = key.counts.try_update(Ordering::SeqCst, Ordering::SeqCst, |counts| {
-            let (live, creating) = crate::layout::unpack_counts(counts);
-            Some(crate::layout::pack_counts(live.saturating_sub(1), creating))
-        });
+        let _ = key.counts.try_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |counts| {
+                let (live, creating) = crate::layout::unpack_counts(counts);
+                Some(crate::layout::pack_counts(
+                    live.saturating_sub(1),
+                    creating,
+                ))
+            },
+        );
         self.key_changed(key_index);
     }
 
@@ -697,7 +761,8 @@ impl Table {
             for key_index in 0..self.geometry.key_capacity {
                 self.claims(node, key_index).store(0, Ordering::Relaxed);
                 if self.geometry.fleet_concurrency {
-                    self.admissions(node, key_index).store(0, Ordering::Relaxed);
+                    self.admissions(node, key_index)
+                        .store(0, Ordering::Relaxed);
                 }
             }
         }
@@ -713,7 +778,7 @@ impl Table {
                 self.reset_all();
                 Ok(())
             }
-            Backing::Shm(region) => region.unlink().map_err(Error::Io)
+            Backing::Shm(region) => region.unlink().map_err(Error::Io),
         }
     }
 }
@@ -741,10 +806,10 @@ unsafe impl<T: Sync> Send for SendPtr<T> {}
 
 fn mix(
     lo: u64,
-    hi: u64
+    hi: u64,
 ) -> u64 {
     // The caller brings a digest; one multiply spreads a weak one.
-    (lo ^ hi.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    (lo ^ hi.rotate_left(32)).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 fn next_epoch(previous: u64) -> u64 {
@@ -755,7 +820,7 @@ fn next_epoch(previous: u64) -> u64 {
 enum Key {
     Memory(usize, u8),
     #[cfg(unix)]
-    Shm(String, u16)
+    Shm(String, u16),
 }
 
 static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
@@ -764,12 +829,12 @@ static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
 pub(crate) fn open(
     fleet: &Arc<Fleet>,
     incarnation: Incarnation,
-    spec: PoolSpec
+    spec: PoolSpec,
 ) -> Result<Arc<Table>> {
     if !crate::waits_supported() {
         return Err(Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "orbit-pool needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later"
+            "orbit-pool needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later",
         )));
     }
     // The kind is part of the identity in both backings: two specs are two
@@ -777,7 +842,10 @@ pub(crate) fn open(
     let key = if fleet.is_shm() {
         #[cfg(unix)]
         {
-            Key::Shm(ring_segment_name(fleet.name(), spec.kind), fleet.node_id().get())
+            Key::Shm(
+                ring_segment_name(fleet.name(), spec.kind),
+                fleet.node_id().get(),
+            )
         }
         #[cfg(not(unix))]
         unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -801,7 +869,9 @@ pub(crate) fn open(
         {
             return Err(Error::Malformed(format!(
                 "this process already opened kind {} with key_capacity={} lane_capacity={}",
-                spec.kind, table.geometry.key_capacity, table.geometry.lane_capacity
+                spec.kind,
+                table.geometry.key_capacity,
+                table.geometry.lane_capacity
             )));
         }
         return Ok(table);
@@ -814,13 +884,19 @@ pub(crate) fn open(
             unsafe {
                 std::ptr::write(
                     bytes.ptr.cast::<Header>(),
-                    Header::new(fleet.fleet_capacity(), &geometry, next_epoch(0))
+                    Header::new(
+                        fleet.fleet_capacity(),
+                        &geometry,
+                        next_epoch(0),
+                    ),
                 )
             };
             Backing::Memory(bytes)
         }
         #[cfg(unix)]
-        Key::Shm(name, _) => Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?)
+        Key::Shm(name, _) => {
+            Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?)
+        }
     };
     let table = Arc::new(Table {
         _fleet: Arc::clone(fleet),
@@ -830,9 +906,11 @@ pub(crate) fn open(
         node: fleet.node_id().get(),
         incarnation: incarnation.get(),
         structural: Mutex::new(0),
-        wakers: (0..geometry.key_capacity).map(|_| Mutex::new(Vec::new())).collect(),
+        wakers: (0..geometry.key_capacity)
+            .map(|_| Mutex::new(Vec::new()))
+            .collect(),
         readiness: std::sync::OnceLock::new(),
-        driver: Mutex::new(None)
+        driver: Mutex::new(None),
     });
     tables.insert(key, Arc::downgrade(&table));
     Ok(table)
@@ -842,7 +920,7 @@ pub(crate) fn open(
 fn open_shm(
     name: &str,
     fleet_capacity: u16,
-    geometry: &Geometry
+    geometry: &Geometry,
 ) -> Result<ShmRegion> {
     use std::io;
 
@@ -853,14 +931,14 @@ fn open_shm(
         unsafe {
             std::ptr::write(
                 region.as_ptr().cast::<Header>(),
-                Header::new(fleet_capacity, geometry, next_epoch(0))
+                Header::new(fleet_capacity, geometry, next_epoch(0)),
             );
         }
     } else {
         if region.len() < geometry.segment_size {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("SHM segment {name} is smaller than the pool table")
+                format!("SHM segment {name} is smaller than the pool table"),
             )));
         }
         // SAFETY: the region is at least a header long.
@@ -872,13 +950,15 @@ fn open_shm(
                     "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{:08X})",
                     header.magic,
                     crate::layout::MAGIC
-                )
+                ),
             )));
         }
         if !header.compatible(fleet_capacity, geometry) {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("SHM segment {name} has an incompatible pool-table layout")
+                format!(
+                    "SHM segment {name} has an incompatible pool-table layout"
+                ),
             )));
         }
     }
@@ -893,7 +973,7 @@ pub fn segment_size(fleet_capacity: u16) -> usize {
 /// Bytes `spec`'s segment needs for `fleet_capacity` lanes.
 pub fn segment_size_for(
     fleet_capacity: u16,
-    spec: PoolSpec
+    spec: PoolSpec,
 ) -> usize {
     Geometry::new(fleet_capacity, spec).segment_size
 }

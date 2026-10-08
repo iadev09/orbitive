@@ -12,7 +12,7 @@ pub struct Limits {
     pub max_live: u32,
     /// Reservation attempts before the pool gives the decision back as
     /// [`Plan::Wait`]; a lost race (a candidate turned out busy) costs one.
-    pub attempts: u32
+    pub attempts: u32,
 }
 
 impl Default for Limits {
@@ -31,7 +31,7 @@ pub enum Decision {
     /// Nothing usable now; the caller waits for the key to change.
     Wait,
     /// Nothing usable and waiting is not the answer.
-    Reject(Reason)
+    Reject(Reason),
 }
 
 /// Why a policy would not serve the request, for logs and metrics.
@@ -42,7 +42,7 @@ pub enum Reason {
     /// Every resource is at capacity and the caller asked not to wait.
     Saturated,
     /// The policy's own rule.
-    Policy(&'static str)
+    Policy(&'static str),
 }
 
 pub trait Policy: Send + Sync {
@@ -53,7 +53,7 @@ pub trait Policy: Send + Sync {
         key: Key,
         candidates: &[Candidate],
         budget: (u32, u32),
-        limits: &Limits
+        limits: &Limits,
     ) -> Decision;
 }
 
@@ -71,10 +71,11 @@ impl Policy for LocalFirst {
         _key: Key,
         candidates: &[Candidate],
         budget: (u32, u32),
-        limits: &Limits
+        limits: &Limits,
     ) -> Decision {
-        let usable =
-            |candidate: &&Candidate| candidate.state == State::Live && candidate.free() > 0;
+        let usable = |candidate: &&Candidate| {
+            candidate.state == State::Live && candidate.free() > 0
+        };
         let least_loaded = |a: &&Candidate, b: &&Candidate| {
             (a.reserved + a.active, a.last_reserve_ms)
                 .cmp(&(b.reserved + b.active, b.last_reserve_ms))
@@ -115,12 +116,14 @@ impl Policy for LocalOnly {
         _key: Key,
         candidates: &[Candidate],
         budget: (u32, u32),
-        limits: &Limits
+        limits: &Limits,
     ) -> Decision {
         if let Some(local) = candidates
             .iter()
             .filter(|candidate| {
-                candidate.local && candidate.state == State::Live && candidate.free() > 0
+                candidate.local
+                    && candidate.state == State::Live
+                    && candidate.free() > 0
             })
             .min_by_key(|candidate| candidate.reserved + candidate.active)
         {

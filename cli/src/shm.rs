@@ -8,7 +8,7 @@ use orbit_core::shm::{companion_lock_files, ring_segment_name_for_uid};
 pub struct Segment {
     pub kind: u8,
     pub name: String,
-    pub size: u64
+    pub size: u64,
 }
 
 pub fn effective_uid() -> u32 {
@@ -19,7 +19,7 @@ pub fn effective_uid() -> u32 {
 pub fn discover(
     fleet: &str,
     uid: u32,
-    kind: Option<u8>
+    kind: Option<u8>,
 ) -> io::Result<Vec<Segment>> {
     validate_fleet(fleet)?;
 
@@ -41,7 +41,7 @@ pub fn discover(
 
 pub fn unlink(
     segment: &Segment,
-    uid: u32
+    uid: u32,
 ) -> io::Result<()> {
     let name = c_name(&segment.name)?;
     // SAFETY: `name` is a valid, NUL-terminated POSIX SHM name.
@@ -57,7 +57,9 @@ pub fn unlink(
         match fs::remove_file(&lock_path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(context(&lock_path.display().to_string(), error))
+            Err(error) => {
+                return Err(context(&lock_path.display().to_string(), error));
+            }
         }
     }
     Ok(())
@@ -66,14 +68,15 @@ pub fn unlink(
 fn inspect(
     fleet: &str,
     uid: u32,
-    kind: u8
+    kind: u8,
 ) -> io::Result<Option<Segment>> {
     let name = ring_segment_name_for_uid(fleet, kind, uid);
     let c_name = c_name(&name)?;
 
     let raw_fd = loop {
         // SAFETY: `c_name` is valid and flags are POSIX `shm_open` flags.
-        let raw_fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDONLY, 0) };
+        let raw_fd =
+            unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDONLY, 0) };
         if raw_fd >= 0 {
             break raw_fd;
         }
@@ -102,7 +105,7 @@ fn inspect(
     let size = u64::try_from(size).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("SHM object {name} reported a negative size")
+            format!("SHM object {name} reported a negative size"),
         )
     })?;
 
@@ -111,25 +114,29 @@ fn inspect(
 
 fn validate_fleet(fleet: &str) -> io::Result<()> {
     if fleet.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "fleet name must not be empty"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fleet name must not be empty",
+        ));
     }
     if fleet.contains('/') || fleet.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "fleet name must not contain '/' or a NUL byte"
+            "fleet name must not contain '/' or a NUL byte",
         ));
     }
     Ok(())
 }
 
 fn c_name(name: &str) -> io::Result<CString> {
-    CString::new(name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SHM name has a NUL byte"))
+    CString::new(name).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "SHM name has a NUL byte")
+    })
 }
 
 fn context(
     target: &str,
-    error: io::Error
+    error: io::Error,
 ) -> io::Error {
     io::Error::new(error.kind(), format!("{target}: {error}"))
 }
@@ -147,7 +154,10 @@ mod tests {
 
     #[test]
     fn follows_the_orbit_name_contract() {
-        assert_eq!(ring_segment_name_for_uid("web", 231, 501), "/orbit-web-231-501");
+        assert_eq!(
+            ring_segment_name_for_uid("web", 231, 501),
+            "/orbit-web-231-501"
+        );
     }
 
     #[test]
@@ -160,7 +170,11 @@ mod tests {
 
         // SAFETY: `c_name` and flags form a valid exclusive SHM create call.
         let raw_fd = unsafe {
-            libc::shm_open(c_name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600)
+            libc::shm_open(
+                c_name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )
         };
         assert!(raw_fd >= 0, "failed to create {name}: {}", io_error());
         // SAFETY: `raw_fd` was returned by `shm_open` and is uniquely owned.
@@ -170,7 +184,8 @@ mod tests {
         assert_eq!(rc, 0, "failed to size {name}: {}", io_error());
         drop(fd);
 
-        let found = discover(&fleet, uid, Some(kind)).expect("discovery must succeed");
+        let found =
+            discover(&fleet, uid, Some(kind)).expect("discovery must succeed");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, kind);
         assert_eq!(found[0].name, name);
@@ -178,7 +193,9 @@ mod tests {
 
         unlink(&found[0], uid).expect("unlink must succeed");
         assert!(
-            discover(&fleet, uid, Some(kind)).expect("second discovery must succeed").is_empty()
+            discover(&fleet, uid, Some(kind))
+                .expect("second discovery must succeed")
+                .is_empty()
         );
     }
 
@@ -191,13 +208,18 @@ mod tests {
 
         // SAFETY: `c_name` and flags form a valid exclusive SHM create call.
         let raw_fd = unsafe {
-            libc::shm_open(c_name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600)
+            libc::shm_open(
+                c_name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )
         };
         assert!(raw_fd >= 0, "failed to create {similar_name}: {}", io_error());
         // SAFETY: `raw_fd` was returned by `shm_open` and is uniquely owned.
         drop(unsafe { OwnedFd::from_raw_fd(raw_fd) });
 
-        let found = discover(&fleet, uid, None).expect("discovery must succeed");
+        let found =
+            discover(&fleet, uid, None).expect("discovery must succeed");
         assert!(found.is_empty());
 
         // SAFETY: `c_name` identifies the object created by this test.

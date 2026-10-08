@@ -7,7 +7,9 @@ pub enum OptionsError {
     ZeroMaxLive,
     #[error("client pool max_concurrency must be greater than zero")]
     ZeroMaxConcurrency,
-    #[error("fleet client pool requires an Orbit pool spec with fleet concurrency enabled")]
+    #[error(
+        "fleet client pool requires an Orbit pool spec with fleet concurrency enabled"
+    )]
     FleetConcurrencyDisabled,
     #[error(
         "client pool capacity must satisfy min_idle <= max_idle <= max_live; got {min_idle} <= {max_idle} <= {max_live}"
@@ -16,7 +18,7 @@ pub enum OptionsError {
     #[error("client pool attempts must be greater than zero")]
     ZeroAttempts,
     #[error("client pool {0} must be greater than zero when present")]
-    ZeroDuration(&'static str)
+    ZeroDuration(&'static str),
 }
 
 /// Failure to acquire one client.
@@ -33,5 +35,5 @@ pub enum AcquireError<E> {
     #[error("client acquisition was cancelled")]
     Cancelled,
     #[error("client manager failed: {0}")]
-    Manager(#[source] E)
+    Manager(#[source] E),
 }

@@ -18,13 +18,13 @@ fn validation(c: &mut Criterion) {
 fn mode<P: StateProtection>(
     c: &mut Criterion,
     label: &str,
-    protection: P
+    protection: P,
 ) {
     // Benchmark-only credentials and lifetimes; no live application namespace.
     let authority = Authority::new(
         "bench",
         "issuer",
-        Keyring::new(1, [(1, SecretKey::from_bytes([7; 32]))]).unwrap()
+        Keyring::new(1, [(1, SecretKey::from_bytes([7; 32]))]).unwrap(),
     )
     .unwrap();
     let mut random = [0; 4];
@@ -39,7 +39,7 @@ fn mode<P: StateProtection>(
         &authority,
         SecretKey::from_bytes([9; 32]),
         NonZeroUsize::new(128).unwrap(),
-        protection
+        protection,
     )
     .unwrap();
     let session = auth.create_session("subject", 100, 200).unwrap();
@@ -53,22 +53,28 @@ fn mode<P: StateProtection>(
                 capabilities: BTreeSet::new(),
                 issued_at: 100,
                 not_before: 100,
-                expires_at: 200
+                expires_at: 200,
             },
-            &session
+            &session,
         )
         .unwrap();
     eprintln!("fixture {label}: opaque token {} bytes", token.expose().len());
     let validator = authority.validator(Validation {
         audience,
         purpose: Purpose::Access,
-        required_capabilities: BTreeSet::new()
+        required_capabilities: BTreeSet::new(),
     });
     let ttl = Duration::from_secs(50); // fixed fixture lifetime, not a runtime default
-    let principal = validator.validate_cached(token.expose(), 110, &auth, ttl, &auth).unwrap();
+    let principal = validator
+        .validate_cached(token.expose(), 110, &auth, ttl, &auth)
+        .unwrap();
     c.bench_function(&format!("{label}/token_decrypt_decode"), |b| {
         b.iter(|| {
-            black_box(validator.validate(black_box(token.expose()), 110, &AllowReusable).unwrap())
+            black_box(
+                validator
+                    .validate(black_box(token.expose()), 110, &AllowReusable)
+                    .unwrap(),
+            )
         })
     });
     c.bench_function(&format!("{label}/live_session_check"), |b| {
@@ -81,8 +87,14 @@ fn mode<P: StateProtection>(
         b.iter(|| {
             black_box(
                 validator
-                    .validate_cached(black_box(token.expose()), 110, &auth, ttl, &auth)
-                    .unwrap()
+                    .validate_cached(
+                        black_box(token.expose()),
+                        110,
+                        &auth,
+                        ttl,
+                        &auth,
+                    )
+                    .unwrap(),
             )
         })
     });
@@ -93,14 +105,14 @@ fn mode<P: StateProtection>(
                 auth.check(black_box(&principal), 110).unwrap();
                 black_box(())
             },
-            BatchSize::PerIteration
+            BatchSize::PerIteration,
         )
     });
     drop(auth);
     #[cfg(unix)]
     orbit_core::shm::ShmRegion::open_or_create_locked(
         &orbit_core::shm::ring_segment_name(&name, AUTH_STATE_KIND),
-        64
+        64,
     )
     .unwrap()
     .0

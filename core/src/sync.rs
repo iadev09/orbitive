@@ -41,7 +41,7 @@ pub fn supported() -> bool {
 #[cfg(target_os = "linux")]
 pub fn wait_word(
     word: &AtomicU32,
-    expected: u32
+    expected: u32,
 ) -> io::Result<()> {
     let result = unsafe {
         libc::syscall(
@@ -51,7 +51,7 @@ pub fn wait_word(
             expected,
             std::ptr::null::<libc::timespec>(),
             std::ptr::null::<u32>(),
-            0
+            0,
         )
     };
     if result == 0 {
@@ -63,7 +63,7 @@ pub fn wait_word(
         // The generation changed before the kernel parked us, or the driver
         // was interrupted. The outer loop re-checks both generation and stop.
         Some(libc::EAGAIN) | Some(libc::EINTR) => Ok(()),
-        _ => Err(error)
+        _ => Err(error),
     }
 }
 
@@ -79,12 +79,12 @@ pub fn wait_word(
 pub fn wait_word_timeout(
     word: &AtomicU32,
     expected: u32,
-    timeout: Duration
+    timeout: Duration,
 ) -> io::Result<bool> {
     // FUTEX_WAIT reads this as relative, on CLOCK_MONOTONIC.
     let left = libc::timespec {
         tv_sec: timeout.as_secs().min(i64::MAX as u64) as libc::time_t,
-        tv_nsec: timeout.subsec_nanos() as libc::c_long
+        tv_nsec: timeout.subsec_nanos() as libc::c_long,
     };
     let result = unsafe {
         libc::syscall(
@@ -94,7 +94,7 @@ pub fn wait_word_timeout(
             expected,
             &left as *const libc::timespec,
             std::ptr::null::<u32>(),
-            0
+            0,
         )
     };
     if result == 0 {
@@ -105,7 +105,7 @@ pub fn wait_word_timeout(
     match error.raw_os_error() {
         Some(libc::EAGAIN) | Some(libc::EINTR) => Ok(true),
         Some(libc::ETIMEDOUT) => Ok(false),
-        _ => Err(error)
+        _ => Err(error),
     }
 }
 
@@ -119,7 +119,7 @@ pub fn wake_word_one(word: &AtomicU32) -> io::Result<()> {
             1,
             std::ptr::null::<libc::timespec>(),
             std::ptr::null::<u32>(),
-            0
+            0,
         )
     };
     if result >= 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
@@ -135,7 +135,7 @@ pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
             i32::MAX,
             std::ptr::null::<libc::timespec>(),
             std::ptr::null::<u32>(),
-            0
+            0,
         )
     };
     if result >= 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
@@ -144,7 +144,7 @@ pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
 #[cfg(target_os = "freebsd")]
 pub fn wait_word(
     word: &AtomicU32,
-    expected: u32
+    expected: u32,
 ) -> io::Result<()> {
     let result = unsafe {
         libc::_umtx_op(
@@ -152,7 +152,7 @@ pub fn wait_word(
             libc::UMTX_OP_WAIT_UINT,
             expected as libc::c_ulong,
             std::ptr::null_mut(),
-            std::ptr::null_mut()
+            std::ptr::null_mut(),
         )
     };
     if result == 0 {
@@ -164,7 +164,7 @@ pub fn wait_word(
         // The generation changed before the kernel parked us, or the driver
         // was interrupted. The outer loop re-checks generation and stop.
         Some(libc::EINTR) => Ok(()),
-        _ => Err(error)
+        _ => Err(error),
     }
 }
 
@@ -180,14 +180,14 @@ pub fn wait_word(
 pub fn wait_word_timeout(
     word: &AtomicU32,
     expected: u32,
-    timeout: Duration
+    timeout: Duration,
 ) -> io::Result<bool> {
     // For the UMTX_OP_WAIT family the fourth argument is the size of the
     // timeout structure and the fifth points at it; a bare `timespec` is
     // read as relative.
     let left = libc::timespec {
         tv_sec: timeout.as_secs().min(i64::MAX as u64) as libc::time_t,
-        tv_nsec: timeout.subsec_nanos() as libc::c_long
+        tv_nsec: timeout.subsec_nanos() as libc::c_long,
     };
     let result = unsafe {
         libc::_umtx_op(
@@ -195,7 +195,7 @@ pub fn wait_word_timeout(
             libc::UMTX_OP_WAIT_UINT,
             expected as libc::c_ulong,
             size_of::<libc::timespec>() as *mut libc::c_void,
-            &left as *const libc::timespec as *mut libc::c_void
+            &left as *const libc::timespec as *mut libc::c_void,
         )
     };
     if result == 0 {
@@ -206,7 +206,7 @@ pub fn wait_word_timeout(
     match error.raw_os_error() {
         Some(libc::EINTR) => Ok(true),
         Some(libc::ETIMEDOUT) => Ok(false),
-        _ => Err(error)
+        _ => Err(error),
     }
 }
 
@@ -218,7 +218,7 @@ pub fn wake_word_one(word: &AtomicU32) -> io::Result<()> {
             libc::UMTX_OP_WAKE,
             1,
             std::ptr::null_mut(),
-            std::ptr::null_mut()
+            std::ptr::null_mut(),
         )
     };
     if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
@@ -232,7 +232,7 @@ pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
             libc::UMTX_OP_WAKE,
             i32::MAX as libc::c_ulong,
             std::ptr::null_mut(),
-            std::ptr::null_mut()
+            std::ptr::null_mut(),
         )
     };
     if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
@@ -241,10 +241,13 @@ pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 pub fn wait_word(
     word: &AtomicU32,
-    expected: u32
+    expected: u32,
 ) -> io::Result<()> {
     let api = macos::api().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Unsupported, "macOS shared address waits unavailable")
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "macOS shared address waits unavailable",
+        )
     })?;
     debug_assert_eq!(
         (word.as_ptr() as usize) % size_of::<u32>(),
@@ -254,7 +257,12 @@ pub fn wait_word(
     // The SHM word is AtomicU32, not u64. Wait and wake must agree on size
     // and shared mode. Apple returns a nonnegative waiter count on success.
     let result = unsafe {
-        (api.wait)(word.as_ptr().cast(), u64::from(expected), size_of::<u32>(), macos::SHARED)
+        (api.wait)(
+            word.as_ptr().cast(),
+            u64::from(expected),
+            size_of::<u32>(),
+            macos::SHARED,
+        )
     };
     if result >= 0 {
         return Ok(());
@@ -262,7 +270,7 @@ pub fn wait_word(
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::EINTR) => Ok(()),
-        _ => Err(error)
+        _ => Err(error),
     }
 }
 
@@ -278,10 +286,13 @@ pub fn wait_word(
 pub fn wait_word_timeout(
     word: &AtomicU32,
     expected: u32,
-    timeout: Duration
+    timeout: Duration,
 ) -> io::Result<bool> {
     let api = macos::api().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Unsupported, "macOS shared address waits unavailable")
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "macOS shared address waits unavailable",
+        )
     })?;
     let nanos = timeout.as_nanos().min(u128::from(u64::MAX)) as u64;
     // SAFETY: the same word, size and shared flag as the untimed wait.
@@ -292,7 +303,7 @@ pub fn wait_word_timeout(
             size_of::<u32>(),
             macos::SHARED,
             macos::MACH_ABSOLUTE_TIME,
-            nanos
+            nanos,
         )
     };
     if result >= 0 {
@@ -302,7 +313,7 @@ pub fn wait_word_timeout(
     match error.raw_os_error() {
         Some(libc::EINTR) => Ok(true),
         Some(libc::ETIMEDOUT) => Ok(false),
-        _ => Err(error)
+        _ => Err(error),
     }
 }
 
@@ -319,7 +330,7 @@ pub fn wake_word(word: &AtomicU32) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 fn wake_macos(
     word: &AtomicU32,
-    all: bool
+    all: bool,
 ) -> io::Result<()> {
     debug_assert_eq!(
         (word.as_ptr() as usize) % size_of::<u32>(),
@@ -333,7 +344,9 @@ fn wake_macos(
     };
     loop {
         let wake = if all { api.wake_all } else { api.wake_one };
-        let result = unsafe { wake(word.as_ptr().cast(), size_of::<u32>(), macos::SHARED) };
+        let result = unsafe {
+            wake(word.as_ptr().cast(), size_of::<u32>(), macos::SHARED)
+        };
         if result >= 0 {
             return Ok(());
         }
@@ -343,7 +356,7 @@ fn wake_macos(
             // race the driver's compare-and-wait. The generation persists.
             Some(libc::ENOENT) => return Ok(()),
             Some(libc::EINTR) => continue,
-            _ => return Err(error)
+            _ => return Err(error),
         }
     }
 }
@@ -360,17 +373,25 @@ pub(crate) mod macos {
     /// takes, and the one a relative timeout is measured on.
     pub(super) const MACH_ABSOLUTE_TIME: u32 = 32;
 
-    type Wait = unsafe extern "C" fn(*mut libc::c_void, u64, usize, u32) -> libc::c_int;
-    type WaitTimeout =
-        unsafe extern "C" fn(*mut libc::c_void, u64, usize, u32, u32, u64) -> libc::c_int;
-    type Wake = unsafe extern "C" fn(*mut libc::c_void, usize, u32) -> libc::c_int;
+    type Wait =
+        unsafe extern "C" fn(*mut libc::c_void, u64, usize, u32) -> libc::c_int;
+    type WaitTimeout = unsafe extern "C" fn(
+        *mut libc::c_void,
+        u64,
+        usize,
+        u32,
+        u32,
+        u64,
+    ) -> libc::c_int;
+    type Wake =
+        unsafe extern "C" fn(*mut libc::c_void, usize, u32) -> libc::c_int;
 
     #[derive(Clone, Copy)]
     pub(crate) struct Api {
         pub(super) wait: Wait,
         pub(super) wait_timeout: WaitTimeout,
         pub(super) wake_one: Wake,
-        pub(super) wake_all: Wake
+        pub(super) wake_all: Wake,
     }
 
     const UNRESOLVED: u8 = 0;
@@ -402,34 +423,57 @@ pub(crate) mod macos {
         match STATE.load(Ordering::Acquire) {
             READY => Some(load()),
             UNAVAILABLE => None,
-            _ => resolve()
+            _ => resolve(),
         }
     }
 
     fn load() -> Api {
         unsafe {
             Api {
-                wait: std::mem::transmute::<usize, Wait>(WAIT.load(Ordering::Acquire)),
-                wait_timeout: std::mem::transmute::<usize, WaitTimeout>(
-                    WAIT_TIMEOUT.load(Ordering::Acquire)
+                wait: std::mem::transmute::<usize, Wait>(
+                    WAIT.load(Ordering::Acquire),
                 ),
-                wake_one: std::mem::transmute::<usize, Wake>(WAKE_ONE.load(Ordering::Acquire)),
-                wake_all: std::mem::transmute::<usize, Wake>(WAKE_ALL.load(Ordering::Acquire))
+                wait_timeout: std::mem::transmute::<usize, WaitTimeout>(
+                    WAIT_TIMEOUT.load(Ordering::Acquire),
+                ),
+                wake_one: std::mem::transmute::<usize, Wake>(
+                    WAKE_ONE.load(Ordering::Acquire),
+                ),
+                wake_all: std::mem::transmute::<usize, Wake>(
+                    WAKE_ALL.load(Ordering::Acquire),
+                ),
             }
         }
     }
 
     fn resolve() -> Option<Api> {
-        let wait = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"os_sync_wait_on_address".as_ptr()) };
+        let wait = unsafe {
+            libc::dlsym(libc::RTLD_DEFAULT, c"os_sync_wait_on_address".as_ptr())
+        };
         // Shipped in the same release as the other two; all or nothing.
         let wait_timeout = unsafe {
-            libc::dlsym(libc::RTLD_DEFAULT, c"os_sync_wait_on_address_with_timeout".as_ptr())
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"os_sync_wait_on_address_with_timeout".as_ptr(),
+            )
         };
-        let wake_one =
-            unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"os_sync_wake_by_address_any".as_ptr()) };
-        let wake_all =
-            unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"os_sync_wake_by_address_all".as_ptr()) };
-        if wait.is_null() || wait_timeout.is_null() || wake_one.is_null() || wake_all.is_null() {
+        let wake_one = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"os_sync_wake_by_address_any".as_ptr(),
+            )
+        };
+        let wake_all = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"os_sync_wake_by_address_all".as_ptr(),
+            )
+        };
+        if wait.is_null()
+            || wait_timeout.is_null()
+            || wake_one.is_null()
+            || wake_all.is_null()
+        {
             STATE.store(UNAVAILABLE, Ordering::Release);
             return None;
         }
@@ -461,9 +505,15 @@ mod timeout_tests {
         }
         let word = AtomicU32::new(7);
         let started = Instant::now();
-        assert!(!wait_word_timeout(&word, 7, Duration::from_millis(200)).expect("wait"));
+        assert!(
+            !wait_word_timeout(&word, 7, Duration::from_millis(200))
+                .expect("wait")
+        );
         let waited = started.elapsed();
-        assert!(waited >= Duration::from_millis(150), "returned after {waited:?}");
+        assert!(
+            waited >= Duration::from_millis(150),
+            "returned after {waited:?}"
+        );
         assert!(waited < Duration::from_secs(2), "returned after {waited:?}");
     }
 
@@ -480,7 +530,9 @@ mod timeout_tests {
             let _ = wake_word(&waker);
         });
         let started = Instant::now();
-        assert!(wait_word_timeout(&word, 0, Duration::from_secs(10)).expect("wait"));
+        assert!(
+            wait_word_timeout(&word, 0, Duration::from_secs(10)).expect("wait")
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -497,7 +549,8 @@ mod timeout_tests {
                 let sent = sent.clone();
                 std::thread::spawn(move || {
                     let outcome =
-                        wait_word_timeout(&word, 0, Duration::from_millis(500)).expect("wait");
+                        wait_word_timeout(&word, 0, Duration::from_millis(500))
+                            .expect("wait");
                     sent.send(outcome).unwrap();
                 })
             })
@@ -522,7 +575,9 @@ mod timeout_tests {
         }
         let word = AtomicU32::new(3);
         let started = Instant::now();
-        assert!(wait_word_timeout(&word, 9, Duration::from_secs(30)).expect("wait"));
+        assert!(
+            wait_word_timeout(&word, 9, Duration::from_secs(30)).expect("wait")
+        );
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

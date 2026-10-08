@@ -41,7 +41,7 @@ use super::{Error, Result};
 
 /// Marks a mapped region as this layout, so a segment left by a different
 /// shape is recognised rather than read as garbage.
-pub(crate) const INBOX_MAGIC: u32 = 0x4F54_5849; // "OTXI"
+pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 
 /// The layout's own version, separate from the geometry. Geometry changes are
 /// caught by Orbit, which refuses a segment sized differently from the code's;
@@ -61,7 +61,7 @@ pub struct Reclaimed {
     pub lane: usize,
     /// The incarnation its body streams are stamped with.
     pub incarnation: u64,
-    pub pid: u32
+    pub pid: u32,
 }
 
 /// Longest service name a lane can advertise. Long enough for the names
@@ -146,7 +146,7 @@ pub(crate) struct LaneHeader {
     /// layout version stays where it is.
     pub(crate) role: [u8; LANE_ROLE_MAX],
     pub(crate) role_len: AtomicU8,
-    _identity_padding: [u8; 3]
+    _identity_padding: [u8; 3],
 }
 
 // Two cache lines exactly: the identity grew into padding, not past it.
@@ -158,7 +158,7 @@ const _: () = assert!(size_of::<LaneHeader>() == 128);
 pub(crate) struct SlotHeader {
     pub(crate) seq: AtomicU64,
     pub(crate) len: AtomicU32,
-    _padding: [u8; 52]
+    _padding: [u8; 52],
 }
 
 /// What a writer must know to refuse correctly.
@@ -169,7 +169,7 @@ pub enum Admission {
     /// The lane holds `capacity` frames the owner has not taken yet.
     Full,
     /// No live consumer. Writing would leave a request nobody answers.
-    NoConsumer
+    NoConsumer,
 }
 
 /// A lane's geometry, shared by both ends because Orbit refuses to open a
@@ -177,13 +177,13 @@ pub enum Admission {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InboxGeometry {
     pub capacity: usize,
-    pub payload_capacity: usize
+    pub payload_capacity: usize,
 }
 
 impl InboxGeometry {
     pub const fn new(
         capacity: usize,
-        payload_capacity: usize
+        payload_capacity: usize,
     ) -> Self {
         Self { capacity, payload_capacity }
     }
@@ -191,23 +191,28 @@ impl InboxGeometry {
     /// Bytes one lane occupies: its header, then a slot header and payload for
     /// every position.
     pub const fn lane_bytes(&self) -> usize {
-        size_of::<LaneHeader>() + self.capacity * (size_of::<SlotHeader>() + self.payload_capacity)
+        size_of::<LaneHeader>()
+            + self.capacity * (size_of::<SlotHeader>() + self.payload_capacity)
     }
 
     /// What a fleet's whole table occupies.
     pub const fn segment_bytes(
         &self,
-        fleet_capacity: usize
+        fleet_capacity: usize,
     ) -> usize {
         size_of::<TableHeader>() + fleet_capacity * self.lane_bytes()
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
         if self.capacity == 0 || !self.capacity.is_power_of_two() {
-            return Err(Error::Malformed("inbox capacity must be a power of two"));
+            return Err(Error::Malformed(
+                "inbox capacity must be a power of two",
+            ));
         }
         if self.payload_capacity == 0 {
-            return Err(Error::Malformed("inbox payload capacity must not be zero"));
+            return Err(Error::Malformed(
+                "inbox payload capacity must not be zero",
+            ));
         }
         Ok(())
     }
@@ -230,7 +235,7 @@ pub(crate) struct TableHeader {
     /// is read per request, because it is the load signal rather than the
     /// address.
     pub(crate) directory: AtomicU64,
-    _padding: [u8; 36]
+    _padding: [u8; 36],
 }
 
 /// A mapped inbox table.
@@ -253,7 +258,7 @@ pub struct Inbox {
     /// Named descriptor wake used by a Tokio receiver. Memory-backed tables
     /// keep using their process-local path.
     #[cfg(unix)]
-    bell: Option<crate::bell::Bell>
+    bell: Option<crate::bell::Bell>,
 }
 
 // The pointer addresses shared memory whose only mutable state is atomics.
@@ -279,7 +284,7 @@ impl Inbox {
     pub unsafe fn initialize(
         base: *mut u8,
         fleet_capacity: usize,
-        geometry: InboxGeometry
+        geometry: InboxGeometry,
     ) -> Result<Self> {
         geometry.validate()?;
         let inbox = Self {
@@ -287,13 +292,15 @@ impl Inbox {
             lanes: fleet_capacity,
             geometry,
             #[cfg(unix)]
-            bell: None
+            bell: None,
         };
 
         let header = inbox.table_header();
         header.fleet_capacity.store(fleet_capacity as u32, Ordering::Relaxed);
         header.capacity.store(geometry.capacity as u32, Ordering::Relaxed);
-        header.payload_capacity.store(geometry.payload_capacity as u32, Ordering::Relaxed);
+        header
+            .payload_capacity
+            .store(geometry.payload_capacity as u32, Ordering::Relaxed);
         header.version.store(INBOX_VERSION, Ordering::Relaxed);
         // Magic last: a reader that sees it sees a finished header.
         header.magic.store(INBOX_MAGIC, Ordering::Release);
@@ -309,7 +316,7 @@ impl Inbox {
     pub unsafe fn attach(
         base: *mut u8,
         fleet_capacity: usize,
-        geometry: InboxGeometry
+        geometry: InboxGeometry,
     ) -> Result<Self> {
         geometry.validate()?;
         let inbox = Self {
@@ -317,20 +324,29 @@ impl Inbox {
             lanes: fleet_capacity,
             geometry,
             #[cfg(unix)]
-            bell: None
+            bell: None,
         };
         let header = inbox.table_header();
         if header.magic.load(Ordering::Acquire) != INBOX_MAGIC {
-            return Err(Error::Malformed("inbox segment is not an inbox table"));
+            return Err(Error::Malformed(
+                "inbox segment is not an inbox table",
+            ));
         }
         if header.version.load(Ordering::Relaxed) != INBOX_VERSION {
-            return Err(Error::Malformed("inbox segment was written by another layout version"));
+            return Err(Error::Malformed(
+                "inbox segment was written by another layout version",
+            ));
         }
-        if header.fleet_capacity.load(Ordering::Relaxed) as usize != fleet_capacity
-            || header.capacity.load(Ordering::Relaxed) as usize != geometry.capacity
-            || header.payload_capacity.load(Ordering::Relaxed) as usize != geometry.payload_capacity
+        if header.fleet_capacity.load(Ordering::Relaxed) as usize
+            != fleet_capacity
+            || header.capacity.load(Ordering::Relaxed) as usize
+                != geometry.capacity
+            || header.payload_capacity.load(Ordering::Relaxed) as usize
+                != geometry.payload_capacity
         {
-            return Err(Error::Malformed("inbox segment geometry differs from this build"));
+            return Err(Error::Malformed(
+                "inbox segment geometry differs from this build",
+            ));
         }
         Ok(inbox)
     }
@@ -358,7 +374,7 @@ impl Inbox {
         lane_index: usize,
         service: &str,
         role: &str,
-        incarnation: u64
+        incarnation: u64,
     ) -> Result<()> {
         self.check_lane(lane_index)?;
         check_identity(service, role)?;
@@ -406,7 +422,7 @@ impl Inbox {
         service: &str,
         role: &str,
         incarnation: u64,
-        mut hold: impl FnMut(usize) -> Result<Option<H>>
+        mut hold: impl FnMut(usize) -> Result<Option<H>>,
     ) -> Result<(usize, H)> {
         check_identity(service, role)?;
         self.refuse_other_role(service, role, None)?;
@@ -418,12 +434,18 @@ impl Inbox {
             let Some(held) = hold(lane_index)? else {
                 continue;
             };
-            if lane.consumers.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            if lane
+                .consumers
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
                 continue;
             }
             self.reset_lane(lane_index);
             self.publish_identity(lane, service, role, incarnation);
-            if let Err(conflict) = self.refuse_other_role(service, role, Some(lane_index)) {
+            if let Err(conflict) =
+                self.refuse_other_role(service, role, Some(lane_index))
+            {
                 let _ = self.release_lane(lane_index);
                 return Err(conflict);
             }
@@ -440,7 +462,7 @@ impl Inbox {
     /// lane's lock. `None` when the lane was not claimed.
     pub fn reclaim(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<Option<Reclaimed>> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -450,7 +472,7 @@ impl Inbox {
         let reclaimed = Reclaimed {
             lane: lane_index,
             incarnation: lane.incarnation.load(Ordering::Acquire),
-            pid: lane.pid.load(Ordering::Acquire)
+            pid: lane.pid.load(Ordering::Acquire),
         };
         self.release_lane(lane_index)?;
         Ok(Some(reclaimed))
@@ -464,7 +486,7 @@ impl Inbox {
         &self,
         service: &str,
         role: &str,
-        own: Option<usize>
+        own: Option<usize>,
     ) -> Result<()> {
         for lane_index in self.serving(service) {
             if Some(lane_index) == own {
@@ -479,9 +501,13 @@ impl Inbox {
                 return Err(Error::RoleConflict {
                     name: service.to_owned(),
                     role: role.to_owned(),
-                    held_by: if held_by.is_empty() { "an unnamed role".into() } else { held_by },
+                    held_by: if held_by.is_empty() {
+                        "an unnamed role".into()
+                    } else {
+                        held_by
+                    },
                     lane: lane_index,
-                    pid: lane.pid.load(Ordering::Acquire)
+                    pid: lane.pid.load(Ordering::Acquire),
                 });
             }
         }
@@ -498,7 +524,7 @@ impl Inbox {
     pub fn park(
         &self,
         lane_index: usize,
-        expected: u32
+        expected: u32,
     ) -> Result<()> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -518,7 +544,7 @@ impl Inbox {
     /// plus this, rather than a timeout it would otherwise have to wait out.
     pub fn nudge(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<()> {
         self.check_lane(lane_index)?;
         self.wake(lane_index, self.lane_header(lane_index));
@@ -528,7 +554,7 @@ impl Inbox {
     /// The service this lane serves, if it is claimed.
     pub fn service(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<Option<String>> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -536,26 +562,27 @@ impl Inbox {
         if len == 0 || len > LANE_NAME_MAX {
             return Ok(None);
         }
-        let bytes = unsafe { std::slice::from_raw_parts(lane.service.as_ptr(), len) };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(lane.service.as_ptr(), len) };
         Ok(String::from_utf8(bytes.to_vec()).ok())
     }
 
     /// The process that claimed this lane, if it said.
     pub fn owner(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<Option<u32>> {
         self.check_lane(lane_index)?;
         Ok(match self.lane_header(lane_index).pid.load(Ordering::Acquire) {
             0 => None,
-            pid => Some(pid)
+            pid => Some(pid),
         })
     }
 
     /// What serves this lane's name, if its owner said.
     pub fn role(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<Option<String>> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -563,7 +590,8 @@ impl Inbox {
         if len == 0 || len > LANE_ROLE_MAX {
             return Ok(None);
         }
-        let bytes = unsafe { std::slice::from_raw_parts(lane.role.as_ptr(), len) };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(lane.role.as_ptr(), len) };
         Ok(String::from_utf8(bytes.to_vec()).ok())
     }
 
@@ -576,14 +604,15 @@ impl Inbox {
     fn serves(
         &self,
         lane_index: usize,
-        service: &[u8]
+        service: &[u8],
     ) -> bool {
         let lane = self.lane_header(lane_index);
         let len = lane.service_len.load(Ordering::Acquire) as usize;
         if len != service.len() || len > LANE_NAME_MAX {
             return false;
         }
-        let name = unsafe { std::slice::from_raw_parts(lane.service.as_ptr(), len) };
+        let name =
+            unsafe { std::slice::from_raw_parts(lane.service.as_ptr(), len) };
         name == service
     }
 
@@ -596,7 +625,7 @@ impl Inbox {
     /// already here; one that left is already gone.
     pub fn targets(
         &self,
-        service: &str
+        service: &str,
     ) -> Vec<(usize, u64)> {
         self.ready(&self.serving(service))
     }
@@ -619,7 +648,7 @@ impl Inbox {
     /// traffic, and a list that changed with traffic could not be kept.
     pub fn serving(
         &self,
-        service: &str
+        service: &str,
     ) -> Vec<usize> {
         let wanted = service.as_bytes();
         (0..self.lanes).filter(|lane| self.serves(*lane, wanted)).collect()
@@ -631,12 +660,14 @@ impl Inbox {
     /// because both answer "now", and depth is what the choice is made on.
     pub fn ready(
         &self,
-        lanes: &[usize]
+        lanes: &[usize],
     ) -> Vec<(usize, u64)> {
         let mut found: Vec<(usize, u64)> = lanes
             .iter()
             .copied()
-            .filter(|lane| matches!(self.admits(*lane), Ok(Admission::Accepted)))
+            .filter(|lane| {
+                matches!(self.admits(*lane), Ok(Admission::Accepted))
+            })
             .filter_map(|lane| self.depth(lane).ok().map(|depth| (lane, depth)))
             .collect();
         found.sort_by_key(|(_, depth)| *depth);
@@ -648,7 +679,7 @@ impl Inbox {
     /// clears them.
     pub fn release_lane(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<()> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -667,7 +698,7 @@ impl Inbox {
     /// refused now, not after waiting.
     pub fn admits(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<Admission> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -694,7 +725,7 @@ impl Inbox {
     /// load; here the queue is the shared memory you are about to write into.
     pub fn depth(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<u64> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -705,7 +736,7 @@ impl Inbox {
 
     pub fn consumers(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<u32> {
         self.check_lane(lane_index)?;
         Ok(self.lane_header(lane_index).consumers.load(Ordering::Acquire))
@@ -713,7 +744,7 @@ impl Inbox {
 
     pub fn incarnation(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<u64> {
         self.check_lane(lane_index)?;
         Ok(self.lane_header(lane_index).incarnation.load(Ordering::Acquire))
@@ -728,7 +759,7 @@ impl Inbox {
     pub fn write(
         &self,
         lane_index: usize,
-        payload: &[u8]
+        payload: &[u8],
     ) -> Result<u64> {
         self.check_lane(lane_index)?;
         if payload.len() > self.geometry.payload_capacity {
@@ -757,7 +788,12 @@ impl Inbox {
             }
             if lane
                 .reserve
-                .compare_exchange_weak(reserve, reserve + 1, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(
+                    reserve,
+                    reserve + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_ok()
             {
                 break reserve;
@@ -770,7 +806,7 @@ impl Inbox {
             std::ptr::copy_nonoverlapping(
                 payload.as_ptr(),
                 self.payload_ptr(lane_index, position),
-                payload.len()
+                payload.len(),
             );
         }
         slot.len.store(payload.len() as u32, Ordering::Relaxed);
@@ -789,7 +825,7 @@ impl Inbox {
     pub fn read(
         &self,
         lane_index: usize,
-        out: &mut Vec<u8>
+        out: &mut Vec<u8>,
     ) -> Result<bool> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -806,14 +842,15 @@ impl Inbox {
             std::ptr::copy_nonoverlapping(
                 self.payload_ptr(lane_index, position),
                 out.spare_capacity_mut().as_mut_ptr().cast::<u8>(),
-                len
+                len,
             );
             out.set_len(len);
         }
 
         lane.read.store(position + 1, Ordering::Release);
         // Free for the round `capacity` positions from now.
-        slot.seq.store(position + self.geometry.capacity as u64, Ordering::Release);
+        slot.seq
+            .store(position + self.geometry.capacity as u64, Ordering::Release);
         // No wake. Nobody waits on a consume — a writer that finds the lane
         // full is refused, never parked — and the only waiter there is, the
         // owner, is the one reading. Bumping the word here spoiled its own
@@ -826,7 +863,7 @@ impl Inbox {
     /// The word a parked reader waits on, and its current value.
     pub fn wait_word(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<(&AtomicU32, u32)> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
@@ -835,7 +872,7 @@ impl Inbox {
 
     fn reset_lane(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) {
         let lane = self.lane_header(lane_index);
         lane.reserve.store(0, Ordering::Relaxed);
@@ -861,15 +898,19 @@ impl Inbox {
         lane: &LaneHeader,
         service: &str,
         role: &str,
-        incarnation: u64
+        incarnation: u64,
     ) {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 service.as_ptr(),
                 lane.service.as_ptr().cast_mut(),
-                service.len()
+                service.len(),
             );
-            std::ptr::copy_nonoverlapping(role.as_ptr(), lane.role.as_ptr().cast_mut(), role.len());
+            std::ptr::copy_nonoverlapping(
+                role.as_ptr(),
+                lane.role.as_ptr().cast_mut(),
+                role.len(),
+            );
         }
         // The role before the name: a reader that sees the name sees who
         // serves it.
@@ -890,7 +931,7 @@ impl Inbox {
     fn wake(
         &self,
         lane_index: usize,
-        lane: &LaneHeader
+        lane: &LaneHeader,
     ) {
         lane.changes.fetch_add(1, Ordering::SeqCst);
         if lane.waiters.load(Ordering::SeqCst) > 0 {
@@ -907,7 +948,7 @@ impl Inbox {
     #[cfg(unix)]
     pub(crate) fn install_bell(
         &mut self,
-        segment: &str
+        segment: &str,
     ) -> Result<()> {
         self.bell = Some(crate::bell::Bell::new(segment).map_err(Error::Io)?);
         Ok(())
@@ -916,10 +957,13 @@ impl Inbox {
     #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn bind_receiver(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<tokio::net::UnixDatagram> {
         self.check_lane(lane_index)?;
-        let bell = self.bell.as_ref().ok_or(Error::Malformed("the inbox has no reactor bell"))?;
+        let bell = self
+            .bell
+            .as_ref()
+            .ok_or(Error::Malformed("the inbox has no reactor bell"))?;
         let socket = bell.bind(lane_index).map_err(Error::Io)?;
         tokio::net::UnixDatagram::from_std(socket).map_err(Error::Io)
     }
@@ -927,7 +971,7 @@ impl Inbox {
     #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn unbind_receiver(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) {
         self.disarm_receiver(lane_index);
         if let Some(bell) = &self.bell {
@@ -938,7 +982,7 @@ impl Inbox {
     #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn receiver_generation(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<u32> {
         self.check_lane(lane_index)?;
         Ok(self.lane_header(lane_index).changes.load(Ordering::SeqCst))
@@ -947,7 +991,7 @@ impl Inbox {
     #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn arm_receiver(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<()> {
         self.check_lane(lane_index)?;
         self.lane_header(lane_index).reactor.store(1, Ordering::SeqCst);
@@ -957,7 +1001,7 @@ impl Inbox {
     #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn disarm_receiver(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) {
         if lane_index < self.lanes {
             self.lane_header(lane_index).reactor.store(0, Ordering::SeqCst);
@@ -966,7 +1010,7 @@ impl Inbox {
 
     fn check_lane(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> Result<()> {
         if lane_index >= self.lanes {
             return Err(Error::Malformed("lane is outside the table"));
@@ -980,14 +1024,19 @@ impl Inbox {
 
     fn lane_base(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> *mut u8 {
-        unsafe { self.base.add(size_of::<TableHeader>() + lane_index * self.geometry.lane_bytes()) }
+        unsafe {
+            self.base.add(
+                size_of::<TableHeader>()
+                    + lane_index * self.geometry.lane_bytes(),
+            )
+        }
     }
 
     fn lane_header(
         &self,
-        lane_index: usize
+        lane_index: usize,
     ) -> &LaneHeader {
         unsafe { &*self.lane_base(lane_index).cast::<LaneHeader>() }
     }
@@ -995,17 +1044,20 @@ impl Inbox {
     fn slot_base(
         &self,
         lane_index: usize,
-        position: u64
+        position: u64,
     ) -> *mut u8 {
         let index = (position as usize) & (self.geometry.capacity - 1);
         let stride = size_of::<SlotHeader>() + self.geometry.payload_capacity;
-        unsafe { self.lane_base(lane_index).add(size_of::<LaneHeader>() + index * stride) }
+        unsafe {
+            self.lane_base(lane_index)
+                .add(size_of::<LaneHeader>() + index * stride)
+        }
     }
 
     fn slot_header(
         &self,
         lane_index: usize,
-        position: u64
+        position: u64,
     ) -> &SlotHeader {
         unsafe { &*self.slot_base(lane_index, position).cast::<SlotHeader>() }
     }
@@ -1013,9 +1065,11 @@ impl Inbox {
     fn payload_ptr(
         &self,
         lane_index: usize,
-        position: u64
+        position: u64,
     ) -> *mut u8 {
-        unsafe { self.slot_base(lane_index, position).add(size_of::<SlotHeader>()) }
+        unsafe {
+            self.slot_base(lane_index, position).add(size_of::<SlotHeader>())
+        }
     }
 }
 
@@ -1023,7 +1077,7 @@ impl Inbox {
 /// neither truncated.
 fn check_identity(
     service: &str,
-    role: &str
+    role: &str,
 ) -> Result<()> {
     if service.is_empty() || service.len() > LANE_NAME_MAX {
         return Err(Error::Malformed("service name does not fit a lane"));

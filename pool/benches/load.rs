@@ -26,24 +26,25 @@ use orbit_pool::{Error, Incarnation, Key, Lease, Pool, ResourceId};
 use orbit_stream::Streams;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const KEY: Key = Key::new(0x10AD);
+const KEY: Key = Key::new(0x10ad);
 
 struct Usage {
     cpu: Duration,
     voluntary: i64,
-    involuntary: i64
+    involuntary: i64,
 }
 
 fn usage() -> Usage {
     let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut rusage) };
     let seconds = |time: libc::timeval| {
-        Duration::from_secs(time.tv_sec as u64) + Duration::from_micros(time.tv_usec as u64)
+        Duration::from_secs(time.tv_sec as u64)
+            + Duration::from_micros(time.tv_usec as u64)
     };
     Usage {
         cpu: seconds(rusage.ru_utime) + seconds(rusage.ru_stime),
         voluntary: rusage.ru_nvcsw as i64,
-        involuntary: rusage.ru_nivcsw as i64
+        involuntary: rusage.ru_nivcsw as i64,
     }
 }
 
@@ -57,7 +58,7 @@ struct Report {
     p50: Duration,
     p99: Duration,
     max: Duration,
-    shares: Vec<usize>
+    shares: Vec<usize>,
 }
 
 impl Report {
@@ -95,11 +96,11 @@ async fn run<F, Fut>(
     name: &'static str,
     ops: usize,
     tasks: usize,
-    op: F
+    op: F,
 ) -> Report
 where
     F: Fn(usize) -> Fut + Clone + Send + 'static,
-    Fut: std::future::Future<Output = Duration> + Send
+    Fut: std::future::Future<Output = Duration> + Send,
 {
     let before = usage();
     let start = Instant::now();
@@ -136,7 +137,7 @@ where
         p50,
         p99,
         max,
-        shares
+        shares,
     }
 }
 
@@ -144,7 +145,7 @@ where
 /// does when the resource is busy.
 async fn reserve_waiting(
     pool: &Pool,
-    id: ResourceId
+    id: ResourceId,
 ) -> Lease {
     loop {
         // The version comes before the attempt, so a completion between
@@ -155,34 +156,46 @@ async fn reserve_waiting(
             Err(Error::Busy(_)) => {
                 let _ = poll_fn(|cx| pool.poll_capacity(KEY, since, cx)).await;
             }
-            Err(error) => panic!("{error}")
+            Err(error) => panic!("{error}"),
         }
     }
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1).filter(|arg| !arg.starts_with("--"));
+    let mut args =
+        std::env::args().skip(1).filter(|arg| !arg.starts_with("--"));
     let ops: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
     let tasks: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(8);
     // Third argument: how many bytes one exchange carries. The ring is 64 KiB
     // a direction by default, so a payload past that makes the writer wait for
     // the reader to drain -- which is the transition worth sweeping, because a
     // relayed HTTP body is on the far side of it and a 128-byte probe is not.
-    let payload: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(128);
+    let payload: usize =
+        args.next().and_then(|a| a.parse().ok()).unwrap_or(128);
     let capacity: u32 = 4;
 
-    let name: &'static str = Box::leak(format!("ld{:x}", std::process::id()).into_boxed_str());
-    let owner_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).unwrap());
-    let caller_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).unwrap());
-    let owner = Pool::new(Arc::clone(&owner_fleet), Incarnation::new(10)).unwrap();
+    let name: &'static str =
+        Box::leak(format!("ld{:x}", std::process::id()).into_boxed_str());
+    let owner_fleet =
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).unwrap());
+    let caller_fleet =
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).unwrap());
+    let owner =
+        Pool::new(Arc::clone(&owner_fleet), Incarnation::new(10)).unwrap();
     owner.reset_all();
-    let caller = Pool::new(Arc::clone(&caller_fleet), Incarnation::new(11)).unwrap();
-    let owner_streams = Streams::new(owner_fleet, orbit_stream::Incarnation::new(10)).unwrap();
+    let caller =
+        Pool::new(Arc::clone(&caller_fleet), Incarnation::new(11)).unwrap();
+    let owner_streams =
+        Streams::new(owner_fleet, orbit_stream::Incarnation::new(10)).unwrap();
     owner_streams.reset_all();
-    let caller_streams = Streams::new(caller_fleet, orbit_stream::Incarnation::new(11)).unwrap();
+    let caller_streams =
+        Streams::new(caller_fleet, orbit_stream::Incarnation::new(11)).unwrap();
 
-    let runtime =
-        tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
 
     println!(
         "orbit-pool load: ops={ops} tasks={tasks} payload={payload}B capacity={capacity} (two nodes in one process)"
@@ -204,9 +217,12 @@ fn main() {
                             break;
                         }
                         Err(Error::CreationBudget { .. }) => {
-                            let _ = poll_fn(|cx| pool.poll_capacity(KEY, since, cx)).await;
+                            let _ = poll_fn(|cx| {
+                                pool.poll_capacity(KEY, since, cx)
+                            })
+                            .await;
                         }
-                        Err(error) => panic!("{error}")
+                        Err(error) => panic!("{error}"),
                     }
                 }
                 start.elapsed()
@@ -243,7 +259,10 @@ fn main() {
             let bytes = payload;
             tokio::spawn(async move {
                 loop {
-                    let ticket = poll_fn(|cx| owner_streams.poll_take_offer(cx)).await.unwrap();
+                    let ticket =
+                        poll_fn(|cx| owner_streams.poll_take_offer(cx))
+                            .await
+                            .unwrap();
                     // The lease is read and accepted exactly once here,
                     // before any of this bench's own bytes.
                     let Ok((execution, mut read, mut write)) =
@@ -279,7 +298,8 @@ fn main() {
             async move {
                 let start = Instant::now();
                 let lease = reserve_waiting(&pool, id).await;
-                let (mut read, mut write) = pool.open_session(lease, &streams).unwrap();
+                let (mut read, mut write) =
+                    pool.open_session(lease, &streams).unwrap();
                 write.write_all(&vec![7_u8; bytes]).await.unwrap();
                 write.shutdown().await.unwrap();
                 let mut reply = vec![0_u8; bytes];
@@ -307,7 +327,8 @@ fn main() {
             async move {
                 let start = Instant::now();
                 let lease = reserve_waiting(&pool, id).await;
-                let (mut read, mut write) = pool.open_session(lease, &streams).unwrap();
+                let (mut read, mut write) =
+                    pool.open_session(lease, &streams).unwrap();
                 let mut reply = vec![0_u8; bytes];
                 let out = vec![7_u8; bytes];
                 for _ in 0..EXCHANGES {

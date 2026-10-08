@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PoolDirective {
     Continue,
-    Pause { reason: Arc<str> }
+    Pause { reason: Arc<str> },
 }
 
 impl PoolDirective {
@@ -25,6 +25,6 @@ impl PoolDirective {
 pub trait ClientPolicy<O>: Send + Sync {
     fn classify(
         &self,
-        outcome: &O
+        outcome: &O,
     ) -> PoolDirective;
 }

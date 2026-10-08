@@ -48,7 +48,7 @@ pub(crate) const ARMED: u32 = 1 << 31;
 /// Where a table's nodes are rung, and the socket it rings them from.
 pub(crate) struct Bell {
     prefix: String,
-    sender: UnixDatagram
+    sender: UnixDatagram,
 }
 
 impl Bell {
@@ -64,7 +64,7 @@ impl Bell {
     #[cfg(target_os = "linux")]
     fn address(
         &self,
-        node: usize
+        node: usize,
     ) -> io::Result<SocketAddr> {
         use std::os::linux::net::SocketAddrExt;
         SocketAddr::from_abstract_name(format!("{}.{node}", self.prefix))
@@ -73,7 +73,7 @@ impl Bell {
     #[cfg(not(target_os = "linux"))]
     fn path(
         &self,
-        node: usize
+        node: usize,
     ) -> std::path::PathBuf {
         std::path::PathBuf::from(format!("/tmp/{}.{node}", self.prefix))
     }
@@ -81,7 +81,7 @@ impl Bell {
     #[cfg(not(target_os = "linux"))]
     fn address(
         &self,
-        node: usize
+        node: usize,
     ) -> io::Result<SocketAddr> {
         SocketAddr::from_pathname(self.path(node))
     }
@@ -91,7 +91,7 @@ impl Bell {
     /// error here.
     pub(crate) fn ring(
         &self,
-        node: usize
+        node: usize,
     ) {
         if let Ok(address) = self.address(node) {
             let _ = self.sender.send_to_addr(&[1], &address);
@@ -103,7 +103,7 @@ impl Bell {
     #[cfg(feature = "tokio")]
     fn bind(
         &self,
-        node: usize
+        node: usize,
     ) -> io::Result<UnixDatagram> {
         #[cfg(not(target_os = "linux"))]
         {
@@ -111,7 +111,9 @@ impl Bell {
             let path = self.path(node);
             if let Some(directory) = path.parent() {
                 match std::fs::DirBuilder::new().mode(0o700).create(directory) {
-                    Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+                    Err(error)
+                        if error.kind() != io::ErrorKind::AlreadyExists =>
+                    {
                         return Err(error);
                     }
                     _ => {}
@@ -127,7 +129,7 @@ impl Bell {
     #[cfg(feature = "tokio")]
     fn unbind(
         &self,
-        node: usize
+        node: usize,
     ) {
         #[cfg(not(target_os = "linux"))]
         let _ = std::fs::remove_file(self.path(node));
@@ -140,7 +142,7 @@ impl Bell {
 #[cfg(feature = "tokio")]
 pub(crate) struct ReactorDriver {
     task: tokio::task::JoinHandle<()>,
-    node: usize
+    node: usize,
 }
 
 #[cfg(feature = "tokio")]
@@ -148,14 +150,17 @@ impl ReactorDriver {
     pub(crate) fn start(
         table: &Arc<Table>,
         bell: &Bell,
-        runtime: &tokio::runtime::Handle
+        runtime: &tokio::runtime::Handle,
     ) -> io::Result<Self> {
         let node = usize::from(table.node());
         let socket = {
             let _entered = runtime.enter();
             tokio::net::UnixDatagram::from_std(bell.bind(node)?)?
         };
-        table.own_doorbell().incarnation.store(table.incarnation(), Ordering::SeqCst);
+        table
+            .own_doorbell()
+            .incarnation
+            .store(table.incarnation(), Ordering::SeqCst);
         let weak = Arc::downgrade(table);
         let task = runtime.spawn(answer(weak, socket));
         Ok(Self { task, node })
@@ -164,7 +169,7 @@ impl ReactorDriver {
     pub(crate) fn stop(
         self,
         doorbell: &Doorbell,
-        bell: &Bell
+        bell: &Bell,
     ) {
         self.task.abort();
         doorbell.listening.fetch_and(!ARMED, Ordering::SeqCst);
@@ -181,7 +186,7 @@ impl ReactorDriver {
 #[cfg(feature = "tokio")]
 async fn answer(
     table: Weak<Table>,
-    socket: tokio::net::UnixDatagram
+    socket: tokio::net::UnixDatagram,
 ) {
     let mut scratch = [0u8; 64];
     loop {

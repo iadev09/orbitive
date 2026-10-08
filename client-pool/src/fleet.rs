@@ -5,16 +5,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use orbit_pool::{
-    AdmissionPermit, ExchangeSessionPlan, ExchangeSessionStart, Execution, Key, Limits, Policy,
-    Pool, Reason, ResourceId
+    AdmissionPermit, ExchangeSessionPlan, ExchangeSessionStart, Execution, Key,
+    Limits, Policy, Pool, Reason, ResourceId,
 };
 use orbit_stream::exchange::{ExchangeEndpoint, Exchanges};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AcquireError, ActiveRequestPolicy, ClientLease, ClientManager, ClientPool, FleetPoolOptions,
-    OptionsError, PoolDirective
+    AcquireError, ActiveRequestPolicy, ClientLease, ClientManager, ClientPool,
+    FleetPoolOptions, OptionsError, PoolDirective,
 };
 
 /// Failure to select, create, or reach a fleet-owned client.
@@ -22,7 +22,9 @@ use crate::{
 pub enum FleetAcquireError<E: std::error::Error + 'static> {
     #[error("client pool is closed")]
     Closed,
-    #[error("local client pool is at capacity while the fleet granted creation")]
+    #[error(
+        "local client pool is at capacity while the fleet granted creation"
+    )]
     LocalCapacity,
     #[error("client manager failed: {0}")]
     Manager(#[source] E),
@@ -34,10 +36,12 @@ pub enum FleetAcquireError<E: std::error::Error + 'static> {
     Timeout(std::time::Duration),
     #[error("fleet client acquisition was cancelled")]
     Cancelled,
-    #[error("fleet selected local client {0}, but its owner does not hold it idle")]
+    #[error(
+        "fleet selected local client {0}, but its owner does not hold it idle"
+    )]
     MissingLocal(ResourceId),
     #[error("client acquisition was rejected: {0:?}")]
-    Rejected(Reason)
+    Rejected(Reason),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -45,14 +49,14 @@ enum RegisteredError<E: std::error::Error + 'static> {
     #[error(transparent)]
     Manager(E),
     #[error(transparent)]
-    Orbit(orbit_pool::Error)
+    Orbit(orbit_pool::Error),
 }
 
 struct RegisteredClient<C> {
     client: C,
     pool: Arc<Pool>,
     resource: ResourceId,
-    initial_execution: Option<Execution>
+    initial_execution: Option<Execution>,
 }
 
 impl<C> Drop for RegisteredClient<C> {
@@ -64,7 +68,7 @@ impl<C> Drop for RegisteredClient<C> {
 struct RegisteredManager<M: ClientManager> {
     manager: M,
     pool: Arc<Pool>,
-    key: Key
+    key: Key,
 }
 
 #[async_trait]
@@ -73,36 +77,42 @@ impl<M: ClientManager> ClientManager for RegisteredManager<M> {
     type Error = RegisteredError<M::Error>;
 
     async fn create(&self) -> Result<Self::Client, Self::Error> {
-        let client = self.manager.create().await.map_err(RegisteredError::Manager)?;
-        let (resource, execution) =
-            self.pool.register_active(self.key, 1).map_err(RegisteredError::Orbit)?;
+        let client =
+            self.manager.create().await.map_err(RegisteredError::Manager)?;
+        let (resource, execution) = self
+            .pool
+            .register_active(self.key, 1)
+            .map_err(RegisteredError::Orbit)?;
         Ok(RegisteredClient {
             client,
             pool: Arc::clone(&self.pool),
             resource,
-            initial_execution: Some(execution)
+            initial_execution: Some(execution),
         })
     }
 
     async fn recycle(
         &self,
-        client: &mut Self::Client
+        client: &mut Self::Client,
     ) -> Result<(), Self::Error> {
-        self.manager.recycle(&mut client.client).await.map_err(RegisteredError::Manager)
+        self.manager
+            .recycle(&mut client.client)
+            .await
+            .map_err(RegisteredError::Manager)
     }
 }
 
 /// One fleet acquisition: direct local use or a session to its remote owner.
 pub enum FleetClient<M: ClientManager> {
     Local(FleetClientLease<M>),
-    Remote(FleetRemoteClient)
+    Remote(FleetRemoteClient),
 }
 
 /// A remote exchange that retains its fleet-wide request admission until the
 /// caller finishes with the endpoint.
 pub struct FleetRemoteClient {
     endpoint: ExchangeEndpoint,
-    _admission: AdmissionPermit
+    _admission: AdmissionPermit,
 }
 
 impl Deref for FleetRemoteClient {
@@ -126,7 +136,7 @@ pub struct FleetClientLease<M: ClientManager> {
     local_pool: ClientPool<RegisteredManager<M>>,
     resource: ResourceId,
     max_idle: u32,
-    _admission: Option<AdmissionPermit>
+    _admission: Option<AdmissionPermit>,
 }
 
 impl<M: ClientManager> Deref for FleetClientLease<M> {
@@ -146,7 +156,10 @@ impl<M: ClientManager> DerefMut for FleetClientLease<M> {
 impl<M: ClientManager> FleetClientLease<M> {
     /// Optional cancellation for active work holding this local fleet lease.
     pub fn cancellation_token(&self) -> CancellationToken {
-        self.local.as_ref().expect("fleet client lease is live").cancellation_token()
+        self.local
+            .as_ref()
+            .expect("fleet client lease is live")
+            .cancellation_token()
     }
 }
 
@@ -162,7 +175,8 @@ impl<M: ClientManager> Drop for FleetClientLease<M> {
             .and_then(|execution| execution.complete_idle(self.max_idle).ok())
             .unwrap_or(false);
         if !retained {
-            self.local_pool.discard_idle_where(|client| client.resource == self.resource);
+            self.local_pool
+                .discard_idle_where(|client| client.resource == self.resource);
         }
     }
 }
@@ -171,7 +185,7 @@ impl<M: ClientManager> Drop for FleetClientLease<M> {
 pub struct IncomingClientSession<M: ClientManager> {
     pub endpoint: ExchangeEndpoint,
     pub start: ExchangeSessionStart,
-    client: FleetClientLease<M>
+    client: FleetClientLease<M>,
 }
 
 impl<M: ClientManager> Deref for IncomingClientSession<M> {
@@ -196,7 +210,7 @@ pub struct FleetClientPool<M: ClientManager> {
     key: Key,
     policy: Arc<dyn Policy>,
     options: FleetPoolOptions,
-    waiting: AtomicUsize
+    waiting: AtomicUsize,
 }
 
 impl<M: ClientManager> FleetClientPool<M> {
@@ -206,7 +220,7 @@ impl<M: ClientManager> FleetClientPool<M> {
         exchanges: Arc<Exchanges>,
         key: Key,
         policy: Arc<dyn Policy>,
-        options: FleetPoolOptions
+        options: FleetPoolOptions,
     ) -> Result<Self, OptionsError> {
         options.validate()?;
         if !pool.tracks_concurrency() {
@@ -214,15 +228,23 @@ impl<M: ClientManager> FleetClientPool<M> {
         }
         let local = ClientPool::new(
             RegisteredManager { manager, pool: Arc::clone(&pool), key },
-            options.local_options()
+            options.local_options(),
         )?;
-        Ok(Self { local, pool, exchanges, key, policy, options, waiting: AtomicUsize::new(0) })
+        Ok(Self {
+            local,
+            pool,
+            exchanges,
+            key,
+            policy,
+            options,
+            waiting: AtomicUsize::new(0),
+        })
     }
 
     pub async fn acquire(
         &self,
         metadata: &[u8],
-        active_policy: ActiveRequestPolicy
+        active_policy: ActiveRequestPolicy,
     ) -> Result<FleetClient<M>, FleetAcquireError<M::Error>> {
         self.acquire_inner(metadata, active_policy, None).await
     }
@@ -232,7 +254,7 @@ impl<M: ClientManager> FleetClientPool<M> {
         &self,
         metadata: &[u8],
         active_policy: ActiveRequestPolicy,
-        cancellation: &CancellationToken
+        cancellation: &CancellationToken,
     ) -> Result<FleetClient<M>, FleetAcquireError<M::Error>> {
         self.acquire_inner(metadata, active_policy, Some(cancellation)).await
     }
@@ -241,22 +263,34 @@ impl<M: ClientManager> FleetClientPool<M> {
         &self,
         metadata: &[u8],
         active_policy: ActiveRequestPolicy,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<FleetClient<M>, FleetAcquireError<M::Error>> {
-        let deadline = self.options.acquire_timeout.map(|duration| Instant::now() + duration);
-        self.local.wait_until_open(deadline, cancellation).await.map_err(map_local_error)?;
+        let deadline = self
+            .options
+            .acquire_timeout
+            .map(|duration| Instant::now() + duration);
+        self.local
+            .wait_until_open(deadline, cancellation)
+            .await
+            .map_err(map_local_error)?;
         let admission = self.acquire_admission(deadline, cancellation).await?;
         loop {
             if cancellation.is_some_and(CancellationToken::is_cancelled) {
                 return Err(FleetAcquireError::Cancelled);
             }
-            self.local.wait_until_open(deadline, cancellation).await.map_err(map_local_error)?;
+            self.local
+                .wait_until_open(deadline, cancellation)
+                .await
+                .map_err(map_local_error)?;
             let plan = self.pool.acquire_exchange_session(
                 self.key,
-                &Limits { max_live: self.options.max_live, attempts: self.options.attempts },
+                &Limits {
+                    max_live: self.options.max_live,
+                    attempts: self.options.attempts,
+                },
                 self.policy.as_ref(),
                 &self.exchanges,
-                metadata
+                metadata,
             )?;
             match plan {
                 ExchangeSessionPlan::Local(execution) => {
@@ -267,7 +301,7 @@ impl<M: ClientManager> FleetClientPool<M> {
                                 .acquire_idle_where_cancellable(
                                     |client| client.resource == resource,
                                     active_policy,
-                                    cancellation
+                                    cancellation,
                                 )
                                 .await
                         }
@@ -275,7 +309,7 @@ impl<M: ClientManager> FleetClientPool<M> {
                             self.local
                                 .acquire_idle_where(
                                     |client| client.resource == resource,
-                                    active_policy
+                                    active_policy,
                                 )
                                 .await
                         }
@@ -289,30 +323,37 @@ impl<M: ClientManager> FleetClientPool<M> {
                         local,
                         execution,
                         resource,
-                        Some(admission)
+                        Some(admission),
                     )));
                 }
                 ExchangeSessionPlan::Remote(endpoint) => {
                     return Ok(FleetClient::Remote(FleetRemoteClient {
                         endpoint,
-                        _admission: admission
+                        _admission: admission,
                     }));
                 }
                 ExchangeSessionPlan::Create(permit) => {
-                    let (local, execution, resource) =
-                        self.create_registered(active_policy, cancellation).await?;
+                    let (local, execution, resource) = self
+                        .create_registered(active_policy, cancellation)
+                        .await?;
                     permit.finish();
                     return Ok(FleetClient::Local(self.lease(
                         local,
                         execution,
                         resource,
-                        Some(admission)
+                        Some(admission),
                     )));
                 }
                 ExchangeSessionPlan::Wait(version) => {
-                    let _waiter = FleetWaiter::enter(&self.waiting, self.options.max_waiting)?;
-                    let wait = poll_fn(|cx| self.pool.poll_capacity(self.key, version, cx));
-                    self.wait_for_capacity(wait, deadline, cancellation).await?;
+                    let _waiter = FleetWaiter::enter(
+                        &self.waiting,
+                        self.options.max_waiting,
+                    )?;
+                    let wait = poll_fn(|cx| {
+                        self.pool.poll_capacity(self.key, version, cx)
+                    });
+                    self.wait_for_capacity(wait, deadline, cancellation)
+                        .await?;
                 }
                 ExchangeSessionPlan::Reject(reason) => {
                     return Err(FleetAcquireError::Rejected(reason));
@@ -324,7 +365,7 @@ impl<M: ClientManager> FleetClientPool<M> {
     /// Wait for and accept one remote exchange addressed to a local client.
     pub async fn accept(
         &self,
-        active_policy: ActiveRequestPolicy
+        active_policy: ActiveRequestPolicy,
     ) -> Result<IncomingClientSession<M>, FleetAcquireError<M::Error>> {
         self.accept_inner(active_policy, None).await
     }
@@ -333,7 +374,7 @@ impl<M: ClientManager> FleetClientPool<M> {
     pub async fn accept_cancellable(
         &self,
         active_policy: ActiveRequestPolicy,
-        cancellation: &CancellationToken
+        cancellation: &CancellationToken,
     ) -> Result<IncomingClientSession<M>, FleetAcquireError<M::Error>> {
         self.accept_inner(active_policy, Some(cancellation)).await
     }
@@ -341,15 +382,17 @@ impl<M: ClientManager> FleetClientPool<M> {
     async fn accept_inner(
         &self,
         active_policy: ActiveRequestPolicy,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<IncomingClientSession<M>, FleetAcquireError<M::Error>> {
-        let accept = poll_fn(|cx| self.pool.poll_accept_exchange_session(&self.exchanges, cx));
+        let accept = poll_fn(|cx| {
+            self.pool.poll_accept_exchange_session(&self.exchanges, cx)
+        });
         let (execution, endpoint, start) = match cancellation {
             Some(cancellation) => tokio::select! {
                 result = accept => result?,
                 _ = cancellation.cancelled() => return Err(FleetAcquireError::Cancelled)
             },
-            None => accept.await?
+            None => accept.await?,
         };
         let resource = execution.lease().id;
         let local = match cancellation {
@@ -358,13 +401,16 @@ impl<M: ClientManager> FleetClientPool<M> {
                     .acquire_idle_where_cancellable(
                         |client| client.resource == resource,
                         active_policy,
-                        cancellation
+                        cancellation,
                     )
                     .await
             }
             None => {
                 self.local
-                    .acquire_idle_where(|client| client.resource == resource, active_policy)
+                    .acquire_idle_where(
+                        |client| client.resource == resource,
+                        active_policy,
+                    )
                     .await
             }
         }
@@ -376,7 +422,7 @@ impl<M: ClientManager> FleetClientPool<M> {
         Ok(IncomingClientSession {
             endpoint,
             start,
-            client: self.lease(local, execution, resource, None)
+            client: self.lease(local, execution, resource, None),
         })
     }
 
@@ -386,7 +432,7 @@ impl<M: ClientManager> FleetClientPool<M> {
     /// an exchange whose request bytes it cannot interpret.
     pub async fn run(
         &self,
-        cancellation: CancellationToken
+        cancellation: CancellationToken,
     ) -> Result<(), FleetAcquireError<M::Error>> {
         let local_cancellation = cancellation.child_token();
         tokio::select! {
@@ -405,13 +451,14 @@ impl<M: ClientManager> FleetClientPool<M> {
 
     async fn maintain_warm(
         &self,
-        cancellation: CancellationToken
+        cancellation: CancellationToken,
     ) -> Result<(), FleetAcquireError<M::Error>> {
         loop {
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            if !self.local.wait_until_open_for_maintenance(&cancellation).await {
+            if !self.local.wait_until_open_for_maintenance(&cancellation).await
+            {
                 return Ok(());
             }
             let version = self.pool.version(self.key)?;
@@ -429,16 +476,23 @@ impl<M: ClientManager> FleetClientPool<M> {
 
     async fn warm_one(
         &self,
-        cancellation: &CancellationToken
+        cancellation: &CancellationToken,
     ) -> Result<bool, FleetAcquireError<M::Error>> {
-        let permit =
-            match self.pool.claim_warm(self.key, self.options.max_live, self.options.min_idle) {
-                Ok(permit) => permit,
-                Err(orbit_pool::Error::CreationBudget { .. }) => return Ok(false),
-                Err(error) => return Err(error.into())
-            };
-        let (local, execution, resource) =
-            self.create_registered(ActiveRequestPolicy::Preserve, Some(cancellation)).await?;
+        let permit = match self.pool.claim_warm(
+            self.key,
+            self.options.max_live,
+            self.options.min_idle,
+        ) {
+            Ok(permit) => permit,
+            Err(orbit_pool::Error::CreationBudget { .. }) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let (local, execution, resource) = self
+            .create_registered(
+                ActiveRequestPolicy::Preserve,
+                Some(cancellation),
+            )
+            .await?;
         permit.finish();
         drop(local);
         let retained = execution.complete_idle(self.options.max_idle)?;
@@ -451,14 +505,16 @@ impl<M: ClientManager> FleetClientPool<M> {
     async fn create_registered(
         &self,
         active_policy: ActiveRequestPolicy,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<
         (ClientLease<RegisteredManager<M>>, Execution, ResourceId),
-        FleetAcquireError<M::Error>
+        FleetAcquireError<M::Error>,
     > {
         let mut local = match cancellation {
-            Some(cancellation) => self.local.create_cancellable(active_policy, cancellation).await,
-            None => self.local.create(active_policy).await
+            Some(cancellation) => {
+                self.local.create_cancellable(active_policy, cancellation).await
+            }
+            None => self.local.create(active_policy).await,
         }
         .map_err(map_local_error)?;
         let resource = local.resource;
@@ -474,7 +530,7 @@ impl<M: ClientManager> FleetClientPool<M> {
         local: ClientLease<RegisteredManager<M>>,
         execution: Execution,
         resource: ResourceId,
-        admission: Option<AdmissionPermit>
+        admission: Option<AdmissionPermit>,
     ) -> FleetClientLease<M> {
         FleetClientLease {
             local: Some(local),
@@ -482,25 +538,31 @@ impl<M: ClientManager> FleetClientPool<M> {
             local_pool: self.local.clone(),
             resource,
             max_idle: self.options.max_idle,
-            _admission: admission
+            _admission: admission,
         }
     }
 
     async fn acquire_admission(
         &self,
         deadline: Option<Instant>,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<AdmissionPermit, FleetAcquireError<M::Error>> {
         loop {
             let version = self.pool.version(self.key)?;
             match self.pool.admit(self.key, self.options.max_concurrency) {
                 Ok(permit) => return Ok(permit),
                 Err(orbit_pool::Error::ConcurrencyLimit { .. }) => {
-                    let _waiter = FleetWaiter::enter(&self.waiting, self.options.max_waiting)?;
-                    let wait = poll_fn(|cx| self.pool.poll_capacity(self.key, version, cx));
-                    self.wait_for_capacity(wait, deadline, cancellation).await?;
+                    let _waiter = FleetWaiter::enter(
+                        &self.waiting,
+                        self.options.max_waiting,
+                    )?;
+                    let wait = poll_fn(|cx| {
+                        self.pool.poll_capacity(self.key, version, cx)
+                    });
+                    self.wait_for_capacity(wait, deadline, cancellation)
+                        .await?;
                 }
-                Err(error) => return Err(error.into())
+                Err(error) => return Err(error.into()),
             }
         }
     }
@@ -512,7 +574,7 @@ impl<M: ClientManager> FleetClientPool<M> {
     /// deliberately contains no profile-policy bit.
     pub fn apply_local(
         &self,
-        directive: PoolDirective
+        directive: PoolDirective,
     ) {
         self.local.apply(directive);
     }
@@ -531,10 +593,10 @@ impl<M: ClientManager> FleetClientPool<M> {
         &self,
         wait: F,
         deadline: Option<Instant>,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<(), FleetAcquireError<M::Error>>
     where
-        F: std::future::Future<Output = Result<T, orbit_pool::Error>>
+        F: std::future::Future<Output = Result<T, orbit_pool::Error>>,
     {
         match (deadline, cancellation) {
             (Some(deadline), Some(cancellation)) => tokio::select! {
@@ -554,7 +616,7 @@ impl<M: ClientManager> FleetClientPool<M> {
                 result = wait => result.map(|_| ()).map_err(Into::into),
                 _ = cancellation.cancelled() => Err(FleetAcquireError::Cancelled)
             },
-            (None, None) => wait.await.map(|_| ()).map_err(Into::into)
+            (None, None) => wait.await.map(|_| ()).map_err(Into::into),
         }
     }
 }
@@ -565,10 +627,12 @@ fn map_local_error<E: std::error::Error + Send + Sync + 'static>(
     match error {
         AcquireError::Closed => FleetAcquireError::Closed,
         AcquireError::AtCapacity => FleetAcquireError::LocalCapacity,
-        AcquireError::QueueFull { max_waiting } => FleetAcquireError::QueueFull { max_waiting },
+        AcquireError::QueueFull { max_waiting } => {
+            FleetAcquireError::QueueFull { max_waiting }
+        }
         AcquireError::Timeout(duration) => FleetAcquireError::Timeout(duration),
         AcquireError::Cancelled => FleetAcquireError::Cancelled,
-        AcquireError::Manager(error) => map_registered_error(error)
+        AcquireError::Manager(error) => map_registered_error(error),
     }
 }
 
@@ -577,18 +641,18 @@ fn map_registered_error<E: std::error::Error + 'static>(
 ) -> FleetAcquireError<E> {
     match error {
         RegisteredError::Manager(error) => FleetAcquireError::Manager(error),
-        RegisteredError::Orbit(error) => FleetAcquireError::Orbit(error)
+        RegisteredError::Orbit(error) => FleetAcquireError::Orbit(error),
     }
 }
 
 struct FleetWaiter<'a> {
-    count: &'a AtomicUsize
+    count: &'a AtomicUsize,
 }
 
 impl<'a> FleetWaiter<'a> {
     fn enter<E: std::error::Error + 'static>(
         count: &'a AtomicUsize,
-        max_waiting: usize
+        max_waiting: usize,
     ) -> Result<Self, FleetAcquireError<E>> {
         let admitted = count
             .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {

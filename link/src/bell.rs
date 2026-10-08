@@ -9,7 +9,7 @@ use std::os::unix::net::{SocketAddr, UnixDatagram};
 
 pub(crate) struct Bell {
     prefix: String,
-    sender: UnixDatagram
+    sender: UnixDatagram,
 }
 
 impl Bell {
@@ -25,7 +25,7 @@ impl Bell {
     #[cfg(target_os = "linux")]
     fn address(
         &self,
-        lane: usize
+        lane: usize,
     ) -> io::Result<SocketAddr> {
         use std::os::linux::net::SocketAddrExt;
         SocketAddr::from_abstract_name(format!("{}.{lane}", self.prefix))
@@ -34,7 +34,7 @@ impl Bell {
     #[cfg(not(target_os = "linux"))]
     fn path(
         &self,
-        lane: usize
+        lane: usize,
     ) -> std::path::PathBuf {
         std::path::PathBuf::from(format!("/tmp/{}.{lane}", self.prefix))
     }
@@ -42,14 +42,14 @@ impl Bell {
     #[cfg(not(target_os = "linux"))]
     fn address(
         &self,
-        lane: usize
+        lane: usize,
     ) -> io::Result<SocketAddr> {
         SocketAddr::from_pathname(self.path(lane))
     }
 
     pub(crate) fn ring(
         &self,
-        lane: usize
+        lane: usize,
     ) {
         if let Ok(address) = self.address(lane) {
             let _ = self.sender.send_to_addr(&[1], &address);
@@ -59,7 +59,7 @@ impl Bell {
     #[cfg(feature = "tokio")]
     pub(crate) fn bind(
         &self,
-        lane: usize
+        lane: usize,
     ) -> io::Result<UnixDatagram> {
         #[cfg(not(target_os = "linux"))]
         {
@@ -67,7 +67,9 @@ impl Bell {
             let path = self.path(lane);
             if let Some(directory) = path.parent() {
                 match std::fs::DirBuilder::new().mode(0o700).create(directory) {
-                    Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+                    Err(error)
+                        if error.kind() != io::ErrorKind::AlreadyExists =>
+                    {
                         return Err(error);
                     }
                     _ => {}
@@ -83,7 +85,7 @@ impl Bell {
     #[cfg(feature = "tokio")]
     pub(crate) fn unbind(
         &self,
-        lane: usize
+        lane: usize,
     ) {
         #[cfg(not(target_os = "linux"))]
         let _ = std::fs::remove_file(self.path(lane));

@@ -15,7 +15,7 @@ use orbit_core::{Fleet, NodeId};
 use orbit_pool::{Error, Incarnation, Key, Pool, Readiness};
 use orbit_stream::Streams;
 
-const KEY: Key = Key::new(0xF00D);
+const KEY: Key = Key::new(0xf00d);
 const MAX_LIVE: u32 = 2;
 
 fn fleet_name(tag: &str) -> &'static str {
@@ -26,23 +26,34 @@ fn fleet_name(tag: &str) -> &'static str {
 fn poll_two(
     first: &Readiness,
     second: &Readiness,
-    millis: i32
+    millis: i32,
 ) -> (bool, bool) {
     let mut watched = [
-        libc::pollfd { fd: first.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-        libc::pollfd { fd: second.as_raw_fd(), events: libc::POLLIN, revents: 0 }
+        libc::pollfd {
+            fd: first.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: second.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
     ];
     // SAFETY: two descriptors this test owns, and a timeout.
     let ready = unsafe { libc::poll(watched.as_mut_ptr(), 2, millis) };
     if ready <= 0 {
         return (false, false);
     }
-    (watched[0].revents & libc::POLLIN != 0, watched[1].revents & libc::POLLIN != 0)
+    (
+        watched[0].revents & libc::POLLIN != 0,
+        watched[1].revents & libc::POLLIN != 0,
+    )
 }
 
 fn quieten(
     first: &Readiness,
-    second: &Readiness
+    second: &Readiness,
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -63,17 +74,25 @@ fn quieten(
 #[test]
 fn a_worker_waits_for_a_request_and_for_capacity_in_one_poll_set() {
     let name = fleet_name("w");
-    let producer = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("producer fleet"));
-    let worker = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("worker fleet"));
+    let producer = Arc::new(
+        Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("producer fleet"),
+    );
+    let worker = Arc::new(
+        Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("worker fleet"),
+    );
 
-    let owner_pool = Pool::new(Arc::clone(&producer), Incarnation::new(10)).expect("owner pool");
+    let owner_pool = Pool::new(Arc::clone(&producer), Incarnation::new(10))
+        .expect("owner pool");
     owner_pool.reset_all();
     let owner_streams =
-        Streams::new(Arc::clone(&producer), orbit_stream::Incarnation::new(10)).expect("streams");
+        Streams::new(Arc::clone(&producer), orbit_stream::Incarnation::new(10))
+            .expect("streams");
     owner_streams.reset_all();
-    let worker_pool = Pool::new(Arc::clone(&worker), Incarnation::new(11)).expect("worker pool");
+    let worker_pool = Pool::new(Arc::clone(&worker), Incarnation::new(11))
+        .expect("worker pool");
     let worker_streams =
-        Streams::new(Arc::clone(&worker), orbit_stream::Incarnation::new(11)).expect("streams");
+        Streams::new(Arc::clone(&worker), orbit_stream::Incarnation::new(11))
+            .expect("streams");
 
     let requests = worker_streams.readiness().expect("stream descriptor");
     let capacity = worker_pool.readiness().expect("pool descriptor");
@@ -83,7 +102,10 @@ fn a_worker_waits_for_a_request_and_for_capacity_in_one_poll_set() {
     // creation in progress, both on the other node.
     let _id = owner_pool.register(KEY, 1).expect("register");
     let permit = owner_pool.claim_create(KEY, MAX_LIVE).expect("the last unit");
-    assert!(matches!(worker_pool.claim_create(KEY, MAX_LIVE), Err(Error::CreationBudget { .. })));
+    assert!(matches!(
+        worker_pool.claim_create(KEY, MAX_LIVE),
+        Err(Error::CreationBudget { .. })
+    ));
 
     quieten(&requests, &capacity);
 
@@ -125,7 +147,10 @@ fn a_worker_waits_for_a_request_and_for_capacity_in_one_poll_set() {
         }
     }
     assert!(freed, "the released claim never reached the descriptor");
-    worker_pool.claim_create(KEY, MAX_LIVE).expect("capacity came back").finish();
+    worker_pool
+        .claim_create(KEY, MAX_LIVE)
+        .expect("capacity came back")
+        .finish();
 
     let _ = owner_pool.unlink();
     let _ = owner_streams.unlink();

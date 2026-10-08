@@ -21,7 +21,7 @@ pub struct CachedPrincipal {
     pub(crate) key: CacheKey,
     pub(crate) principal: Arc<Principal>,
     pub(crate) cached_at: u64,
-    pub(crate) valid_until: u64
+    pub(crate) valid_until: u64,
 }
 
 impl CachedPrincipal {
@@ -41,12 +41,12 @@ impl CachedPrincipal {
 pub trait PrincipalCache {
     fn get(
         &self,
-        key: &CacheKey
+        key: &CacheKey,
     ) -> Option<CachedPrincipal>;
     fn insert(
         &self,
         key: CacheKey,
-        entry: CachedPrincipal
+        entry: CachedPrincipal,
     );
 }
 
@@ -66,16 +66,23 @@ impl MemoryCache {
 impl PrincipalCache for MemoryCache {
     fn get(
         &self,
-        key: &CacheKey
+        key: &CacheKey,
     ) -> Option<CachedPrincipal> {
-        self.0.lock().unwrap_or_else(|error| error.into_inner()).get(key).cloned()
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(key)
+            .cloned()
     }
 
     fn insert(
         &self,
         key: CacheKey,
-        entry: CachedPrincipal
+        entry: CachedPrincipal,
     ) {
-        self.0.lock().unwrap_or_else(|error| error.into_inner()).put(key, entry);
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .put(key, entry);
     }
 }

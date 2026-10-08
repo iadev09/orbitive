@@ -16,13 +16,13 @@
 
 use orbit_core::NodeId;
 use orbit_stream::exchange::{
-    ExchangeEndpoint, ExchangeTicket, Exchanges, FlowEvent, PayloadChunk
+    ExchangeEndpoint, ExchangeTicket, Exchanges, FlowEvent, PayloadChunk,
 };
 use orbit_stream::{ReadHalf, Streams, Ticket, WriteHalf};
 
 use crate::{
-    CreationPermit, Error, Execution, Incarnation, Lease, Limits, Plan, Policy, Pool, Reason,
-    ResourceId, Result
+    CreationPermit, Error, Execution, Incarnation, Lease, Limits, Plan, Policy,
+    Pool, Reason, ResourceId, Result,
 };
 
 /// Bytes the lease takes on the wire, ahead of the consumer's own first
@@ -37,7 +37,7 @@ const VERSION: u8 = 1;
 /// Keeping this value keeps the zero-copy metadata bytes alive; dropping it
 /// returns their slots to the payload arena.
 pub struct ExchangeSessionStart {
-    payload: PayloadChunk
+    payload: PayloadChunk,
 }
 
 /// One ownership decision with the generic exchange rendezvous already
@@ -57,7 +57,7 @@ pub enum ExchangeSessionPlan {
     /// Capacity may become available after this key version.
     Wait(u32),
     /// The caller's policy deliberately refused the acquisition.
-    Reject(Reason)
+    Reject(Reason),
 }
 
 impl ExchangeSessionStart {
@@ -82,7 +82,9 @@ fn encode(lease: &Lease) -> [u8; SESSION_FRAME] {
 }
 
 fn decode(frame: &[u8; SESSION_FRAME]) -> Result<Lease> {
-    let word = |at: usize| u64::from_le_bytes(frame[at..at + 8].try_into().expect("eight bytes"));
+    let word = |at: usize| {
+        u64::from_le_bytes(frame[at..at + 8].try_into().expect("eight bytes"))
+    };
     if frame[..4] != MAGIC || frame[4] != VERSION {
         return Err(Error::Malformed(format!(
             "not a pool session frame: magic={:?} version={}",
@@ -93,8 +95,10 @@ fn decode(frame: &[u8; SESSION_FRAME]) -> Result<Lease> {
     Ok(Lease {
         id: ResourceId::from_net_id(orbit_core::NetId64::from_raw(word(8))),
         fence: word(16),
-        holder: NodeId::new(u16::from_le_bytes(frame[6..8].try_into().expect("two bytes"))),
-        holder_incarnation: Incarnation::new(word(24))
+        holder: NodeId::new(u16::from_le_bytes(
+            frame[6..8].try_into().expect("two bytes"),
+        )),
+        holder_incarnation: Incarnation::new(word(24)),
     })
 }
 
@@ -108,16 +112,18 @@ impl Pool {
         limits: &Limits,
         policy: &dyn Policy,
         exchanges: &Exchanges,
-        metadata: &[u8]
+        metadata: &[u8],
     ) -> Result<ExchangeSessionPlan> {
         match self.acquire(key, limits, policy)? {
-            Plan::LocalReuse(lease) => self.accept(lease).map(ExchangeSessionPlan::Local),
+            Plan::LocalReuse(lease) => {
+                self.accept(lease).map(ExchangeSessionPlan::Local)
+            }
             Plan::RemoteReuse(lease) => self
                 .open_exchange_session(lease, exchanges, metadata)
                 .map(ExchangeSessionPlan::Remote),
             Plan::Create(permit) => Ok(ExchangeSessionPlan::Create(permit)),
             Plan::Wait(version) => Ok(ExchangeSessionPlan::Wait(version)),
-            Plan::Reject(reason) => Ok(ExchangeSessionPlan::Reject(reason))
+            Plan::Reject(reason) => Ok(ExchangeSessionPlan::Reject(reason)),
         }
     }
 
@@ -137,7 +143,7 @@ impl Pool {
     pub fn open_session(
         &self,
         lease: Lease,
-        streams: &Streams
+        streams: &Streams,
     ) -> Result<(ReadHalf, WriteHalf)> {
         let (endpoint, ticket) = streams.create()?;
         let frame = encode(&lease);
@@ -150,7 +156,7 @@ impl Pool {
                     "a stream whose ring took {short} of {SESSION_FRAME} bytes cannot carry a session"
                 )));
             }
-            Err(error) => return Err(error.into())
+            Err(error) => return Err(error.into()),
         }
         // The owner is the resource's lane, not the lease's holder: the
         // holder is this caller, and the frame carries it so the owner
@@ -175,7 +181,7 @@ impl Pool {
     pub fn accept_session(
         &self,
         streams: &Streams,
-        ticket: Ticket
+        ticket: Ticket,
     ) -> Result<(Execution, ReadHalf, WriteHalf)> {
         let endpoint = streams.open(ticket)?;
         let mut frame = [0_u8; SESSION_FRAME];
@@ -190,7 +196,7 @@ impl Pool {
                     )));
                 }
                 Ok(read) => filled += read,
-                Err(error) => return Err(error.into())
+                Err(error) => return Err(error.into()),
             }
         }
         let lease = decode(&frame)?;
@@ -213,13 +219,14 @@ impl Pool {
         &self,
         lease: Lease,
         exchanges: &Exchanges,
-        request_metadata: &[u8]
+        request_metadata: &[u8],
     ) -> Result<ExchangeEndpoint> {
         let opened = (|| {
             let (mut server, ticket) = exchanges.create()?;
             let frame = encode(&lease);
-            let mut start =
-                server.sender().reserve_start(SESSION_FRAME + request_metadata.len())?;
+            let mut start = server
+                .sender()
+                .reserve_start(SESSION_FRAME + request_metadata.len())?;
             start[..SESSION_FRAME].copy_from_slice(&frame);
             start[SESSION_FRAME..].copy_from_slice(request_metadata);
             start.commit()?;
@@ -241,21 +248,25 @@ impl Pool {
     pub fn accept_exchange_session(
         &self,
         exchanges: &Exchanges,
-        ticket: ExchangeTicket
+        ticket: ExchangeTicket,
     ) -> Result<(Execution, ExchangeEndpoint, ExchangeSessionStart)> {
         let mut client = exchanges.open_peer(ticket)?;
         let payload = match client.receiver().try_next()? {
-            FlowEvent::Start { metadata: Some(payload) } if payload.len() >= SESSION_FRAME => {
+            FlowEvent::Start { metadata: Some(payload) }
+                if payload.len() >= SESSION_FRAME =>
+            {
                 payload
             }
             FlowEvent::Start { .. } => {
                 return Err(Error::Malformed(
-                    "an exchange session start does not contain a lease frame".to_owned()
+                    "an exchange session start does not contain a lease frame"
+                        .to_owned(),
                 ));
             }
             _ => {
                 return Err(Error::Malformed(
-                    "an exchange session did not begin with request start".to_owned()
+                    "an exchange session did not begin with request start"
+                        .to_owned(),
                 ));
             }
         };
@@ -272,14 +283,18 @@ impl Pool {
     pub fn poll_accept_exchange_session(
         &self,
         exchanges: &Exchanges,
-        cx: &mut std::task::Context<'_>
-    ) -> std::task::Poll<Result<(Execution, ExchangeEndpoint, ExchangeSessionStart)>> {
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<
+        Result<(Execution, ExchangeEndpoint, ExchangeSessionStart)>,
+    > {
         match exchanges.poll_take_offer(cx) {
-            std::task::Poll::Ready(Ok(ticket)) => {
-                std::task::Poll::Ready(self.accept_exchange_session(exchanges, ticket))
+            std::task::Poll::Ready(Ok(ticket)) => std::task::Poll::Ready(
+                self.accept_exchange_session(exchanges, ticket),
+            ),
+            std::task::Poll::Ready(Err(error)) => {
+                std::task::Poll::Ready(Err(Error::from(error)))
             }
-            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(Error::from(error))),
-            std::task::Poll::Pending => std::task::Poll::Pending
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }
@@ -297,12 +312,17 @@ mod tests {
     #[test]
     fn a_lease_survives_the_frame() {
         let lease = Lease {
-            id: ResourceId::from_net_id(orbit_core::NetId64::make(247, 3, 0x1234_5678)),
+            id: ResourceId::from_net_id(orbit_core::NetId64::make(
+                247,
+                3,
+                0x1234_5678,
+            )),
             fence: 0x0102_0304_0506_0708,
             holder: NodeId::new(3),
-            holder_incarnation: Incarnation::new(0x0A0B_0C0D)
+            holder_incarnation: Incarnation::new(0x0a0b_0c0d),
         };
-        let decoded = decode(&encode(&lease)).expect("a frame this crate wrote");
+        let decoded =
+            decode(&encode(&lease)).expect("a frame this crate wrote");
         assert_eq!(decoded.id, lease.id);
         assert_eq!(decoded.fence, lease.fence);
         assert_eq!(decoded.holder, lease.holder);
@@ -315,7 +335,7 @@ mod tests {
             id: ResourceId::from_net_id(orbit_core::NetId64::make(247, 1, 9)),
             fence: 1,
             holder: NodeId::new(1),
-            holder_incarnation: Incarnation::new(1)
+            holder_incarnation: Incarnation::new(1),
         });
         frame[4] = VERSION + 1;
         assert!(matches!(decode(&frame), Err(Error::Malformed(_))));
@@ -331,15 +351,20 @@ mod tests {
         use orbit_stream::exchange::{ExchangeSpec, PayloadArenaSpec};
         use orbit_stream::{Incarnation as StreamIncarnation, StreamSpec};
 
-        let fleet = Arc::new(Fleet::join("pool-exchange-session", 2).expect("fleet"));
-        let pool = Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
+        let fleet =
+            Arc::new(Fleet::join("pool-exchange-session", 2).expect("fleet"));
+        let pool =
+            Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
         pool.reset_all();
         let resource = pool.register(crate::Key::new(9), 1).expect("resource");
         let lease = pool.reserve(resource).expect("lease");
         let exchanges = Exchanges::open(
             fleet,
             StreamIncarnation::new(1),
-            ExchangeSpec::new(StreamSpec::new(210, 4, 512), PayloadArenaSpec::new(211, 8, 64))
+            ExchangeSpec::new(
+                StreamSpec::new(210, 4, 512),
+                PayloadArenaSpec::new(211, 8, 64),
+            ),
         )
         .expect("exchanges");
         exchanges.reset_all();
@@ -348,14 +373,15 @@ mod tests {
             .open_exchange_session(lease, &exchanges, b"request headers")
             .expect("open session");
         let ticket = exchanges.take_offer().expect("offered exchange");
-        let (execution, mut client, start) =
-            pool.accept_exchange_session(&exchanges, ticket).expect("accept session");
+        let (execution, mut client, start) = pool
+            .accept_exchange_session(&exchanges, ticket)
+            .expect("accept session");
         assert_eq!(start.metadata(), b"request headers");
 
         server.sender().data(b"body").expect("request body");
         let body = match client.receiver().try_next().expect("request data") {
             FlowEvent::Data(body) => body,
-            _ => panic!("expected request data")
+            _ => panic!("expected request data"),
         };
         assert_eq!(&*body, b"body");
         drop((start, body, execution));
@@ -370,28 +396,43 @@ mod tests {
         use orbit_stream::exchange::{ExchangeSpec, PayloadArenaSpec};
         use orbit_stream::{Incarnation as StreamIncarnation, StreamSpec};
 
-        let fleet = Arc::new(Fleet::join("pool-exchange-session-full", 1).expect("fleet"));
-        let pool = Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
+        let fleet = Arc::new(
+            Fleet::join("pool-exchange-session-full", 1).expect("fleet"),
+        );
+        let pool =
+            Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
         pool.reset_all();
         let resource = pool.register(crate::Key::new(11), 1).expect("resource");
         let exchanges = Exchanges::open(
             fleet,
             StreamIncarnation::new(1),
-            ExchangeSpec::new(StreamSpec::new(214, 4, 512), PayloadArenaSpec::new(215, 1, 64))
+            ExchangeSpec::new(
+                StreamSpec::new(214, 4, 512),
+                PayloadArenaSpec::new(215, 1, 64),
+            ),
         )
         .expect("exchanges");
         exchanges.reset_all();
 
-        let (mut occupying, _ticket) = exchanges.create().expect("occupying exchange");
-        occupying.sender().start(Some(b"occupied")).expect("occupy the only payload slot");
+        let (mut occupying, _ticket) =
+            exchanges.create().expect("occupying exchange");
+        occupying
+            .sender()
+            .start(Some(b"occupied"))
+            .expect("occupy the only payload slot");
 
         let lease = pool.reserve(resource).expect("lease");
         assert!(matches!(
             pool.open_exchange_session(lease, &exchanges, b"request"),
-            Err(Error::Stream(orbit_stream::Error::PayloadFull { requested_slots: 1 }))
+            Err(Error::Stream(orbit_stream::Error::PayloadFull {
+                requested_slots: 1
+            }))
         ));
         let candidate = pool.candidates(crate::Key::new(11))[0];
-        assert_eq!((candidate.reserved, candidate.active, candidate.free()), (0, 0, 1));
+        assert_eq!(
+            (candidate.reserved, candidate.active, candidate.free()),
+            (0, 0, 1)
+        );
     }
 
     #[test]
@@ -402,15 +443,20 @@ mod tests {
         use orbit_stream::exchange::{ExchangeSpec, PayloadArenaSpec};
         use orbit_stream::{Incarnation as StreamIncarnation, StreamSpec};
 
-        let fleet = Arc::new(Fleet::join("pool-local-session-plan", 1).expect("fleet"));
-        let pool = Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
+        let fleet =
+            Arc::new(Fleet::join("pool-local-session-plan", 1).expect("fleet"));
+        let pool =
+            Pool::new(Arc::clone(&fleet), Incarnation::new(1)).expect("pool");
         pool.reset_all();
         let key = crate::Key::new(10);
         let resource = pool.register(key, 1).expect("resource");
         let exchanges = Exchanges::open(
             fleet,
             StreamIncarnation::new(1),
-            ExchangeSpec::new(StreamSpec::new(212, 4, 512), PayloadArenaSpec::new(213, 8, 64))
+            ExchangeSpec::new(
+                StreamSpec::new(212, 4, 512),
+                PayloadArenaSpec::new(213, 8, 64),
+            ),
         )
         .expect("exchanges");
         exchanges.reset_all();
@@ -421,7 +467,7 @@ mod tests {
                 &Limits { max_live: 1, attempts: 1 },
                 &crate::LocalFirst,
                 &exchanges,
-                b"unused locally"
+                b"unused locally",
             )
             .expect("acquisition");
         let ExchangeSessionPlan::Local(execution) = plan else {

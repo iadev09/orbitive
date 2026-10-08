@@ -20,9 +20,12 @@ compile_error!("orbit-rustls currently requires a Unix target");
 mod session;
 
 #[cfg(all(unix, feature = "rustls_0_24"))]
-pub use session::{CLIENT_SESSION_STATE_KIND, FleetClientSessions, OrbitClientSessionStorage};
+pub use session::{
+    CLIENT_SESSION_STATE_KIND, FleetClientSessions, OrbitClientSessionStorage,
+};
 #[cfg(unix)]
 pub use session::{
-    DEFAULT_SESSION_TTL, FleetServerSessions, MAX_SESSION_TTL, OrbitServerSessionStorage,
-    OrbitSessionStorage, SERVER_SESSION_STATE_KIND, SessionDomain
+    DEFAULT_SESSION_TTL, FleetServerSessions, MAX_SESSION_TTL,
+    OrbitServerSessionStorage, OrbitSessionStorage, SERVER_SESSION_STATE_KIND,
+    SessionDomain,
 };

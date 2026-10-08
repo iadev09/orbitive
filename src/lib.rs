@@ -17,7 +17,8 @@ pub mod core {
 #[cfg(unix)]
 pub use orbit_core::FleetObserver;
 pub use orbit_core::{
-    Error, Fleet, FleetName, InvalidFleetName, Frame, NetId64, NodeId, OrbitEpoch, OrbitTyped, Result, RingSpec
+    Error, Fleet, FleetName, Frame, InvalidFleetName, NetId64, NodeId,
+    OrbitEpoch, OrbitTyped, Result, RingSpec,
 };
 
 pub mod ring {
@@ -93,7 +94,11 @@ pub mod client_pool {
     pub use orbit_client_pool::*;
 }
 
-#[cfg(any(feature = "rustls", feature = "rustls_0_23", feature = "rustls_0_24"))]
+#[cfg(any(
+    feature = "rustls",
+    feature = "rustls_0_23",
+    feature = "rustls_0_24"
+))]
 pub mod rustls {
     pub use orbit_rustls::*;
 }

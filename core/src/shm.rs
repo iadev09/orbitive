@@ -64,7 +64,7 @@ pub enum ShmAccessPolicy {
     /// Owner read/write and selected group read (`0640`).
     GroupRead { gid: u32 },
     /// Owner and selected group read/write (`0660`). Trust every group writer.
-    GroupReadWrite { gid: u32 }
+    GroupReadWrite { gid: u32 },
 }
 
 impl ShmAccessPolicy {
@@ -72,14 +72,14 @@ impl ShmAccessPolicy {
         match self {
             Self::OwnerOnly => 0o600,
             Self::GroupRead { .. } => 0o640,
-            Self::GroupReadWrite { .. } => 0o660
+            Self::GroupReadWrite { .. } => 0o660,
         }
     }
 
     pub const fn gid(self) -> Option<u32> {
         match self {
             Self::OwnerOnly => None,
-            Self::GroupRead { gid } | Self::GroupReadWrite { gid } => Some(gid)
+            Self::GroupRead { gid } | Self::GroupReadWrite { gid } => Some(gid),
         }
     }
 }
@@ -95,7 +95,7 @@ pub enum ShmValidation {
     /// No object currently exists under the requested name.
     Missing,
     /// The object exists and can safely back at least the requested mapping.
-    Valid { actual_size: usize }
+    Valid { actual_size: usize },
 }
 
 /// A mapped POSIX SHM region. Drop unmaps; `unlink` removes the
@@ -115,7 +115,7 @@ pub struct ShmRegion {
     /// True when this handle was the one that *created* the segment
     /// (so it knows to `shm_unlink` if asked). Other attachers see
     /// `false`.
-    created: bool
+    created: bool,
 }
 
 impl ShmRegion {
@@ -130,13 +130,13 @@ impl ShmRegion {
     /// The expected owner is the effective uid and the policy is `OwnerOnly`.
     pub fn validate_existing(
         name: &str,
-        minimum_size: usize
+        minimum_size: usize,
     ) -> io::Result<ShmValidation> {
         Self::validate_existing_with_policy(
             name,
             minimum_size,
             unsafe { libc::geteuid() },
-            ShmAccessPolicy::default()
+            ShmAccessPolicy::default(),
         )
     }
 
@@ -146,15 +146,18 @@ impl ShmRegion {
         name: &str,
         minimum_size: usize,
         owner_uid: u32,
-        policy: ShmAccessPolicy
+        policy: ShmAccessPolicy,
     ) -> io::Result<ShmValidation> {
-        let cname = CString::new(name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
+        let cname = CString::new(name).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte")
+        })?;
         let raw_fd = loop {
             // SAFETY: passing a valid C string and well-known POSIX flags.
             // macOS `shm_open` rejects `O_CLOEXEC` with EINVAL. The descriptor
             // is scoped to this validation call and closes before return.
-            let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0o600) };
+            let fd = unsafe {
+                libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0o600)
+            };
             if fd >= 0 {
                 break fd;
             }
@@ -185,16 +188,19 @@ impl ShmRegion {
         name: &str,
         minimum_size: usize,
         owner_uid: u32,
-        policy: ShmAccessPolicy
+        policy: ShmAccessPolicy,
     ) -> io::Result<Self> {
-        let cname = CString::new(name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
+        let cname = CString::new(name).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte")
+        })?;
         let raw_fd = loop {
             // SAFETY: passing a valid C string and read-only POSIX flags.
             // macOS `shm_open` rejects `O_CLOEXEC` with EINVAL. This
             // descriptor closes immediately after `mmap`, before the view is
             // returned, so it cannot leak across a later exec.
-            let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0o600) };
+            let fd = unsafe {
+                libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0o600)
+            };
             if fd >= 0 {
                 break fd;
             }
@@ -221,14 +227,15 @@ impl ShmRegion {
                 libc::PROT_READ,
                 libc::MAP_SHARED,
                 fd.as_raw_fd(),
-                0
+                0,
             )
         };
         if ptr == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: mmap returned a non-null pointer (checked above).
-        let ptr = NonNull::new(ptr.cast::<u8>()).expect("mmap returned non-null on success");
+        let ptr = NonNull::new(ptr.cast::<u8>())
+            .expect("mmap returned non-null on success");
 
         Ok(Self {
             lock_path: lock_file_path(name),
@@ -236,7 +243,7 @@ impl ShmRegion {
             process_lock: false,
             ptr,
             len: actual_size,
-            created: false
+            created: false,
         })
     }
 
@@ -250,7 +257,7 @@ impl ShmRegion {
     /// Existing objects must belong to the effective uid and satisfy `OwnerOnly`.
     pub fn open_or_create(
         name: &str,
-        size: usize
+        size: usize,
     ) -> io::Result<Self> {
         Self::open_or_create_with_policy(name, size, ShmAccessPolicy::default())
     }
@@ -261,9 +268,10 @@ impl ShmRegion {
     pub fn open_or_create_with_policy(
         name: &str,
         size: usize,
-        policy: ShmAccessPolicy
+        policy: ShmAccessPolicy,
     ) -> io::Result<Self> {
-        let (region, initialization_lock) = Self::open_or_create_inner(name, size, false, policy)?;
+        let (region, initialization_lock) =
+            Self::open_or_create_inner(name, size, false, policy)?;
         debug_assert!(initialization_lock.is_none());
         Ok(region)
     }
@@ -273,9 +281,13 @@ impl ShmRegion {
     /// between `shm_open` and the owning data structure's initialized header.
     pub fn open_or_create_locked(
         name: &str,
-        size: usize
+        size: usize,
     ) -> io::Result<(Self, ShmRegionLock)> {
-        Self::open_or_create_locked_with_policy(name, size, ShmAccessPolicy::default())
+        Self::open_or_create_locked_with_policy(
+            name,
+            size,
+            ShmAccessPolicy::default(),
+        )
     }
 
     /// Policy-aware creation with the existing owner-local initialization lock.
@@ -283,12 +295,14 @@ impl ShmRegion {
     pub fn open_or_create_locked_with_policy(
         name: &str,
         size: usize,
-        policy: ShmAccessPolicy
+        policy: ShmAccessPolicy,
     ) -> io::Result<(Self, ShmRegionLock)> {
-        let (region, initialization_lock) = Self::open_or_create_inner(name, size, true, policy)?;
+        let (region, initialization_lock) =
+            Self::open_or_create_inner(name, size, true, policy)?;
         Ok((
             region,
-            initialization_lock.expect("locked SHM open must return its initialization lock")
+            initialization_lock
+                .expect("locked SHM open must return its initialization lock"),
         ))
     }
 
@@ -296,18 +310,23 @@ impl ShmRegion {
         name: &str,
         size: usize,
         process_lock: bool,
-        policy: ShmAccessPolicy
+        policy: ShmAccessPolicy,
     ) -> io::Result<(Self, Option<ShmRegionLock>)> {
-        let cname = CString::new(name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
+        let cname = CString::new(name).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte")
+        })?;
         let lock_path = lock_file_path(name);
-        let initialization_lock =
-            if process_lock { Some(lock_path_exclusive(&lock_path)?) } else { None };
+        let initialization_lock = if process_lock {
+            Some(lock_path_exclusive(&lock_path)?)
+        } else {
+            None
+        };
 
         // Darwin cannot fchmod/fchown a POSIX SHM descriptor. Grant only the
         // intended group at creation; attaching a matching existing object is OK.
         #[cfg(target_os = "macos")]
-        let can_create = policy.gid().is_none_or(|gid| gid == unsafe { libc::getegid() });
+        let can_create =
+            policy.gid().is_none_or(|gid| gid == unsafe { libc::getegid() });
         #[cfg(target_os = "macos")]
         let creation_mode = policy.mode();
         // Elsewhere, don't expose the object to its initial group before chown.
@@ -320,7 +339,7 @@ impl ShmRegion {
                 libc::shm_open(
                     cname.as_ptr(),
                     libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                    creation_mode
+                    creation_mode,
                 )
             } else {
                 libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0)
@@ -333,7 +352,7 @@ impl ShmRegion {
                 if !can_create && err.raw_os_error() == Some(libc::ENOENT) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "creating group-shared SHM requires the selected effective gid"
+                        "creating group-shared SHM requires the selected effective gid",
                     ));
                 }
                 if err.raw_os_error() != Some(libc::EEXIST) {
@@ -369,7 +388,8 @@ impl ShmRegion {
         // Size the segment on first creation.
         if created {
             // SAFETY: fd is a valid POSIX fd we just received.
-            let rc = unsafe { libc::ftruncate(fd.as_raw_fd(), size as libc::off_t) };
+            let rc =
+                unsafe { libc::ftruncate(fd.as_raw_fd(), size as libc::off_t) };
             if rc != 0 {
                 let err = io::Error::last_os_error();
                 let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
@@ -406,7 +426,7 @@ impl ShmRegion {
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
                 fd.as_raw_fd(),
-                0
+                0,
             )
         };
 
@@ -419,11 +439,19 @@ impl ShmRegion {
         }
 
         // SAFETY: mmap returned a non-null pointer (we just checked).
-        let ptr = NonNull::new(ptr.cast::<u8>()).expect("mmap returned non-null on success");
+        let ptr = NonNull::new(ptr.cast::<u8>())
+            .expect("mmap returned non-null on success");
 
         Ok((
-            Self { name: cname, lock_path, process_lock, ptr, len: size, created },
-            initialization_lock
+            Self {
+                name: cname,
+                lock_path,
+                process_lock,
+                ptr,
+                len: size,
+                created,
+            },
+            initialization_lock,
         ))
     }
 
@@ -456,7 +484,7 @@ impl ShmRegion {
         if !self.process_lock {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "SHM region was opened without a process lock"
+                "SHM region was opened without a process lock",
             ));
         }
         lock_path_exclusive(&self.lock_path)
@@ -467,12 +495,18 @@ impl ShmRegion {
         if !self.process_lock {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "SHM region was opened without a process lock"
+                "SHM region was opened without a process lock",
             ));
         }
         let lock_fd = open_lock_file(&self.lock_path)?;
-        let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 { Ok(ShmRegionLock { lock_fd }) } else { Err(io::Error::last_os_error()) }
+        let rc = unsafe {
+            libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+        };
+        if rc == 0 {
+            Ok(ShmRegionLock { lock_fd })
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     /// Remove the underlying segment name. Existing mappings stay
@@ -484,14 +518,18 @@ impl ShmRegion {
         let shm_error = if rc != 0 {
             let err = io::Error::last_os_error();
             // ENOENT is fine — segment was already unlinked.
-            if err.raw_os_error() == Some(libc::ENOENT) { None } else { Some(err) }
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                None
+            } else {
+                Some(err)
+            }
         } else {
             None
         };
         let mut lock_error = match std::fs::remove_file(&self.lock_path) {
             Ok(()) => None,
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => Some(error)
+            Err(error) => Some(error),
         };
         let name = self.name.to_string_lossy();
         // SAFETY: a plain syscall with no arguments.
@@ -520,13 +558,16 @@ impl ShmRegion {
 #[cfg(not(target_os = "macos"))]
 fn configure_new_shm(
     fd: &OwnedFd,
-    policy: ShmAccessPolicy
+    policy: ShmAccessPolicy,
 ) -> io::Result<()> {
     let Some(gid) = policy.gid() else {
         return Ok(());
     };
     if gid == !0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid SHM group id"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid SHM group id",
+        ));
     }
     // SAFETY: this is our new, still owner-only object. Preserve its uid.
     if unsafe { libc::fchown(fd.as_raw_fd(), !0, gid) } != 0 {
@@ -543,7 +584,7 @@ fn shm_object_size(
     fd: &OwnedFd,
     name: &str,
     owner_uid: u32,
-    policy: ShmAccessPolicy
+    policy: ShmAccessPolicy,
 ) -> io::Result<usize> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `fd` is valid and `stat` points to writable storage.
@@ -562,14 +603,14 @@ fn shm_object_size(
             io::ErrorKind::PermissionDenied,
             format!(
                 "SHM segment {name} owner/group/mode do not satisfy {policy:?} for uid {owner_uid}"
-            )
+            ),
         ));
     }
     let actual_size = stat.st_size;
     usize::try_from(actual_size).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("SHM segment {name} reported invalid size {actual_size}")
+            format!("SHM segment {name} reported invalid size {actual_size}"),
         )
     })
 }
@@ -577,14 +618,14 @@ fn shm_object_size(
 fn validate_minimum_size(
     name: &str,
     actual_size: usize,
-    minimum_size: usize
+    minimum_size: usize,
 ) -> io::Result<()> {
     if actual_size < minimum_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "SHM segment {name} size {actual_size} is smaller than requested mapping {minimum_size}"
-            )
+            ),
         ));
     }
     Ok(())
@@ -595,7 +636,7 @@ fn validate_minimum_size(
 /// Semantic crates use this when a current-state transition must be atomic
 /// across fleet processes. Dropping the guard releases the kernel lock.
 pub struct ShmRegionLock {
-    lock_fd: OwnedFd
+    lock_fd: OwnedFd,
 }
 
 impl Drop for ShmRegionLock {
@@ -631,7 +672,10 @@ fn open_lock_file(lock_path: &Path) -> io::Result<OwnedFd> {
     if owner != uid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{} is owned by uid {owner} rather than {uid}", lock_path.display())
+            format!(
+                "{} is owned by uid {owner} rather than {uid}",
+                lock_path.display()
+            ),
         ));
     }
 
@@ -669,7 +713,7 @@ unsafe impl Sync for ShmRegion {}
 /// Build the conventional name for an Orbit ring segment.
 pub fn ring_segment_name(
     fleet_name: &str,
-    kind: u8
+    kind: u8,
 ) -> String {
     // SAFETY: `geteuid` always returns a value; no error path.
     let uid = unsafe { libc::geteuid() };
@@ -683,7 +727,7 @@ pub fn ring_segment_name(
 pub fn ring_segment_name_for_uid(
     fleet_name: &str,
     kind: u8,
-    uid: u32
+    uid: u32,
 ) -> String {
     format!("/{SHM_NAMESPACE}-{fleet_name}-{kind}-{uid}")
 }
@@ -697,7 +741,7 @@ pub fn fleet_lock_path(fleet_name: &str) -> PathBuf {
 /// other than their own.
 pub fn fleet_lock_path_for_uid(
     fleet_name: &str,
-    uid: u32
+    uid: u32,
 ) -> PathBuf {
     lock_dir_for_uid(uid).join(format!("{SHM_NAMESPACE}-{fleet_name}.fleet"))
 }
@@ -708,7 +752,7 @@ pub fn fleet_lock_path_for_uid(
 /// contends with, so a tool that removes the fleet's segments cannot do so
 /// while any member is alive.
 pub struct FleetMembership {
-    lock_fd: OwnedFd
+    lock_fd: OwnedFd,
 }
 
 impl Drop for FleetMembership {
@@ -737,13 +781,15 @@ pub fn join_fleet_membership(fleet_name: &str) -> io::Result<FleetMembership> {
 /// cannot interleave with a start. Never waits.
 pub fn try_lock_fleet_exclusive(
     fleet_name: &str,
-    uid: u32
+    uid: u32,
 ) -> io::Result<Option<ShmRegionLock>> {
     // Creating the file when no member ever joined is right: the guard then
     // keeps a first member from starting in the middle of a removal.
     let lock_fd = open_lock_file(&fleet_lock_path_for_uid(fleet_name, uid))?;
     // SAFETY: `lock_fd` is an open descriptor owned by this call.
-    let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    let rc = unsafe {
+        libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+    };
     if rc == 0 {
         return Ok(Some(ShmRegionLock { lock_fd }));
     }
@@ -762,7 +808,7 @@ pub fn try_lock_fleet_exclusive(
 /// a PID, which another PID namespace would read wrongly: a hold that can be
 /// taken has nobody behind it.
 pub struct LaneHold {
-    lock_fd: OwnedFd
+    lock_fd: OwnedFd,
 }
 
 impl Drop for LaneHold {
@@ -776,12 +822,14 @@ impl Drop for LaneHold {
 /// `Ok(None)` means a process holding it is alive. Never waits.
 pub fn try_hold_lane(
     shm_name: &str,
-    lane: usize
+    lane: usize,
 ) -> io::Result<Option<LaneHold>> {
     let name = format!("{}.lane{lane}", shm_name.trim_start_matches('/'));
     let lock_fd = open_lock_file(&lock_file_path(&name))?;
     // SAFETY: `lock_fd` is an open descriptor owned by this call.
-    let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    let rc = unsafe {
+        libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+    };
     if rc == 0 {
         return Ok(Some(LaneHold { lock_fd }));
     }
@@ -798,7 +846,7 @@ pub fn try_hold_lane(
 /// one more file per lane for every segment that ever existed.
 pub fn companion_lock_files(
     shm_name: &str,
-    uid: u32
+    uid: u32,
 ) -> io::Result<Vec<PathBuf>> {
     let base = shm_name.trim_start_matches('/');
     let own = format!("{base}.lock");
@@ -806,8 +854,10 @@ pub fn companion_lock_files(
     let dir = lock_dir_for_uid(uid);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error)
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
     };
     let mut found = Vec::new();
     for entry in entries {
@@ -875,7 +925,7 @@ fn ensure_lock_dir(dir: &Path) -> io::Result<()> {
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error)
+        Err(error) => return Err(error),
     }
 
     ensure_private_dir(dir, uid)
@@ -888,7 +938,7 @@ fn ensure_lock_dir(dir: &Path) -> io::Result<()> {
 /// attacker chose.
 fn ensure_private_dir(
     dir: &Path,
-    uid: u32
+    uid: u32,
 ) -> io::Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -896,7 +946,7 @@ fn ensure_private_dir(
     if !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{} is not a directory", dir.display())
+            format!("{} is not a directory", dir.display()),
         ));
     }
     if metadata.uid() != uid {
@@ -907,7 +957,7 @@ fn ensure_private_dir(
                  another user controls",
                 dir.display(),
                 metadata.uid()
-            )
+            ),
         ));
     }
     if metadata.permissions().mode() & 0o077 != 0 {
@@ -917,7 +967,7 @@ fn ensure_private_dir(
                 "{} is mode {:o}; refusing to lock in a directory others can write to",
                 dir.display(),
                 metadata.permissions().mode() & 0o777
-            )
+            ),
         ));
     }
 
@@ -944,6 +994,7 @@ mod fleet_lock_tests {
         // And a member cannot join while a removal holds the fleet: the
         // shared lock would block, which is the behaviour, not a test to run.
         drop(exclusive);
-        let _ = std::fs::remove_file(super::fleet_lock_path_for_uid(&fleet, uid));
+        let _ =
+            std::fs::remove_file(super::fleet_lock_path_for_uid(&fleet, uid));
     }
 }

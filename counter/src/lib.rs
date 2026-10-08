@@ -26,14 +26,18 @@ pub const COUNTER_STATE_KIND: u8 = 230;
 /// Compile-time geometry: `ORBIT_COUNTER_CAPACITY` in the application's
 /// `.cargo/config.toml` overrides the default. Must be a power of two. Peers
 /// built with a different value are refused when they open the table.
-pub const COUNTER_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_COUNTER_CAPACITY"), 1_024);
+pub const COUNTER_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_COUNTER_CAPACITY"),
+    1_024,
+);
 /// Maximum counter key length in bytes.
 ///
 /// Compile-time geometry: `ORBIT_COUNTER_KEY_MAX`. It sizes every slot, so it
 /// is part of the same wire contract as the capacity.
-pub const COUNTER_KEY_MAX: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_COUNTER_KEY_MAX"), 240);
+pub const COUNTER_KEY_MAX: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_COUNTER_KEY_MAX"),
+    240,
+);
 
 const SLOT_EMPTY: u8 = 0;
 const SLOT_OCCUPIED: u8 = 1;
@@ -41,7 +45,7 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 #[cfg(unix)]
-const STATE_MAGIC: u32 = 0x43_43_4E_54; // "CCNT"
+const STATE_MAGIC: u32 = 0x43_43_4e_54; // "CCNT"
 #[cfg(unix)]
 const STATE_VERSION: u16 = 1;
 
@@ -58,13 +62,13 @@ pub enum Error {
     NegativeAmount(i64),
     Overflow,
     StateFull { capacity: usize },
-    Io(std::io::Error)
+    Io(std::io::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         match self {
             Self::KeyEmpty => f.write_str("counter key must not be empty"),
@@ -74,11 +78,13 @@ impl fmt::Display for Error {
             Self::NegativeAmount(value) => {
                 write!(f, "counter amount must not be negative: {value}")
             }
-            Self::Overflow => f.write_str("counter value is outside the signed 64-bit range"),
+            Self::Overflow => {
+                f.write_str("counter value is outside the signed 64-bit range")
+            }
             Self::StateFull { capacity } => {
                 write!(f, "counter state table is full: capacity={capacity}")
             }
-            Self::Io(error) => write!(f, "Orbit counter io error: {error}")
+            Self::Io(error) => write!(f, "Orbit counter io error: {error}"),
         }
     }
 }
@@ -87,7 +93,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -105,14 +111,14 @@ impl From<std::io::Error> for Error {
 /// or atomically returns an existing value to zero.
 #[derive(Clone)]
 pub struct Counter {
-    backend: CounterBackend
+    backend: CounterBackend,
 }
 
 #[derive(Clone)]
 enum CounterBackend {
     InMemory(Arc<MemoryCounterTable>),
     #[cfg(unix)]
-    Shm(Arc<ShmCounterTable>)
+    Shm(Arc<ShmCounterTable>),
 }
 
 impl Counter {
@@ -120,10 +126,9 @@ impl Counter {
         let backend = if fleet.is_shm() {
             #[cfg(unix)]
             {
-                CounterBackend::Shm(Arc::new(ShmCounterTable::open_or_create(&ring_segment_name(
-                    fleet.name(),
-                    COUNTER_STATE_KIND
-                ))?))
+                CounterBackend::Shm(Arc::new(ShmCounterTable::open_or_create(
+                    &ring_segment_name(fleet.name(), COUNTER_STATE_KIND),
+                )?))
             }
             #[cfg(not(unix))]
             unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -135,7 +140,7 @@ impl Counter {
 
     pub fn get(
         &self,
-        key: &str
+        key: &str,
     ) -> Result<Option<i64>> {
         validate_key(key)?;
         let hash = counter_hash(key.as_bytes());
@@ -146,15 +151,17 @@ impl Counter {
                     .map(|slot| slot.value.load(Ordering::Acquire)))
             }
             #[cfg(unix)]
-            CounterBackend::Shm(table) => Ok(find_slot(table.slots(), hash, key.as_bytes())
-                .map(|slot| slot.value.load(Ordering::Acquire)))
+            CounterBackend::Shm(table) => {
+                Ok(find_slot(table.slots(), hash, key.as_bytes())
+                    .map(|slot| slot.value.load(Ordering::Acquire)))
+            }
         }
     }
 
     pub fn increment(
         &self,
         key: &str,
-        by: i64
+        by: i64,
     ) -> Result<i64> {
         validate_amount(by)?;
         self.update(key, by)
@@ -163,7 +170,7 @@ impl Counter {
     pub fn decrement(
         &self,
         key: &str,
-        by: i64
+        by: i64,
     ) -> Result<i64> {
         validate_amount(by)?;
         self.update(key, -by)
@@ -172,7 +179,7 @@ impl Counter {
     /// Atomically set a key to zero, installing it when necessary.
     pub fn reset(
         &self,
-        key: &str
+        key: &str,
     ) -> Result<()> {
         validate_key(key)?;
         let hash = counter_hash(key.as_bytes());
@@ -183,11 +190,15 @@ impl Counter {
             }
             #[cfg(unix)]
             CounterBackend::Shm(table) => {
-                if let Some(slot) = find_slot(table.slots(), hash, key.as_bytes()) {
+                if let Some(slot) =
+                    find_slot(table.slots(), hash, key.as_bytes())
+                {
                     slot.value.store(0, Ordering::Release);
                     return Ok(());
                 }
-                table.with_structure(|slots| reset_or_install(slots, hash, key.as_bytes()))
+                table.with_structure(|slots| {
+                    reset_or_install(slots, hash, key.as_bytes())
+                })
             }
         }
     }
@@ -204,7 +215,7 @@ impl Counter {
             CounterBackend::Shm(table) => table.with_structure(|slots| {
                 clear_slots(slots);
                 Ok(())
-            })
+            }),
         }
     }
 
@@ -214,14 +225,16 @@ impl Counter {
     pub fn unlink(&self) -> Result<()> {
         match &self.backend {
             CounterBackend::InMemory(_) => self.reset_all(),
-            CounterBackend::Shm(table) => table.region.unlink().map_err(Error::Io)
+            CounterBackend::Shm(table) => {
+                table.region.unlink().map_err(Error::Io)
+            }
         }
     }
 
     fn update(
         &self,
         key: &str,
-        delta: i64
+        delta: i64,
     ) -> Result<i64> {
         validate_key(key)?;
         let hash = counter_hash(key.as_bytes());
@@ -232,10 +245,14 @@ impl Counter {
             }
             #[cfg(unix)]
             CounterBackend::Shm(table) => {
-                if let Some(slot) = find_slot(table.slots(), hash, key.as_bytes()) {
+                if let Some(slot) =
+                    find_slot(table.slots(), hash, key.as_bytes())
+                {
                     return update_value(slot, delta);
                 }
-                table.with_structure(|slots| update_or_install(slots, hash, key.as_bytes(), delta))
+                table.with_structure(|slots| {
+                    update_or_install(slots, hash, key.as_bytes(), delta)
+                })
             }
         }
     }
@@ -245,7 +262,7 @@ fn update_or_install(
     slots: &[CounterSlot],
     hash: u64,
     key: &[u8],
-    delta: i64
+    delta: i64,
 ) -> Result<i64> {
     for offset in 0..slots.len() {
         let index = probe_index(hash, offset, slots.len());
@@ -255,7 +272,9 @@ fn update_or_install(
                 slot.install(hash, key, delta);
                 return Ok(delta);
             }
-            SLOT_OCCUPIED if slot.matches(hash, key) => return update_value(slot, delta),
+            SLOT_OCCUPIED if slot.matches(hash, key) => {
+                return update_value(slot, delta);
+            }
             _ => {}
         }
     }
@@ -265,7 +284,7 @@ fn update_or_install(
 fn find_slot<'a>(
     slots: &'a [CounterSlot],
     hash: u64,
-    key: &[u8]
+    key: &[u8],
 ) -> Option<&'a CounterSlot> {
     for offset in 0..slots.len() {
         let slot = &slots[probe_index(hash, offset, slots.len())];
@@ -281,7 +300,7 @@ fn find_slot<'a>(
 fn reset_or_install(
     slots: &[CounterSlot],
     hash: u64,
-    key: &[u8]
+    key: &[u8],
 ) -> Result<()> {
     for offset in 0..slots.len() {
         let index = probe_index(hash, offset, slots.len());
@@ -310,10 +329,12 @@ fn clear_slots(slots: &[CounterSlot]) {
 
 fn update_value(
     slot: &CounterSlot,
-    delta: i64
+    delta: i64,
 ) -> Result<i64> {
     slot.value
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| current.checked_add(delta))
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(delta)
+        })
         .map(|previous| previous + delta)
         .map_err(|_| Error::Overflow)
 }
@@ -323,7 +344,10 @@ fn validate_key(key: &str) -> Result<()> {
         return Err(Error::KeyEmpty);
     }
     if key.len() > COUNTER_KEY_MAX {
-        return Err(Error::KeyTooLarge { len: key.len(), max: COUNTER_KEY_MAX });
+        return Err(Error::KeyTooLarge {
+            len: key.len(),
+            max: COUNTER_KEY_MAX,
+        });
     }
     Ok(())
 }
@@ -347,7 +371,7 @@ fn counter_hash(key: &[u8]) -> u64 {
 fn probe_index(
     hash: u64,
     offset: usize,
-    capacity: usize
+    capacity: usize,
 ) -> usize {
     debug_assert!(capacity.is_power_of_two());
     (hash as usize).wrapping_add(offset) & (capacity - 1)
@@ -361,14 +385,16 @@ struct MemoryCounterTable {
     /// Held so the fleet's address, which keys the registry, cannot be
     /// reused by another fleet while this table lives.
     _fleet: Arc<Fleet>,
-    slots: Mutex<Vec<CounterSlot>>
+    slots: Mutex<Vec<CounterSlot>>,
 }
 
 impl MemoryCounterTable {
     fn new(fleet: Arc<Fleet>) -> Self {
         Self {
             _fleet: fleet,
-            slots: Mutex::new((0..COUNTER_CAPACITY).map(|_| CounterSlot::empty()).collect())
+            slots: Mutex::new(
+                (0..COUNTER_CAPACITY).map(|_| CounterSlot::empty()).collect(),
+            ),
         }
     }
 }
@@ -402,7 +428,7 @@ struct CounterStateHeader {
     header_size: u16,
     capacity: u32,
     slot_size: u32,
-    _reserved: [u8; 48]
+    _reserved: [u8; 48],
 }
 
 impl CounterStateHeader {
@@ -419,7 +445,7 @@ impl CounterStateHeader {
             header_size: size_of::<Self>() as u16,
             capacity: COUNTER_CAPACITY as u32,
             slot_size: size_of::<CounterSlot>() as u32,
-            _reserved: [0; 48]
+            _reserved: [0; 48],
         }
     }
 }
@@ -444,7 +470,7 @@ struct CounterSlot {
     value: AtomicI64,
     key_len: AtomicU16,
     _padding: [u8; 6],
-    key: [AtomicU8; COUNTER_KEY_MAX]
+    key: [AtomicU8; COUNTER_KEY_MAX],
 }
 
 impl CounterSlot {
@@ -456,14 +482,14 @@ impl CounterSlot {
             value: AtomicI64::new(0),
             key_len: AtomicU16::new(0),
             _padding: [0; 6],
-            key: std::array::from_fn(|_| AtomicU8::new(0))
+            key: std::array::from_fn(|_| AtomicU8::new(0)),
         }
     }
 
     fn matches(
         &self,
         hash: u64,
-        key: &[u8]
+        key: &[u8],
     ) -> bool {
         // The `Acquire` on `state` is what publishes the fields below: `install`
         // writes them and then releases `state`, so a slot seen as occupied has
@@ -471,10 +497,11 @@ impl CounterSlot {
         self.state.load(Ordering::Acquire) == SLOT_OCCUPIED
             && self.key_hash.load(Ordering::Relaxed) == hash
             && usize::from(self.key_len.load(Ordering::Relaxed)) == key.len()
-            && self.key[..key.len()]
-                .iter()
-                .zip(key)
-                .all(|(stored, expected)| stored.load(Ordering::Relaxed) == *expected)
+            && self.key[..key.len()].iter().zip(key).all(
+                |(stored, expected)| {
+                    stored.load(Ordering::Relaxed) == *expected
+                },
+            )
     }
 
     /// Takes `&self`, not `&mut self`: callers hold the structural lock, which
@@ -484,7 +511,7 @@ impl CounterSlot {
         &self,
         hash: u64,
         key: &[u8],
-        value: i64
+        value: i64,
     ) {
         debug_assert!(key.len() <= COUNTER_KEY_MAX);
         self.key_hash.store(hash, Ordering::Relaxed);
@@ -501,7 +528,7 @@ impl CounterSlot {
 #[cfg(unix)]
 struct ShmCounterTable {
     region: ShmRegion,
-    structural_lock: Mutex<()>
+    structural_lock: Mutex<()>,
 }
 
 #[cfg(unix)]
@@ -513,29 +540,41 @@ impl ShmCounterTable {
             ShmRegion::open_or_create_locked(name, shm_segment_size())?;
         if region.created() {
             unsafe {
-                ptr::write(region.as_ptr().cast::<CounterStateHeader>(), CounterStateHeader::new());
-                let slots = region.as_ptr().add(size_of::<CounterStateHeader>());
-                ptr::write_bytes(slots, 0, COUNTER_CAPACITY * size_of::<CounterSlot>());
+                ptr::write(
+                    region.as_ptr().cast::<CounterStateHeader>(),
+                    CounterStateHeader::new(),
+                );
+                let slots =
+                    region.as_ptr().add(size_of::<CounterStateHeader>());
+                ptr::write_bytes(
+                    slots,
+                    0,
+                    COUNTER_CAPACITY * size_of::<CounterSlot>(),
+                );
             }
         } else {
-            let header = unsafe { &*region.as_ptr().cast::<CounterStateHeader>() };
+            let header =
+                unsafe { &*region.as_ptr().cast::<CounterStateHeader>() };
             if header.magic != STATE_MAGIC {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
                         "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{STATE_MAGIC:08X})",
                         header.magic
-                    )
+                    ),
                 )));
             }
             if header.version != STATE_VERSION
-                || usize::from(header.header_size) != size_of::<CounterStateHeader>()
+                || usize::from(header.header_size)
+                    != size_of::<CounterStateHeader>()
                 || header.capacity as usize != COUNTER_CAPACITY
                 || header.slot_size as usize != size_of::<CounterSlot>()
             {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("SHM segment {name} has an incompatible counter-state layout")
+                    format!(
+                        "SHM segment {name} has an incompatible counter-state layout"
+                    ),
                 )));
             }
         }
@@ -546,15 +585,18 @@ impl ShmCounterTable {
     fn slots(&self) -> &[CounterSlot] {
         unsafe {
             std::slice::from_raw_parts(
-                self.region.as_ptr().add(size_of::<CounterStateHeader>()).cast::<CounterSlot>(),
-                COUNTER_CAPACITY
+                self.region
+                    .as_ptr()
+                    .add(size_of::<CounterStateHeader>())
+                    .cast::<CounterSlot>(),
+                COUNTER_CAPACITY,
             )
         }
     }
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[CounterSlot]) -> Result<T>
+        operation: impl FnOnce(&[CounterSlot]) -> Result<T>,
     ) -> Result<T> {
         let _local = lock_unpoisoned(&self.structural_lock);
         let _process = self.region.lock_exclusive()?;
@@ -567,11 +609,15 @@ impl ShmCounterTable {
 
 #[cfg(unix)]
 fn shm_segment_size() -> usize {
-    size_of::<CounterStateHeader>() + COUNTER_CAPACITY * size_of::<CounterSlot>()
+    size_of::<CounterStateHeader>()
+        + COUNTER_CAPACITY * size_of::<CounterSlot>()
 }
 
 const _: () = assert!(COUNTER_CAPACITY.is_power_of_two());
-const _: () = assert!(COUNTER_KEY_MAX > 0 && COUNTER_KEY_MAX <= u16::MAX as usize);
+const _: () =
+    assert!(COUNTER_KEY_MAX > 0 && COUNTER_KEY_MAX <= u16::MAX as usize);
 const _: () = assert!(size_of::<CounterStateHeader>() == 64);
 // 32 bytes of fixed fields, then the key, padded to the 64-byte slot alignment.
-const _: () = assert!(size_of::<CounterSlot>() == (32 + COUNTER_KEY_MAX).next_multiple_of(64));
+const _: () = assert!(
+    size_of::<CounterSlot>() == (32 + COUNTER_KEY_MAX).next_multiple_of(64)
+);

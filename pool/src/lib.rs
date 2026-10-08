@@ -43,10 +43,14 @@ mod table;
 
 pub use layout::PENDING_RESERVATIONS;
 use layout::{
-    GENERATION_MASK, RESOURCE_DRAINING, RESOURCE_LIVE, ResourceSlot, SLOT_BITS, SLOT_MASK,
-    pack_counts, unpack_counts
+    GENERATION_MASK, RESOURCE_DRAINING, RESOURCE_LIVE, ResourceSlot, SLOT_BITS,
+    SLOT_MASK, pack_counts, unpack_counts,
 };
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 pub use orbit_core::readiness::Readiness;
 pub use policy::{Decision, Limits, LocalFirst, LocalOnly, Policy, Reason};
 #[cfg(feature = "pool-stream")]
@@ -62,15 +66,20 @@ pub const POOL_KIND: u8 = 247;
 /// Compile-time geometry: `ORBIT_POOL_KEY_CAPACITY`, a power of two. It is
 /// the *default* pool's value; a [`PoolSpec`] gives another pool another
 /// one.
-pub const POOL_KEY_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_POOL_KEY_CAPACITY"), 256);
+pub const POOL_KEY_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_POOL_KEY_CAPACITY"),
+    256,
+);
 /// Resources one fleet node can have registered at once, in the default
 /// spec.
 ///
 /// Compile-time geometry: `ORBIT_POOL_RESOURCE_LANE_CAPACITY`, a power of
 /// two, at most 65 536; a [`PoolSpec`] gives another pool another one.
 pub const POOL_RESOURCE_LANE_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_POOL_RESOURCE_LANE_CAPACITY"), 256);
+    orbit_core::compile::usize_from_env(
+        option_env!("ORBIT_POOL_RESOURCE_LANE_CAPACITY"),
+        256,
+    );
 
 /// Which segment a [`Pool`] uses, and how big it is.
 ///
@@ -94,23 +103,24 @@ pub struct PoolSpec {
     fleet_availability: bool,
     /// Track fleet-wide request admission for one key.
     /// Off by default so existing pool-table kinds keep their wire contract.
-    fleet_concurrency: bool
+    fleet_concurrency: bool,
 }
 
 impl PoolSpec {
-    pub const DEFAULT: Self = Self::new(POOL_KIND, POOL_KEY_CAPACITY, POOL_RESOURCE_LANE_CAPACITY);
+    pub const DEFAULT: Self =
+        Self::new(POOL_KIND, POOL_KEY_CAPACITY, POOL_RESOURCE_LANE_CAPACITY);
 
     pub const fn new(
         kind: u8,
         key_capacity: usize,
-        lane_capacity: usize
+        lane_capacity: usize,
     ) -> Self {
         Self {
             kind,
             key_capacity,
             lane_capacity,
             fleet_availability: false,
-            fleet_concurrency: false
+            fleet_concurrency: false,
         }
     }
 
@@ -185,7 +195,7 @@ pub enum Error {
     /// the limit the caller gave.
     CreationBudget {
         key: Key,
-        max_live: u32
+        max_live: u32,
     },
     /// This table's spec did not opt into fleet-wide free-unit accounting.
     AvailabilityDisabled,
@@ -194,52 +204,74 @@ pub enum Error {
     /// The key already has the declared number of admitted requests.
     ConcurrencyLimit {
         key: Key,
-        max_concurrency: u32
+        max_concurrency: u32,
     },
     /// Every key slot is taken.
     KeyFull {
-        capacity: usize
+        capacity: usize,
     },
     /// Every resource slot in this process's lane is taken.
     Full {
-        capacity: usize
+        capacity: usize,
     },
     Malformed(String),
     /// The rendezvous transport could not carry a reserved lease.
     #[cfg(feature = "pool-stream")]
     Stream(orbit_stream::Error),
-    Io(io::Error)
+    Io(io::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         match self {
             Self::Stale(id) => write!(f, "resource {id} has ended"),
             Self::Busy(id) => write!(f, "resource {id} has no capacity left"),
             Self::Draining(id) => write!(f, "resource {id} is draining"),
-            Self::NotOwner(id) => write!(f, "resource {id} belongs to another node"),
+            Self::NotOwner(id) => {
+                write!(f, "resource {id} belongs to another node")
+            }
             Self::NotReserved(lease) => {
-                write!(f, "lease {} on {} is not an unaccepted reservation", lease.fence, lease.id)
+                write!(
+                    f,
+                    "lease {} on {} is not an unaccepted reservation",
+                    lease.fence, lease.id
+                )
             }
             Self::CreationBudget { key, max_live } => {
-                write!(f, "creation budget for {key} is spent: max_live={max_live}")
+                write!(
+                    f,
+                    "creation budget for {key} is spent: max_live={max_live}"
+                )
             }
             Self::AvailabilityDisabled => {
                 f.write_str("pool spec does not track fleet availability")
             }
-            Self::ConcurrencyDisabled => f.write_str("pool spec does not track fleet concurrency"),
-            Self::ConcurrencyLimit { key, max_concurrency } => {
-                write!(f, "concurrency limit for {key} is spent: max_concurrency={max_concurrency}")
+            Self::ConcurrencyDisabled => {
+                f.write_str("pool spec does not track fleet concurrency")
             }
-            Self::KeyFull { capacity } => write!(f, "pool key table is full: capacity={capacity}"),
-            Self::Full { capacity } => write!(f, "pool lane is full: capacity={capacity}"),
-            Self::Malformed(text) => write!(f, "not a pool resource id: {text:?}"),
+            Self::ConcurrencyLimit { key, max_concurrency } => {
+                write!(
+                    f,
+                    "concurrency limit for {key} is spent: max_concurrency={max_concurrency}"
+                )
+            }
+            Self::KeyFull { capacity } => {
+                write!(f, "pool key table is full: capacity={capacity}")
+            }
+            Self::Full { capacity } => {
+                write!(f, "pool lane is full: capacity={capacity}")
+            }
+            Self::Malformed(text) => {
+                write!(f, "not a pool resource id: {text:?}")
+            }
             #[cfg(feature = "pool-stream")]
-            Self::Stream(error) => write!(f, "Orbit pool stream error: {error}"),
-            Self::Io(error) => write!(f, "Orbit pool io error: {error}")
+            Self::Stream(error) => {
+                write!(f, "Orbit pool stream error: {error}")
+            }
+            Self::Io(error) => write!(f, "Orbit pool io error: {error}"),
         }
     }
 }
@@ -250,7 +282,7 @@ impl std::error::Error for Error {
             #[cfg(feature = "pool-stream")]
             Self::Stream(error) => Some(error),
             Self::Io(error) => Some(error),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -289,7 +321,7 @@ impl Key {
 impl fmt::Display for Key {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         write!(f, "key:{:032x}", self.0)
     }
@@ -346,12 +378,12 @@ impl ResourceId {
         kind: u8,
         node: u16,
         slot: u32,
-        generation: u32
+        generation: u32,
     ) -> Self {
         Self(NetId64::make(
             kind,
             node,
-            ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK)
+            ((generation as u64) << SLOT_BITS) | (slot as u64 & SLOT_MASK),
         ))
     }
 }
@@ -359,7 +391,7 @@ impl ResourceId {
 impl fmt::Display for ResourceId {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -369,7 +401,9 @@ impl FromStr for ResourceId {
     type Err = Error;
 
     fn from_str(text: &str) -> Result<Self> {
-        text.parse::<NetId64>().map(Self).map_err(|_| Error::Malformed(text.to_owned()))
+        text.parse::<NetId64>()
+            .map(Self)
+            .map_err(|_| Error::Malformed(text.to_owned()))
     }
 }
 
@@ -378,7 +412,7 @@ impl FromStr for ResourceId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
     Live,
-    Draining
+    Draining,
 }
 
 /// One resource usable for a key, as the fleet sees it right now.
@@ -398,7 +432,7 @@ pub struct Candidate {
     pub reserved: u32,
     /// Units the owner is executing.
     pub active: u32,
-    pub last_reserve_ms: u64
+    pub last_reserve_ms: u64,
 }
 
 impl Candidate {
@@ -416,21 +450,21 @@ pub struct Lease {
     /// has a larger fence, so a stale holder can be told from the current.
     pub fence: u64,
     pub holder: NodeId,
-    pub holder_incarnation: Incarnation
+    pub holder_incarnation: Incarnation,
 }
 
 /// The fleet's pool table. Cheap to clone; every clone in a process is
 /// the same table, driver and wakers.
 #[derive(Clone)]
 pub struct Pool {
-    table: Arc<Table>
+    table: Arc<Table>,
 }
 
 impl Pool {
     /// Open the fleet's default pool table.
     pub fn new(
         fleet: Arc<Fleet>,
-        incarnation: Incarnation
+        incarnation: Incarnation,
     ) -> Result<Self> {
         Self::with_spec(fleet, incarnation, PoolSpec::DEFAULT)
     }
@@ -442,7 +476,7 @@ impl Pool {
     pub fn with_spec(
         fleet: Arc<Fleet>,
         incarnation: Incarnation,
-        spec: PoolSpec
+        spec: PoolSpec,
     ) -> Result<Self> {
         spec.validate()?;
         Ok(Self { table: table::open(&fleet, incarnation, spec)? })
@@ -477,7 +511,7 @@ impl Pool {
     /// try and the wait is seen rather than missed.
     pub fn watch(
         &self,
-        key: Key
+        key: Key,
     ) -> Result<()> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
@@ -507,10 +541,12 @@ impl Pool {
     pub fn register(
         &self,
         key: Key,
-        capacity: u32
+        capacity: u32,
     ) -> Result<ResourceId> {
         if capacity == 0 {
-            return Err(Error::Malformed("capacity must be at least one".to_owned()));
+            return Err(Error::Malformed(
+                "capacity must be at least one".to_owned(),
+            ));
         }
         self.register_inner(key, capacity, false).map(|(id, _)| id)
     }
@@ -525,34 +561,43 @@ impl Pool {
     pub fn register_active(
         &self,
         key: Key,
-        capacity: u32
+        capacity: u32,
     ) -> Result<(ResourceId, Execution)> {
         if capacity == 0 {
-            return Err(Error::Malformed("capacity must be at least one".to_owned()));
+            return Err(Error::Malformed(
+                "capacity must be at least one".to_owned(),
+            ));
         }
         let (id, execution) = self.register_inner(key, capacity, true)?;
-        Ok((id, execution.expect("active registration creates its execution guard")))
+        Ok((
+            id,
+            execution.expect("active registration creates its execution guard"),
+        ))
     }
 
     fn register_inner(
         &self,
         key: Key,
         capacity: u32,
-        active: bool
+        active: bool,
     ) -> Result<(ResourceId, Option<Execution>)> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
-        let (index, generation) = self.table.allocate((lo, hi), key_index, capacity)?;
+        let (index, generation) =
+            self.table.allocate((lo, hi), key_index, capacity)?;
         if active {
-            self.table.resources()[index].units.store(pack_counts(0, 1), Ordering::Release);
+            self.table.resources()[index]
+                .units
+                .store(pack_counts(0, 1), Ordering::Release);
         }
         let id = ResourceId::make(
             self.table.kind(),
             self.table.node(),
             (index % self.table.geometry().lane_capacity) as u32,
-            generation
+            generation,
         );
-        self.table.members(key_index)[index / 64].fetch_or(1 << (index % 64), Ordering::SeqCst);
+        self.table.members(key_index)[index / 64]
+            .fetch_or(1 << (index % 64), Ordering::SeqCst);
         self.table.add_available(key_index, capacity - u32::from(active));
         let _ = self.table.key(key_index).counts.try_update(
             Ordering::SeqCst,
@@ -560,7 +605,7 @@ impl Pool {
             |counts| {
                 let (live, creating) = unpack_counts(counts);
                 Some(pack_counts(live + 1, creating))
-            }
+            },
         );
         self.table.key_changed(key_index);
         let execution = active.then(|| Execution {
@@ -569,9 +614,9 @@ impl Pool {
                 id,
                 fence: 0,
                 holder: self.node(),
-                holder_incarnation: self.incarnation()
+                holder_incarnation: self.incarnation(),
             },
-            completed: false
+            completed: false,
         });
         Ok((id, execution))
     }
@@ -579,7 +624,7 @@ impl Pool {
     /// Take the resource away. Leases out on it become stale.
     pub fn unregister(
         &self,
-        id: ResourceId
+        id: ResourceId,
     ) -> Result<()> {
         let (index, slot) = self.owned(id)?;
         self.table.close_resource(index, slot);
@@ -589,14 +634,14 @@ impl Pool {
     /// No new leases; the ones out finish at their own pace.
     pub fn drain(
         &self,
-        id: ResourceId
+        id: ResourceId,
     ) -> Result<()> {
         let (_, slot) = self.owned(id)?;
         let _ = slot.state.compare_exchange(
             RESOURCE_LIVE,
             RESOURCE_DRAINING,
             Ordering::SeqCst,
-            Ordering::SeqCst
+            Ordering::SeqCst,
         );
         Ok(())
     }
@@ -610,7 +655,7 @@ impl Pool {
         &self,
         id: ResourceId,
         active: u32,
-        grace: std::time::Duration
+        grace: std::time::Duration,
     ) -> Result<()> {
         let (_, slot) = self.owned(id)?;
         let now = OrbitEpoch::now().as_unix_ms();
@@ -624,22 +669,32 @@ impl Pool {
             if now.saturating_sub(since) > grace.as_millis() as u64
                 && reservation
                     .fence
-                    .compare_exchange(fence, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(
+                        fence,
+                        0,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
                     .is_ok()
             {
                 aged += 1;
             }
         }
         let mut available_delta = 0_i64;
-        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-            let (reserved, was_active) = unpack_counts(units);
-            let reserved = reserved.saturating_sub(aged);
-            let capacity = slot.capacity.load(Ordering::Relaxed);
-            let was_free = capacity.saturating_sub(unpack_counts(units).0 + was_active);
-            let now_free = capacity.saturating_sub(reserved + active);
-            available_delta = i64::from(now_free) - i64::from(was_free);
-            Some(pack_counts(reserved, active))
-        });
+        let _ = slot.units.try_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |units| {
+                let (reserved, was_active) = unpack_counts(units);
+                let reserved = reserved.saturating_sub(aged);
+                let capacity = slot.capacity.load(Ordering::Relaxed);
+                let was_free = capacity
+                    .saturating_sub(unpack_counts(units).0 + was_active);
+                let now_free = capacity.saturating_sub(reserved + active);
+                available_delta = i64::from(now_free) - i64::from(was_free);
+                Some(pack_counts(reserved, active))
+            },
+        );
         let key_index = slot.key_index.load(Ordering::Acquire) as usize;
         if available_delta > 0 {
             self.table.add_available(key_index, available_delta as u32);
@@ -655,14 +710,16 @@ impl Pool {
     /// Every resource registered under `key`, in table order.
     pub fn candidates(
         &self,
-        key: Key
+        key: Key,
     ) -> Vec<Candidate> {
         let (lo, hi) = key.parts();
         let Ok(key_index) = self.table.key_index(lo, hi) else {
             return Vec::new();
         };
         let mut found = Vec::new();
-        for (word_index, word) in self.table.members(key_index).iter().enumerate() {
+        for (word_index, word) in
+            self.table.members(key_index).iter().enumerate()
+        {
             let mut bits = word.load(Ordering::SeqCst);
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;
@@ -679,13 +736,13 @@ impl Pool {
     fn candidate_at(
         &self,
         index: usize,
-        key: (u64, u64)
+        key: (u64, u64),
     ) -> Option<Candidate> {
         let slot = self.table.resources().get(index)?;
         let state = match slot.state.load(Ordering::Acquire) {
             RESOURCE_LIVE => State::Live,
             RESOURCE_DRAINING => State::Draining,
-            _ => return None
+            _ => return None,
         };
         if slot.key_lo.load(Ordering::Relaxed) != key.0
             || slot.key_hi.load(Ordering::Relaxed) != key.1
@@ -698,16 +755,18 @@ impl Pool {
                 self.table.kind(),
                 owner,
                 (index % self.table.geometry().lane_capacity) as u32,
-                slot.generation.load(Ordering::Relaxed)
+                slot.generation.load(Ordering::Relaxed),
             ),
             owner: NodeId::new(owner),
-            owner_incarnation: Incarnation::new(slot.owner_incarnation.load(Ordering::Relaxed)),
+            owner_incarnation: Incarnation::new(
+                slot.owner_incarnation.load(Ordering::Relaxed),
+            ),
             local: owner == self.table.node(),
             state,
             capacity: slot.capacity.load(Ordering::Relaxed),
             reserved: unpack_counts(slot.units.load(Ordering::SeqCst)).0,
             active: unpack_counts(slot.units.load(Ordering::SeqCst)).1,
-            last_reserve_ms: slot.last_reserve_ms.load(Ordering::Relaxed)
+            last_reserve_ms: slot.last_reserve_ms.load(Ordering::Relaxed),
         })
     }
 
@@ -715,13 +774,13 @@ impl Pool {
     /// compare-and-swap; a snapshot that showed room is not a lease.
     pub fn reserve(
         &self,
-        id: ResourceId
+        id: ResourceId,
     ) -> Result<Lease> {
         let (_, slot) = self.locate(id)?;
         match slot.state.load(Ordering::Acquire) {
             RESOURCE_LIVE => {}
             RESOURCE_DRAINING => return Err(Error::Draining(id)),
-            _ => return Err(Error::Stale(id))
+            _ => return Err(Error::Stale(id)),
         }
         let key_index = slot.key_index.load(Ordering::Acquire) as usize;
         if !self.table.take_available(key_index) {
@@ -732,7 +791,8 @@ impl Pool {
             .units
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
                 let (reserved, active) = unpack_counts(units);
-                (reserved + active < capacity).then(|| pack_counts(reserved + 1, active))
+                (reserved + active < capacity)
+                    .then(|| pack_counts(reserved + 1, active))
             })
             .is_err()
         {
@@ -742,10 +802,14 @@ impl Pool {
         // The slot may have ended between the state check and the count;
         // give the unit back rather than hold a lease on the next tenant.
         if !slot.is(id.generation()) {
-            let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                let (reserved, active) = unpack_counts(units);
-                Some(pack_counts(reserved.saturating_sub(1), active))
-            });
+            let _ = slot.units.try_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |units| {
+                    let (reserved, active) = unpack_counts(units);
+                    Some(pack_counts(reserved.saturating_sub(1), active))
+                },
+            );
             self.table.add_available(key_index, 1);
             return Err(Error::Stale(id));
         }
@@ -758,7 +822,12 @@ impl Pool {
             // no other reservation's entry is ever touched.
             if reservation
                 .fence
-                .compare_exchange(0, PLACING, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(
+                    0,
+                    PLACING,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
                 .is_ok()
             {
                 reservation.since_ms.store(now, Ordering::Relaxed);
@@ -769,15 +838,24 @@ impl Pool {
         }
         if !placed {
             // The owner is behind; give the unit back and say busy.
-            let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                let (reserved, active) = unpack_counts(units);
-                Some(pack_counts(reserved.saturating_sub(1), active))
-            });
+            let _ = slot.units.try_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |units| {
+                    let (reserved, active) = unpack_counts(units);
+                    Some(pack_counts(reserved.saturating_sub(1), active))
+                },
+            );
             self.table.add_available(key_index, 1);
             return Err(Error::Busy(id));
         }
         slot.last_reserve_ms.store(now, Ordering::Release);
-        Ok(Lease { id, fence, holder: self.node(), holder_incarnation: self.incarnation() })
+        Ok(Lease {
+            id,
+            fence,
+            holder: self.node(),
+            holder_incarnation: self.incarnation(),
+        })
     }
 
     /// Return an exact reservation that this process could not deliver to its
@@ -785,25 +863,36 @@ impl Pool {
     /// the fence, only its [`Execution`] may return the active unit.
     pub fn cancel_reservation(
         &self,
-        lease: Lease
+        lease: Lease,
     ) -> Result<()> {
-        if lease.holder != self.node() || lease.holder_incarnation != self.incarnation() {
+        if lease.holder != self.node()
+            || lease.holder_incarnation != self.incarnation()
+        {
             return Err(Error::NotReserved(lease));
         }
         let (_, slot) = self.locate(lease.id)?;
         let cancelled = slot.pending.iter().any(|reservation| {
             reservation
                 .fence
-                .compare_exchange(lease.fence, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(
+                    lease.fence,
+                    0,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
                 .is_ok()
         });
         if !cancelled {
             return Err(Error::NotReserved(lease));
         }
-        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-            let (reserved, active) = unpack_counts(units);
-            Some(pack_counts(reserved.saturating_sub(1), active))
-        });
+        let _ = slot.units.try_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |units| {
+                let (reserved, active) = unpack_counts(units);
+                Some(pack_counts(reserved.saturating_sub(1), active))
+            },
+        );
         let key_index = slot.key_index.load(Ordering::Acquire) as usize;
         self.table.add_available(key_index, 1);
         self.table.key_changed_one(key_index);
@@ -818,7 +907,7 @@ impl Pool {
     /// [`Pool::reconcile`] ages it out.
     pub fn accept(
         &self,
-        lease: Lease
+        lease: Lease,
     ) -> Result<Execution> {
         let (_, slot) = self.owned(lease.id)?;
         if slot.state.load(Ordering::Acquire) != RESOURCE_LIVE {
@@ -829,17 +918,30 @@ impl Pool {
         let taken = slot.pending.iter().any(|reservation| {
             reservation
                 .fence
-                .compare_exchange(lease.fence, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(
+                    lease.fence,
+                    0,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
                 .is_ok()
         });
         if !taken {
             return Err(Error::NotReserved(lease));
         }
-        let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-            let (reserved, active) = unpack_counts(units);
-            Some(pack_counts(reserved.saturating_sub(1), active + 1))
-        });
-        Ok(Execution { table: Arc::clone(&self.table), lease, completed: false })
+        let _ = slot.units.try_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |units| {
+                let (reserved, active) = unpack_counts(units);
+                Some(pack_counts(reserved.saturating_sub(1), active + 1))
+            },
+        );
+        Ok(Execution {
+            table: Arc::clone(&self.table),
+            lease,
+            completed: false,
+        })
     }
 
     /// Whether `lease` is the current state of its resource: the resource
@@ -847,9 +949,11 @@ impl Pool {
     /// later lease's release.
     pub fn is_current(
         &self,
-        lease: Lease
+        lease: Lease,
     ) -> bool {
-        self.locate(lease.id).map(|(_, slot)| slot.is(lease.id.generation())).unwrap_or(false)
+        self.locate(lease.id)
+            .map(|(_, slot)| slot.is(lease.id.generation()))
+            .unwrap_or(false)
     }
 
     /// One decision for `key`: snapshot the candidates, ask `policy`, then
@@ -861,7 +965,7 @@ impl Pool {
         &self,
         key: Key,
         limits: &Limits,
-        policy: &dyn Policy
+        policy: &dyn Policy,
     ) -> Result<Plan> {
         for _ in 0..limits.attempts.max(1) {
             let candidates = self.candidates(key);
@@ -872,16 +976,20 @@ impl Pool {
                         return Ok(Plan::LocalReuse(lease));
                     }
                     Ok(lease) => return Ok(Plan::RemoteReuse(lease)),
-                    Err(Error::Busy(_) | Error::Stale(_) | Error::Draining(_)) => continue,
-                    Err(error) => return Err(error)
+                    Err(
+                        Error::Busy(_) | Error::Stale(_) | Error::Draining(_),
+                    ) => continue,
+                    Err(error) => return Err(error),
                 },
-                Decision::Create => match self.claim_create(key, limits.max_live) {
-                    Ok(permit) => return Ok(Plan::Create(permit)),
-                    Err(Error::CreationBudget { .. }) => continue,
-                    Err(error) => return Err(error)
-                },
+                Decision::Create => {
+                    match self.claim_create(key, limits.max_live) {
+                        Ok(permit) => return Ok(Plan::Create(permit)),
+                        Err(Error::CreationBudget { .. }) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
                 Decision::Wait => return Ok(Plan::Wait(self.version(key)?)),
-                Decision::Reject(reason) => return Ok(Plan::Reject(reason))
+                Decision::Reject(reason) => return Ok(Plan::Reject(reason)),
             }
         }
         Ok(Plan::Wait(self.version(key)?))
@@ -893,7 +1001,7 @@ impl Pool {
     pub fn claim_create(
         &self,
         key: Key,
-        max_live: u32
+        max_live: u32,
     ) -> Result<CreationPermit> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
@@ -902,10 +1010,13 @@ impl Pool {
             .counts
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |counts| {
                 let (live, creating) = unpack_counts(counts);
-                (live + creating < max_live).then(|| pack_counts(live, creating + 1))
+                (live + creating < max_live)
+                    .then(|| pack_counts(live, creating + 1))
             })
             .map_err(|_| Error::CreationBudget { key, max_live })?;
-        self.table.claims(usize::from(self.table.node()), key_index).fetch_add(1, Ordering::SeqCst);
+        self.table
+            .claims(usize::from(self.table.node()), key_index)
+            .fetch_add(1, Ordering::SeqCst);
         Ok(CreationPermit { table: Arc::clone(&self.table), key_index })
     }
 
@@ -913,12 +1024,14 @@ impl Pool {
     /// decisions.
     pub fn budget(
         &self,
-        key: Key
+        key: Key,
     ) -> (u32, u32) {
         let (lo, hi) = key.parts();
         match self.table.key_index(lo, hi) {
-            Ok(key_index) => unpack_counts(self.table.key(key_index).counts.load(Ordering::SeqCst)),
-            Err(_) => (0, 0)
+            Ok(key_index) => unpack_counts(
+                self.table.key(key_index).counts.load(Ordering::SeqCst),
+            ),
+            Err(_) => (0, 0),
         }
     }
 
@@ -931,13 +1044,15 @@ impl Pool {
     pub fn admit(
         &self,
         key: Key,
-        max_concurrency: u32
+        max_concurrency: u32,
     ) -> Result<AdmissionPermit> {
         if !self.table.geometry().fleet_concurrency {
             return Err(Error::ConcurrencyDisabled);
         }
         if max_concurrency == 0 {
-            return Err(Error::Malformed("max_concurrency must be at least one".to_owned()));
+            return Err(Error::Malformed(
+                "max_concurrency must be at least one".to_owned(),
+            ));
         }
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
@@ -957,7 +1072,7 @@ impl Pool {
     /// Requests currently admitted under `key` across this fleet.
     pub fn admitted(
         &self,
-        key: Key
+        key: Key,
     ) -> Result<u32> {
         if !self.table.geometry().fleet_concurrency {
             return Err(Error::ConcurrencyDisabled);
@@ -973,7 +1088,7 @@ impl Pool {
     /// Fleet-wide free resource units for specs that opted into availability.
     pub fn available(
         &self,
-        key: Key
+        key: Key,
     ) -> Result<u32> {
         if !self.table.geometry().fleet_availability {
             return Err(Error::AvailabilityDisabled);
@@ -991,7 +1106,7 @@ impl Pool {
         &self,
         key: Key,
         max_live: u32,
-        min_idle: u32
+        min_idle: u32,
     ) -> Result<CreationPermit> {
         if !self.table.geometry().fleet_availability {
             return Err(Error::AvailabilityDisabled);
@@ -1013,12 +1128,16 @@ impl Pool {
     /// queue forever. Take the version before the attempt, as with
     /// [`Pool::wait_capacity`], so a change between the two is seen
     /// instead of waited for.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     pub fn wait_capacity_timeout(
         &self,
         key: Key,
         since: u32,
-        timeout: Duration
+        timeout: Duration,
     ) -> Result<Option<u32>> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
@@ -1052,7 +1171,7 @@ impl Pool {
     /// The key's change count; what [`Pool::wait_capacity`] waits past.
     pub fn version(
         &self,
-        key: Key
+        key: Key,
     ) -> Result<u32> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
@@ -1065,7 +1184,7 @@ impl Pool {
     pub fn wait_capacity(
         &self,
         key: Key,
-        since: u32
+        since: u32,
     ) -> Result<u32> {
         let (lo, hi) = key.parts();
         let key_index = self.table.key_index(lo, hi)?;
@@ -1093,12 +1212,12 @@ impl Pool {
         &self,
         key: Key,
         since: u32,
-        cx: &mut std::task::Context<'_>
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<u32>> {
         let (lo, hi) = key.parts();
         let key_index = match self.table.key_index(lo, hi) {
             Ok(index) => index,
-            Err(error) => return std::task::Poll::Ready(Err(error))
+            Err(error) => return std::task::Poll::Ready(Err(error)),
         };
         let changes = &self.table.key(key_index).changes;
         let now = changes.load(Ordering::SeqCst);
@@ -1109,7 +1228,11 @@ impl Pool {
             return std::task::Poll::Ready(Err(error));
         }
         let now = changes.load(Ordering::SeqCst);
-        if now != since { std::task::Poll::Ready(Ok(now)) } else { std::task::Poll::Pending }
+        if now != since {
+            std::task::Poll::Ready(Ok(now))
+        } else {
+            std::task::Poll::Pending
+        }
     }
 
     /// Every process generation that still owns a resource here.
@@ -1130,12 +1253,16 @@ impl Pool {
         let mut seen: Vec<(NodeId, Incarnation)> = Vec::new();
         for slot in self.table.resources() {
             let state = slot.state.load(Ordering::Acquire);
-            if state != crate::layout::RESOURCE_LIVE && state != crate::layout::RESOURCE_DRAINING {
+            if state != crate::layout::RESOURCE_LIVE
+                && state != crate::layout::RESOURCE_DRAINING
+            {
                 continue;
             }
             let owner = (
                 NodeId::new(slot.owner_node.load(Ordering::Acquire)),
-                Incarnation::new(slot.owner_incarnation.load(Ordering::Acquire))
+                Incarnation::new(
+                    slot.owner_incarnation.load(Ordering::Acquire),
+                ),
             );
             if !seen.contains(&owner) {
                 seen.push(owner);
@@ -1152,7 +1279,7 @@ impl Pool {
     pub fn node_dead(
         &self,
         node: NodeId,
-        incarnation: Incarnation
+        incarnation: Incarnation,
     ) {
         self.table.node_dead(node.get(), incarnation.get());
     }
@@ -1169,7 +1296,7 @@ impl Pool {
 
     fn locate(
         &self,
-        id: ResourceId
+        id: ResourceId,
     ) -> Result<(usize, &ResourceSlot)> {
         let geometry = self.table.geometry();
         if id.kind() != self.table.kind()
@@ -1180,20 +1307,22 @@ impl Pool {
         {
             return Err(Error::Malformed(id.to_string()));
         }
-        let index = usize::from(id.node()) * geometry.lane_capacity + id.slot() as usize;
+        let index = usize::from(id.node()) * geometry.lane_capacity
+            + id.slot() as usize;
         Ok((index, &self.table.resources()[index]))
     }
 
     fn owned(
         &self,
-        id: ResourceId
+        id: ResourceId,
     ) -> Result<(usize, &ResourceSlot)> {
         let (index, slot) = self.locate(id)?;
         if !slot.is(id.generation()) {
             return Err(Error::Stale(id));
         }
         if slot.owner_node.load(Ordering::Acquire) != self.table.node()
-            || slot.owner_incarnation.load(Ordering::Acquire) != self.table.incarnation()
+            || slot.owner_incarnation.load(Ordering::Acquire)
+                != self.table.incarnation()
         {
             return Err(Error::NotOwner(id));
         }
@@ -1216,7 +1345,7 @@ pub enum Plan {
     Create(CreationPermit),
     /// Nothing usable now; wait past this key version and ask again.
     Wait(u32),
-    Reject(Reason)
+    Reject(Reason),
 }
 
 /// The owner's guard over one accepted lease. Dropping it, or
@@ -1226,7 +1355,7 @@ pub enum Plan {
 pub struct Execution {
     table: Arc<Table>,
     lease: Lease,
-    completed: bool
+    completed: bool,
 }
 
 impl Execution {
@@ -1240,7 +1369,7 @@ impl Execution {
     /// idle ceiling still has room. `false` means the owner must retire it.
     pub fn complete_idle(
         mut self,
-        max_idle: u32
+        max_idle: u32,
     ) -> Result<bool> {
         if !self.table.geometry().fleet_availability {
             return Err(Error::AvailabilityDisabled);
@@ -1252,9 +1381,10 @@ impl Execution {
 
     fn finish(
         &self,
-        max_idle: Option<u32>
+        max_idle: Option<u32>,
     ) -> bool {
-        let index = usize::from(self.lease.id.node()) * self.table.geometry().lane_capacity
+        let index = usize::from(self.lease.id.node())
+            * self.table.geometry().lane_capacity
             + self.lease.id.slot() as usize;
         let slot = &self.table.resources()[index];
         let state = slot.state.load(Ordering::Acquire);
@@ -1266,16 +1396,22 @@ impl Execution {
         let key_index = slot.key_index.load(Ordering::Acquire) as usize;
         let retained = state == RESOURCE_LIVE
             && max_idle
-                .map(|limit| self.table.retain_available_below(key_index, limit))
+                .map(|limit| {
+                    self.table.retain_available_below(key_index, limit)
+                })
                 .unwrap_or_else(|| {
                     self.table.add_available(key_index, 1);
                     true
                 });
         if retained || state == RESOURCE_DRAINING {
-            let _ = slot.units.try_update(Ordering::SeqCst, Ordering::SeqCst, |units| {
-                let (reserved, active) = unpack_counts(units);
-                Some(pack_counts(reserved, active.saturating_sub(1)))
-            });
+            let _ = slot.units.try_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |units| {
+                    let (reserved, active) = unpack_counts(units);
+                    Some(pack_counts(reserved, active.saturating_sub(1)))
+                },
+            );
         }
         self.table.key_changed_one(key_index);
         retained
@@ -1295,19 +1431,19 @@ impl Drop for Execution {
 /// registered meanwhile.
 pub struct CreationPermit {
     table: Arc<Table>,
-    key_index: usize
+    key_index: usize,
 }
 
 /// One admitted request under a key's fleet-wide concurrency limit.
 pub struct AdmissionPermit {
     table: Arc<Table>,
-    key_index: usize
+    key_index: usize,
 }
 
 impl fmt::Debug for AdmissionPermit {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         f.debug_struct("AdmissionPermit")
             .field("key_index", &self.key_index)
@@ -1320,12 +1456,14 @@ impl Drop for AdmissionPermit {
         let held = self
             .table
             .admissions(usize::from(self.table.node()), self.key_index)
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| held.checked_sub(1));
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+                held.checked_sub(1)
+            });
         if held.is_ok() {
             let _ = self.table.key(self.key_index).admitted.try_update(
                 Ordering::SeqCst,
                 Ordering::SeqCst,
-                |admitted| admitted.checked_sub(1)
+                |admitted| admitted.checked_sub(1),
             );
             self.table.key_changed_one(self.key_index);
         }
@@ -1340,9 +1478,11 @@ impl CreationPermit {
 impl fmt::Debug for CreationPermit {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        f.debug_struct("CreationPermit").field("key_index", &self.key_index).finish_non_exhaustive()
+        f.debug_struct("CreationPermit")
+            .field("key_index", &self.key_index)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1354,13 +1494,14 @@ impl Drop for CreationPermit {
             |counts| {
                 let (live, creating) = unpack_counts(counts);
                 Some(pack_counts(live, creating.saturating_sub(1)))
-            }
+            },
         );
-        let _ = self.table.claims(usize::from(self.table.node()), self.key_index).try_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |held| held.checked_sub(1)
-        );
+        let _ = self
+            .table
+            .claims(usize::from(self.table.node()), self.key_index)
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+                held.checked_sub(1)
+            });
         self.table.key_changed_one(self.key_index);
     }
 }
@@ -1374,7 +1515,11 @@ pub(crate) fn waits_supported() -> bool {
     orbit_core::sync::supported()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+)))]
 pub(crate) fn waits_supported() -> bool {
     false
 }
@@ -1385,40 +1530,61 @@ pub(crate) fn waits_supported() -> bool {
 pub(crate) fn wait_on_timeout(
     word: &AtomicU32,
     expected: u32,
-    timeout: Duration
+    timeout: Duration,
 ) -> Result<bool> {
-    orbit_core::sync::wait_word_timeout(word, expected, timeout).map_err(Error::Io)
+    orbit_core::sync::wait_word_timeout(word, expected, timeout)
+        .map_err(Error::Io)
 }
 
 pub(crate) fn wait_on(
     word: &AtomicU32,
-    expected: u32
+    expected: u32,
 ) -> Result<()> {
     orbit_core::sync::wait_word(word, expected).map_err(Error::Io)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+)))]
 pub(crate) fn wait_on(
     _word: &AtomicU32,
-    _expected: u32
+    _expected: u32,
 ) -> Result<()> {
     Err(Error::Io(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "orbit-pool needs a platform that can wait on a shared word"
+        "orbit-pool needs a platform that can wait on a shared word",
     )))
 }
 
 pub(crate) fn wake_on(word: &AtomicU32) {
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     let _ = orbit_core::sync::wake_word(word);
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    )))]
     let _ = word;
 }
 
 pub(crate) fn wake_one_on(word: &AtomicU32) {
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     let _ = orbit_core::sync::wake_word_one(word);
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    )))]
     let _ = word;
 }
 
@@ -1434,19 +1600,20 @@ mod tests {
     use orbit_core::{Fleet, NodeId};
 
     use super::{
-        Error, Incarnation, Key, Limits, LocalFirst, LocalOnly, POOL_RESOURCE_LANE_CAPACITY, Plan,
-        Pool, PoolSpec, State
+        Error, Incarnation, Key, Limits, LocalFirst, LocalOnly,
+        POOL_RESOURCE_LANE_CAPACITY, Plan, Pool, PoolSpec, State,
     };
 
     fn pool(name: &'static str) -> Pool {
-        Pool::new(Arc::new(Fleet::join(name, 2).unwrap()), Incarnation::new(1)).unwrap()
+        Pool::new(Arc::new(Fleet::join(name, 2).unwrap()), Incarnation::new(1))
+            .unwrap()
     }
 
     fn fleet_capacity_pool(name: &'static str) -> Pool {
         Pool::with_spec(
             Arc::new(Fleet::join(name, 2).unwrap()),
             Incarnation::new(1),
-            PoolSpec::new(190, 16, 16).with_fleet_availability()
+            PoolSpec::new(190, 16, 16).with_fleet_availability(),
         )
         .unwrap()
     }
@@ -1455,12 +1622,12 @@ mod tests {
         Pool::with_spec(
             Arc::new(Fleet::join(name, 2).unwrap()),
             Incarnation::new(1),
-            PoolSpec::new(191, 16, 16).with_fleet_concurrency()
+            PoolSpec::new(191, 16, 16).with_fleet_concurrency(),
         )
         .unwrap()
     }
 
-    const KEY: Key = Key::new(0xC0FFEE);
+    const KEY: Key = Key::new(0xc0ffee);
 
     #[test]
     fn an_exclusive_resource_is_leased_once_and_freed_by_the_owner() {
@@ -1496,8 +1663,13 @@ mod tests {
 
         let candidate = pool.candidates(KEY)[0];
         assert_eq!(candidate.id, id);
-        assert_eq!((candidate.reserved, candidate.active, candidate.free()), (0, 1, 0));
-        assert!(matches!(pool.reserve(id), Err(Error::Busy(found)) if found == id));
+        assert_eq!(
+            (candidate.reserved, candidate.active, candidate.free()),
+            (0, 1, 0)
+        );
+        assert!(
+            matches!(pool.reserve(id), Err(Error::Busy(found)) if found == id)
+        );
 
         execution.complete();
         assert_eq!(pool.candidates(KEY)[0].free(), 1);
@@ -1514,14 +1686,22 @@ mod tests {
         assert!(!second_use.complete_idle(1).unwrap());
         assert_eq!(pool.available(KEY).unwrap(), 1);
         assert!(pool.reserve(first).is_ok());
-        assert!(matches!(pool.reserve(second), Err(Error::Busy(id)) if id == second));
+        assert!(
+            matches!(pool.reserve(second), Err(Error::Busy(id)) if id == second)
+        );
     }
 
     #[test]
     fn default_pool_does_not_silently_apply_fleet_idle_policy() {
         let pool = pool("pool-no-fleet-idle-policy");
-        assert!(matches!(pool.available(KEY), Err(Error::AvailabilityDisabled)));
-        assert!(matches!(pool.claim_warm(KEY, 8, 2), Err(Error::AvailabilityDisabled)));
+        assert!(matches!(
+            pool.available(KEY),
+            Err(Error::AvailabilityDisabled)
+        ));
+        assert!(matches!(
+            pool.claim_warm(KEY, 8, 2),
+            Err(Error::AvailabilityDisabled)
+        ));
     }
 
     #[test]
@@ -1529,7 +1709,10 @@ mod tests {
         let pool = fleet_capacity_pool("pool-fleet-idle-floor");
         let first = pool.claim_warm(KEY, 8, 2).unwrap();
         let second = pool.claim_warm(KEY, 8, 2).unwrap();
-        assert!(matches!(pool.claim_warm(KEY, 8, 2), Err(Error::CreationBudget { .. })));
+        assert!(matches!(
+            pool.claim_warm(KEY, 8, 2),
+            Err(Error::CreationBudget { .. })
+        ));
 
         let (_, first_use) = pool.register_active(KEY, 1).unwrap();
         first.finish();
@@ -1538,7 +1721,10 @@ mod tests {
         second.finish();
         assert!(second_use.complete_idle(2).unwrap());
         assert_eq!(pool.available(KEY).unwrap(), 2);
-        assert!(matches!(pool.claim_warm(KEY, 8, 2), Err(Error::CreationBudget { .. })));
+        assert!(matches!(
+            pool.claim_warm(KEY, 8, 2),
+            Err(Error::CreationBudget { .. })
+        ));
     }
 
     #[test]
@@ -1598,8 +1784,9 @@ mod tests {
     fn an_owner_far_behind_makes_the_resource_refuse_reservations() {
         let pool = pool("pool-pending");
         let id = pool.register(KEY, u32::MAX).unwrap();
-        let leases =
-            (0..super::PENDING_RESERVATIONS).map(|_| pool.reserve(id).unwrap()).collect::<Vec<_>>();
+        let leases = (0..super::PENDING_RESERVATIONS)
+            .map(|_| pool.reserve(id).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches!(pool.reserve(id), Err(Error::Busy(_))));
         let running = pool.accept(leases[0]).unwrap();
         assert!(pool.reserve(id).is_ok());
@@ -1610,7 +1797,8 @@ mod tests {
     fn capacity_counts_and_drain_refuses_new_leases() {
         let pool = pool("pool-capacity");
         let id = pool.register(KEY, 3).unwrap();
-        let leases = (0..3).map(|_| pool.reserve(id).unwrap()).collect::<Vec<_>>();
+        let leases =
+            (0..3).map(|_| pool.reserve(id).unwrap()).collect::<Vec<_>>();
         assert!(matches!(pool.reserve(id), Err(Error::Busy(_))));
         let running = pool.accept(leases[0]).unwrap();
         pool.drain(id).unwrap();
@@ -1667,7 +1855,10 @@ mod tests {
                 std::thread::spawn(move || pool.claim_create(KEY, 3).ok())
             })
             .collect::<Vec<_>>();
-        let held = threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
+        let held = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(held.iter().filter(|claim| claim.is_some()).count(), 3);
     }
 
@@ -1729,8 +1920,13 @@ mod tests {
                 let sent = sent.clone();
                 std::thread::spawn(move || {
                     let started = std::time::Instant::now();
-                    let changed =
-                        pool.wait_capacity_timeout(KEY, since, Duration::from_millis(500)).unwrap();
+                    let changed = pool
+                        .wait_capacity_timeout(
+                            KEY,
+                            since,
+                            Duration::from_millis(500),
+                        )
+                        .unwrap();
                     sent.send((changed, started.elapsed())).unwrap();
                 })
             })
@@ -1739,12 +1935,14 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         execution.complete();
 
-        let (first, first_waited) = received.recv_timeout(Duration::from_millis(200)).unwrap();
+        let (first, first_waited) =
+            received.recv_timeout(Duration::from_millis(200)).unwrap();
         assert!(first.is_some());
         assert!(first_waited < Duration::from_millis(300));
         assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
 
-        let (second, second_waited) = received.recv_timeout(Duration::from_millis(400)).unwrap();
+        let (second, second_waited) =
+            received.recv_timeout(Duration::from_millis(400)).unwrap();
         assert!(second.is_some());
         assert!(second_waited >= Duration::from_millis(450));
         for waiter in waiters {
@@ -1795,25 +1993,41 @@ mod tests {
         let pool = pool("pool-acquire");
         let limits = Limits { max_live: 2, attempts: 2 };
         // Nothing yet: create, within the budget.
-        let Plan::Create(permit) = pool.acquire(KEY, &limits, &LocalFirst).unwrap() else {
+        let Plan::Create(permit) =
+            pool.acquire(KEY, &limits, &LocalFirst).unwrap()
+        else {
             panic!("expected Create");
         };
         let id = pool.register(KEY, 1).unwrap();
         permit.finish();
         // A local resource with room: local reuse.
-        let Plan::LocalReuse(lease) = pool.acquire(KEY, &limits, &LocalFirst).unwrap() else {
+        let Plan::LocalReuse(lease) =
+            pool.acquire(KEY, &limits, &LocalFirst).unwrap()
+        else {
             panic!("expected LocalReuse");
         };
         let execution = pool.accept(lease).unwrap();
         // Busy, budget for one more: create.
-        assert!(matches!(pool.acquire(KEY, &limits, &LocalFirst).unwrap(), Plan::Create(_)));
+        assert!(matches!(
+            pool.acquire(KEY, &limits, &LocalFirst).unwrap(),
+            Plan::Create(_)
+        ));
         // Budget spent while the permit above dropped? It did drop: claim
         // it for real, then the only answer left is Wait.
         let _held = pool.claim_create(KEY, 2).unwrap();
-        assert!(matches!(pool.acquire(KEY, &limits, &LocalFirst).unwrap(), Plan::Wait(_)));
-        assert!(matches!(pool.acquire(KEY, &limits, &LocalOnly).unwrap(), Plan::Wait(_)));
+        assert!(matches!(
+            pool.acquire(KEY, &limits, &LocalFirst).unwrap(),
+            Plan::Wait(_)
+        ));
+        assert!(matches!(
+            pool.acquire(KEY, &limits, &LocalOnly).unwrap(),
+            Plan::Wait(_)
+        ));
         execution.complete();
-        assert!(matches!(pool.acquire(KEY, &limits, &LocalOnly).unwrap(), Plan::LocalReuse(_)));
+        assert!(matches!(
+            pool.acquire(KEY, &limits, &LocalOnly).unwrap(),
+            Plan::LocalReuse(_)
+        ));
         let _ = id;
     }
 }

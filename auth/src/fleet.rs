@@ -10,11 +10,13 @@ use zeroize::Zeroizing;
 
 use crate::keyring::{context, derive};
 use crate::table::{
-    CONSUMED, REVOKED, Record, RecordProtection, SESSION, Snapshot, StoreKey, Table, find, insert
+    CONSUMED, REVOKED, Record, RecordProtection, SESSION, Snapshot, StoreKey,
+    Table, find, insert,
 };
 use crate::{
-    Authority, CacheKey, CachedPrincipal, Claims, Error, MemoryCache, Principal, PrincipalCache,
-    Purpose, Result, SecretKey, StateProtection, ValidationHook, Validator
+    Authority, CacheKey, CachedPrincipal, Claims, Error, MemoryCache,
+    Principal, PrincipalCache, Purpose, Result, SecretKey, StateProtection,
+    ValidationHook, Validator,
 };
 
 /// Random session identity. It is not a bearer credential.
@@ -25,7 +27,7 @@ pub struct SessionId(pub [u8; 16]);
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionBinding {
     pub(crate) id: SessionId,
-    generation: u64
+    generation: u64,
 }
 
 /// Issuer-side handle, never serialized into SHM. Live validation checks state
@@ -36,7 +38,7 @@ pub struct Session {
     created_at: u64,
     expires_at: u64,
     realm: String,
-    issuer: String
+    issuer: String,
 }
 impl Session {
     pub fn id(&self) -> SessionId {
@@ -57,7 +59,7 @@ impl Session {
     pub(crate) fn check_issuance(
         &self,
         authority: &Authority,
-        claims: &Claims
+        claims: &Claims,
     ) -> Result<()> {
         if self.realm != authority.realm
             || self.issuer != authority.issuer
@@ -74,7 +76,7 @@ impl Session {
 struct SessionView {
     snapshot: Snapshot,
     // Compared once against the shared keyed subject tag, then checked locally.
-    subject: String
+    subject: String,
 }
 
 /// Local decoded Principals plus fleet-native live sessions and replay state.
@@ -94,7 +96,7 @@ pub struct FleetAuth<P: StateProtection> {
     state_key: Zeroizing<[u8; 32]>,
     protection: RecordProtection<P>,
     realm: String,
-    issuer: String
+    issuer: String,
 }
 impl<P: StateProtection> FleetAuth<P> {
     /// Construct with an explicitly selected shared-state protection policy.
@@ -110,13 +112,13 @@ impl<P: StateProtection> FleetAuth<P> {
         authority: &Authority,
         state_key: SecretKey,
         local_capacity: NonZeroUsize,
-        _policy: P
+        _policy: P,
     ) -> Result<Self> {
         let info = context(&[
             b"orbit-auth/v2/fleet-state",
             fleet.name().as_bytes(),
             authority.realm.as_bytes(),
-            authority.issuer.as_bytes()
+            authority.issuer.as_bytes(),
         ]);
         Ok(Self {
             table: Table::new(fleet.clone(), P::ID)?,
@@ -128,15 +130,15 @@ impl<P: StateProtection> FleetAuth<P> {
                 &context(&[
                     b"orbit-auth/v4/fleet-state-protection",
                     fleet.name().as_bytes(),
-                    &P::ID.to_le_bytes()
-                ])
+                    &P::ID.to_le_bytes(),
+                ]),
             )),
             _fleet: fleet,
             local: MemoryCache::new(local_capacity),
             sessions: Mutex::new(LruCache::new(local_capacity)),
             state_key: derive(&state_key, &info),
             realm: authority.realm.clone(),
-            issuer: authority.issuer.clone()
+            issuer: authority.issuer.clone(),
         })
     }
 
@@ -150,7 +152,7 @@ impl<P: StateProtection> FleetAuth<P> {
         &self,
         subject: impl Into<String>,
         now: u64,
-        expires_at: u64
+        expires_at: u64,
     ) -> Result<Session> {
         let subject = subject.into();
         if !crate::principal::valid_label(&subject) || now >= expires_at {
@@ -165,7 +167,7 @@ impl<P: StateProtection> FleetAuth<P> {
             created_at: now,
             expires_at,
             generation: 0,
-            status: SESSION
+            status: SESSION,
         };
         self.table.write(|slots| {
             if find(slots, record.key, &self.protection)?.is_some() {
@@ -182,11 +184,12 @@ impl<P: StateProtection> FleetAuth<P> {
     pub fn revoke_session(
         &self,
         id: SessionId,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         let key = self.session_key(id);
         self.table.write(|slots| {
-            let snapshot = find(slots, key, &self.protection)?.ok_or(Error::Revoked)?;
+            let snapshot =
+                find(slots, key, &self.protection)?.ok_or(Error::Revoked)?;
             let mut record = snapshot.record;
             if !matches!(record.status, SESSION | REVOKED) {
                 return Err(Error::PolicyUnavailable);
@@ -195,7 +198,11 @@ impl<P: StateProtection> FleetAuth<P> {
                 return Err(Error::NotYetValid);
             }
             record.status = REVOKED;
-            slots[snapshot.index].store(record, snapshot.index, &self.protection)?;
+            slots[snapshot.index].store(
+                record,
+                snapshot.index,
+                &self.protection,
+            )?;
             Ok(())
         })
     }
@@ -207,13 +214,15 @@ impl<P: StateProtection> FleetAuth<P> {
         &self,
         id: SessionId,
         subject: &str,
-        now: u64
+        now: u64,
     ) -> Result<Session> {
         if !crate::principal::valid_label(subject) {
             return Err(Error::InvalidInput);
         }
-        let snapshot =
-            self.table.lookup(self.session_key(id), &self.protection)?.ok_or(Error::Revoked)?;
+        let snapshot = self
+            .table
+            .lookup(self.session_key(id), &self.protection)?
+            .ok_or(Error::Revoked)?;
         if snapshot.record.subject != self.subject_tag(subject) {
             return Err(Error::InvalidInput);
         }
@@ -231,7 +240,7 @@ impl<P: StateProtection> FleetAuth<P> {
         id: SessionId,
         subject: &str,
         now: u64,
-        expires_at: u64
+        expires_at: u64,
     ) -> Result<Session> {
         if !crate::principal::valid_label(subject) || now >= expires_at {
             return Err(Error::InvalidInput);
@@ -239,7 +248,8 @@ impl<P: StateProtection> FleetAuth<P> {
         let key = self.session_key(id);
         let tag = self.subject_tag(subject);
         self.table.write(|slots| {
-            let snapshot = find(slots, key, &self.protection)?.ok_or(Error::Revoked)?;
+            let snapshot =
+                find(slots, key, &self.protection)?.ok_or(Error::Revoked)?;
             let mut record = snapshot.record;
             if record.subject != tag {
                 return Err(Error::InvalidInput);
@@ -250,7 +260,11 @@ impl<P: StateProtection> FleetAuth<P> {
             }
             if expires_at > record.expires_at {
                 record.expires_at = expires_at;
-                slots[snapshot.index].store(record, snapshot.index, &self.protection)?;
+                slots[snapshot.index].store(
+                    record,
+                    snapshot.index,
+                    &self.protection,
+                )?;
             }
             Ok(self.handle(id, subject.to_owned(), record))
         })
@@ -266,7 +280,7 @@ impl<P: StateProtection> FleetAuth<P> {
         validator: &Validator<'_>,
         token: &str,
         now: u64,
-        expires_at: u64
+        expires_at: u64,
     ) -> Result<Session> {
         if validator.validation.purpose != Purpose::Refresh {
             return Err(Error::InvalidInput);
@@ -276,15 +290,23 @@ impl<P: StateProtection> FleetAuth<P> {
         let key = self.session_key(binding.id);
         let subject = self.subject_tag(principal.subject());
         self.table.write(|slots| {
-            let snapshot = find(slots, key, &self.protection)?.ok_or(Error::Revoked)?;
+            let snapshot =
+                find(slots, key, &self.protection)?.ok_or(Error::Revoked)?;
             let mut record = snapshot.record;
             self.check_record(record, subject, &principal, now)?;
             if expires_at < record.expires_at {
                 return Err(Error::InvalidInput);
             }
-            record.generation = record.generation.checked_add(1).ok_or(Error::PolicyUnavailable)?;
+            record.generation = record
+                .generation
+                .checked_add(1)
+                .ok_or(Error::PolicyUnavailable)?;
             record.expires_at = expires_at;
-            slots[snapshot.index].store(record, snapshot.index, &self.protection)?;
+            slots[snapshot.index].store(
+                record,
+                snapshot.index,
+                &self.protection,
+            )?;
             Ok(self.handle(binding.id, principal.subject().to_owned(), record))
         })
     }
@@ -298,7 +320,7 @@ impl<P: StateProtection> FleetAuth<P> {
         &self,
         id: SessionId,
         subject: String,
-        record: Record
+        record: Record,
     ) -> Session {
         Session {
             binding: SessionBinding { id, generation: record.generation },
@@ -306,25 +328,28 @@ impl<P: StateProtection> FleetAuth<P> {
             created_at: record.created_at,
             expires_at: record.expires_at,
             realm: self.realm.clone(),
-            issuer: self.issuer.clone()
+            issuer: self.issuer.clone(),
         }
     }
     fn session_key(
         &self,
-        id: SessionId
+        id: SessionId,
     ) -> StoreKey {
         StoreKey(mac(self.state_key.as_ref(), &context(&[b"session", &id.0])))
     }
     fn subject_tag(
         &self,
-        subject: &str
+        subject: &str,
     ) -> [u64; 4] {
-        mac(self.state_key.as_ref(), &context(&[b"subject", subject.as_bytes()]))
+        mac(
+            self.state_key.as_ref(),
+            &context(&[b"subject", subject.as_bytes()]),
+        )
     }
     fn check_scope(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         self.check_scope_lapsed(principal, now)?;
         if now >= principal.claims.expires_at {
@@ -335,12 +360,13 @@ impl<P: StateProtection> FleetAuth<P> {
     fn check_scope_lapsed(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         if principal.realm != self.realm || principal.issuer != self.issuer {
             return Err(Error::InvalidToken);
         }
-        if now < principal.claims.not_before || now < principal.claims.issued_at {
+        if now < principal.claims.not_before || now < principal.claims.issued_at
+        {
             return Err(Error::NotYetValid);
         }
         Ok(())
@@ -349,28 +375,39 @@ impl<P: StateProtection> FleetAuth<P> {
     fn check_session(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         let binding = principal.session.as_ref().ok_or(Error::InvalidToken)?;
         {
-            let mut views = self.sessions.lock().map_err(|_| Error::PolicyUnavailable)?;
+            let mut views =
+                self.sessions.lock().map_err(|_| Error::PolicyUnavailable)?;
             if let Some(view) = views.get(&binding.id) {
                 if self.table.unchanged::<P>(&view.snapshot)? {
                     if view.subject != principal.subject() {
                         return Err(Error::InvalidToken);
                     }
-                    return self.check_metadata(view.snapshot.record, principal, now);
+                    return self.check_metadata(
+                        view.snapshot.record,
+                        principal,
+                        now,
+                    );
                 }
                 views.pop(&binding.id);
             }
         }
         let key = self.session_key(binding.id);
-        let snapshot = self.table.lookup(key, &self.protection)?.ok_or(Error::Revoked)?;
-        self.check_record(snapshot.record, self.subject_tag(principal.subject()), principal, now)?;
-        self.sessions
-            .lock()
-            .map_err(|_| Error::PolicyUnavailable)?
-            .put(binding.id, SessionView { snapshot, subject: principal.subject().to_owned() });
+        let snapshot =
+            self.table.lookup(key, &self.protection)?.ok_or(Error::Revoked)?;
+        self.check_record(
+            snapshot.record,
+            self.subject_tag(principal.subject()),
+            principal,
+            now,
+        )?;
+        self.sessions.lock().map_err(|_| Error::PolicyUnavailable)?.put(
+            binding.id,
+            SessionView { snapshot, subject: principal.subject().to_owned() },
+        );
         Ok(())
     }
     fn check_record(
@@ -378,7 +415,7 @@ impl<P: StateProtection> FleetAuth<P> {
         record: Record,
         subject: [u64; 4],
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         if record.subject != subject {
             return Err(Error::InvalidToken);
@@ -388,12 +425,12 @@ impl<P: StateProtection> FleetAuth<P> {
     fn check_live(
         &self,
         record: Record,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         match record.status {
             REVOKED => return Err(Error::Revoked),
             SESSION => (),
-            _ => return Err(Error::PolicyUnavailable)
+            _ => return Err(Error::PolicyUnavailable),
         }
         if now >= record.expires_at {
             return Err(Error::Expired);
@@ -407,7 +444,7 @@ impl<P: StateProtection> FleetAuth<P> {
         &self,
         record: Record,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         self.check_live(record, now)?;
         if principal.claims.issued_at < record.created_at
@@ -416,7 +453,9 @@ impl<P: StateProtection> FleetAuth<P> {
             return Err(Error::InvalidToken);
         }
         let binding = principal.session.as_ref().ok_or(Error::InvalidToken)?;
-        if principal.claims.purpose == Purpose::Refresh && binding.generation != record.generation {
+        if principal.claims.purpose == Purpose::Refresh
+            && binding.generation != record.generation
+        {
             return Err(Error::Replayed);
         }
         Ok(())
@@ -426,14 +465,14 @@ impl<P: StateProtection> FleetAuth<P> {
 impl<P: StateProtection> PrincipalCache for FleetAuth<P> {
     fn get(
         &self,
-        key: &CacheKey
+        key: &CacheKey,
     ) -> Option<CachedPrincipal> {
         self.local.get(key)
     }
     fn insert(
         &self,
         key: CacheKey,
-        entry: CachedPrincipal
+        entry: CachedPrincipal,
     ) {
         if key == entry.key {
             self.local.insert(key, entry);
@@ -445,7 +484,7 @@ impl<P: StateProtection> ValidationHook for FleetAuth<P> {
     fn check(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         self.check_scope(principal, now)?;
         self.check_session(principal, now)
@@ -456,7 +495,7 @@ impl<P: StateProtection> ValidationHook for FleetAuth<P> {
     fn check_lapsed(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         self.check_scope_lapsed(principal, now)?;
         self.check_session(principal, now)
@@ -468,21 +507,28 @@ impl<P: StateProtection> ValidationHook for ReplayGuard<'_, P> {
     fn check(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         let auth = self.0;
         auth.check_scope(principal, now)?;
-        let key = StoreKey(mac(auth.state_key.as_ref(), &context(&[b"replay", &principal.jti.0])));
+        let key = StoreKey(mac(
+            auth.state_key.as_ref(),
+            &context(&[b"replay", &principal.jti.0]),
+        ));
         // Replay admission and live session check are one locked operation.
         auth.table.write(|slots| {
             if let Some(binding) = &principal.session {
-                let snapshot = find(slots, auth.session_key(binding.id), &auth.protection)?
-                    .ok_or(Error::Revoked)?;
+                let snapshot = find(
+                    slots,
+                    auth.session_key(binding.id),
+                    &auth.protection,
+                )?
+                .ok_or(Error::Revoked)?;
                 auth.check_record(
                     snapshot.record,
                     auth.subject_tag(principal.subject()),
                     principal,
-                    now
+                    now,
                 )?;
             }
             if find(slots, key, &auth.protection)?.is_some() {
@@ -496,10 +542,10 @@ impl<P: StateProtection> ValidationHook for ReplayGuard<'_, P> {
                     created_at: now,
                     expires_at: principal.claims.expires_at,
                     generation: 0,
-                    status: CONSUMED
+                    status: CONSUMED,
                 },
                 now,
-                &auth.protection
+                &auth.protection,
             )
         })
     }
@@ -507,13 +553,16 @@ impl<P: StateProtection> ValidationHook for ReplayGuard<'_, P> {
 
 fn mac(
     key: &[u8],
-    value: &[u8]
+    value: &[u8],
 ) -> [u64; 4] {
-    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key).expect("HMAC key");
+    let mut mac =
+        <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key).expect("HMAC key");
     mac.update(value);
     let bytes = mac.finalize().into_bytes();
     std::array::from_fn(|i| {
-        u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().expect("eight bytes"))
+        u64::from_le_bytes(
+            bytes[i * 8..i * 8 + 8].try_into().expect("eight bytes"),
+        )
     })
 }
 

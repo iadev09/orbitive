@@ -12,7 +12,7 @@
 /// values fail constant evaluation and therefore stop the build.
 pub const fn usize_from_env(
     value: Option<&str>,
-    default: usize
+    default: usize,
 ) -> usize {
     let Some(value) = value else {
         return default;
@@ -35,15 +35,24 @@ pub const fn usize_from_env(
             index += 1;
             continue;
         }
-        assert!(byte >= b'0' && byte <= b'9', "Orbit compile-time value must be a decimal usize");
+        assert!(
+            byte >= b'0' && byte <= b'9',
+            "Orbit compile-time value must be a decimal usize"
+        );
         let digit = (byte - b'0') as usize;
-        assert!(parsed <= (usize::MAX - digit) / 10, "Orbit compile-time value overflows usize");
+        assert!(
+            parsed <= (usize::MAX - digit) / 10,
+            "Orbit compile-time value overflows usize"
+        );
         parsed = parsed * 10 + digit;
         saw_digit = true;
         previous_was_separator = false;
         index += 1;
     }
-    assert!(!previous_was_separator, "Orbit compile-time value cannot end with a separator");
+    assert!(
+        !previous_was_separator,
+        "Orbit compile-time value cannot end with a separator"
+    );
     parsed
 }
 

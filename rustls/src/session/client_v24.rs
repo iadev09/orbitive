@@ -1,6 +1,8 @@
 //! rustls 0.24 fleet-shared client-session adapter.
 
-use rustls_0_24::client::{ClientSessionKey, ClientSessionStore, Tls12Session, Tls13Session};
+use rustls_0_24::client::{
+    ClientSessionKey, ClientSessionStore, Tls12Session, Tls13Session,
+};
 use rustls_0_24::crypto::kx::NamedGroup;
 use rustls_0_24::pki_types::ServerName;
 
@@ -17,7 +19,7 @@ impl ClientSessionStore for OrbitClientSessionStorage {
     fn set_kx_hint(
         &self,
         key: ClientSessionKey<'static>,
-        group: NamedGroup
+        group: NamedGroup,
     ) {
         let Some((domain, server)) = storage_key(&key, KX_HINT) else {
             return;
@@ -28,7 +30,7 @@ impl ClientSessionStore for OrbitClientSessionStorage {
 
     fn kx_hint(
         &self,
-        key: &ClientSessionKey<'_>
+        key: &ClientSessionKey<'_>,
     ) -> Option<NamedGroup> {
         let (domain, server) = storage_key(key, KX_HINT)?;
         let value = self.primitive.get(&domain, &server).ok()??;
@@ -39,7 +41,7 @@ impl ClientSessionStore for OrbitClientSessionStorage {
     fn set_tls12_session(
         &self,
         key: ClientSessionKey<'static>,
-        value: Tls12Session
+        value: Tls12Session,
     ) {
         let Some((domain, server)) = storage_key(&key, TLS12_SESSION) else {
             return;
@@ -51,7 +53,7 @@ impl ClientSessionStore for OrbitClientSessionStorage {
 
     fn tls12_session(
         &self,
-        key: &ClientSessionKey<'_>
+        key: &ClientSessionKey<'_>,
     ) -> Option<Tls12Session> {
         let (domain, server) = storage_key(key, TLS12_SESSION)?;
         let encoded = self.primitive.get(&domain, &server).ok()??;
@@ -72,7 +74,7 @@ impl ClientSessionStore for OrbitClientSessionStorage {
 
     fn remove_tls12_session(
         &self,
-        key: &ClientSessionKey<'static>
+        key: &ClientSessionKey<'static>,
     ) {
         let Some((domain, server)) = storage_key(key, TLS12_SESSION) else {
             return;
@@ -83,7 +85,7 @@ impl ClientSessionStore for OrbitClientSessionStorage {
     fn insert_tls13_ticket(
         &self,
         key: ClientSessionKey<'static>,
-        value: Tls13Session
+        value: Tls13Session,
     ) {
         let Some((domain, server)) = storage_key(&key, TLS13_TICKET) else {
             return;
@@ -95,19 +97,19 @@ impl ClientSessionStore for OrbitClientSessionStorage {
             &server,
             &encoded,
             self.ttl(),
-            CLIENT_TLS13_TICKETS_PER_SERVER
+            CLIENT_TLS13_TICKETS_PER_SERVER,
         );
     }
 
     fn take_tls13_ticket(
         &self,
-        key: &ClientSessionKey<'static>
+        key: &ClientSessionKey<'static>,
     ) -> Option<Tls13Session> {
         let (domain, server) = storage_key(key, TLS13_TICKET)?;
         for _ in 0..CLIENT_TLS13_TICKETS_PER_SERVER {
             let encoded = match self.primitive.take(&domain, &server) {
                 Ok(Some(encoded)) => encoded,
-                Ok(None) | Err(_) => return None
+                Ok(None) | Err(_) => return None,
             };
             match Tls13Session::from_slice(&encoded, &self.provider) {
                 Ok(value) => return Some(value),
@@ -127,7 +129,7 @@ impl ClientSessionStore for OrbitClientSessionStorage {
 
 fn storage_key(
     key: &ClientSessionKey<'_>,
-    record: u8
+    record: u8,
 ) -> Option<([u8; 33], Vec<u8>)> {
     let mut domain = [0_u8; 33];
     domain[0] = record;
@@ -137,7 +139,7 @@ fn storage_key(
     server.push(match &key.server_name {
         ServerName::DnsName(_) => DNS_NAME,
         ServerName::IpAddress(_) => IP_ADDRESS,
-        _ => return None
+        _ => return None,
     });
     server.extend_from_slice(key.server_name.to_str().as_bytes());
     Some((domain, server))

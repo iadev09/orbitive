@@ -7,17 +7,25 @@ use orbit_core::{Fleet, NodeId};
 use orbit_link::{InboxGeometry, LinkBodies, LinkSegment, LinkSpec};
 use orbit_stream::StreamSpec;
 
-const SPEC: LinkSpec =
-    LinkSpec::new(4, 198, InboxGeometry::new(8, 256), StreamSpec::new(199, 8, 4 * 1024));
+const SPEC: LinkSpec = LinkSpec::new(
+    4,
+    198,
+    InboxGeometry::new(8, 256),
+    StreamSpec::new(199, 8, 4 * 1024),
+);
 
 fn fleet_name(tag: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    format!("ol{tag}{:x}{:x}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "ol{tag}{:x}{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 struct Scratch {
     segment: LinkSegment,
-    bodies: Option<LinkBodies>
+    bodies: Option<LinkBodies>,
 }
 
 impl Scratch {
@@ -28,10 +36,11 @@ impl Scratch {
     fn participant(
         name: &str,
         lane: usize,
-        incarnation: u64
+        incarnation: u64,
     ) -> Self {
         let segment = LinkSegment::open(name, SPEC).unwrap();
-        let bodies = LinkBodies::for_name(name, lane, incarnation, SPEC).unwrap();
+        let bodies =
+            LinkBodies::for_name(name, lane, incarnation, SPEC).unwrap();
         Self { segment, bodies: Some(bodies) }
     }
 }
@@ -64,7 +73,7 @@ fn a_named_inbox_is_shared_and_refuses_a_different_shape() {
         SPEC.fleet_capacity,
         SPEC.inbox_kind,
         InboxGeometry::new(16, 256),
-        SPEC.streams
+        SPEC.streams,
     );
     assert!(LinkSegment::open(&name, wrong).is_err());
 }
@@ -90,19 +99,30 @@ fn a_ticket_in_an_inbox_frame_opens_a_reusable_duplex_session() {
 
     creator.blocking_write_all(b"first request").unwrap();
     creator.finish().unwrap();
-    assert_eq!(peer.blocking_read_chunk(64).unwrap().as_ref(), b"first request");
+    assert_eq!(
+        peer.blocking_read_chunk(64).unwrap().as_ref(),
+        b"first request"
+    );
     assert!(peer.blocking_read_chunk(64).unwrap().is_empty());
     drop(peer);
 
     origin_bodies.rearm_endpoint(&mut creator).unwrap();
     let peer = target_bodies.accept(ticket).unwrap();
     creator.blocking_write_all(b"second request").unwrap();
-    assert_eq!(peer.blocking_read_chunk(64).unwrap().as_ref(), b"second request");
+    assert_eq!(
+        peer.blocking_read_chunk(64).unwrap().as_ref(),
+        b"second request"
+    );
 }
 
 #[test]
 fn link_kinds_are_explicit_and_must_be_distinct() {
-    let invalid = LinkSpec::new(4, 200, InboxGeometry::new(8, 256), StreamSpec::new(200, 8, 4096));
+    let invalid = LinkSpec::new(
+        4,
+        200,
+        InboxGeometry::new(8, 256),
+        StreamSpec::new(200, 8, 4096),
+    );
     assert!(LinkSegment::open(&fleet_name("kinds"), invalid).is_err());
     assert!(LinkBodies::for_name(&fleet_name("lane"), 4, 1, SPEC).is_err());
 
@@ -134,7 +154,10 @@ fn a_join_reclaims_the_exact_dead_incarnation_and_ends_its_streams() {
 
     live_bodies.reclaim(&replacement.reclaimed);
     let mut byte = [0_u8; 1];
-    assert!(matches!(creator.try_read(&mut byte), Err(orbit_stream::Error::Reset)));
+    assert!(matches!(
+        creator.try_read(&mut byte),
+        Err(orbit_stream::Error::Reset)
+    ));
 
     drop(peer);
     held.segment.inbox().release_lane(live.lane).unwrap();

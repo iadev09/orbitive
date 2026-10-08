@@ -20,23 +20,29 @@ fn fleet_name(tag: &str) -> &'static str {
 
 fn pattern(
     len: usize,
-    seed: u32
+    seed: u32,
 ) -> Vec<u8> {
-    (0..len as u32).map(|i| (i.wrapping_mul(2654435761).wrapping_add(seed) >> 11) as u8).collect()
+    (0..len as u32)
+        .map(|i| (i.wrapping_mul(2654435761).wrapping_add(seed) >> 11) as u8)
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplex_copies_across_two_nodes() {
     let name = fleet_name("d");
     let owner = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet"),
+        ),
+        Incarnation::new(10),
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet"),
+        ),
+        Incarnation::new(11),
     )
     .expect("peer streams");
 
@@ -47,7 +53,8 @@ async fn duplex_copies_across_two_nodes() {
 
     let forward = pattern(5 * STREAM_BUFFER_BYTES + 3, 1);
     let backward = pattern(2 * STREAM_BUFFER_BYTES + 9, 2);
-    let (forward_expected, backward_expected) = (forward.clone(), backward.clone());
+    let (forward_expected, backward_expected) =
+        (forward.clone(), backward.clone());
 
     let send_forward = tokio::spawn(async move {
         a_write.write_all(&forward).await.expect("write");
@@ -79,14 +86,18 @@ async fn duplex_copies_across_two_nodes() {
 async fn a_parked_reader_is_woken_by_the_peer_node() {
     let name = fleet_name("w");
     let owner = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet"),
+        ),
+        Incarnation::new(10),
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet"),
+        ),
+        Incarnation::new(11),
     )
     .expect("peer streams");
 
@@ -136,14 +147,18 @@ async fn a_parked_reader_is_woken_by_the_peer_node() {
 async fn a_dropped_pending_operation_does_not_lose_the_next_wake() {
     let name = fleet_name("x");
     let owner = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet"),
+        ),
+        Incarnation::new(10),
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet"),
+        ),
+        Incarnation::new(11),
     )
     .expect("peer streams");
 
@@ -153,7 +168,9 @@ async fn a_dropped_pending_operation_does_not_lose_the_next_wake() {
 
     // Park a read, then abandon it.
     let mut buf = [0_u8; 8];
-    let abandoned = tokio::time::timeout(Duration::from_millis(20), a_read.read(&mut buf)).await;
+    let abandoned =
+        tokio::time::timeout(Duration::from_millis(20), a_read.read(&mut buf))
+            .await;
     assert!(abandoned.is_err(), "nothing was written yet");
     b.write_all(b"later").await.expect("write");
     let n = tokio::time::timeout(Duration::from_secs(5), a_read.read(&mut buf))
@@ -165,8 +182,11 @@ async fn a_dropped_pending_operation_does_not_lose_the_next_wake() {
     // Fill the ring, park a write, abandon it, then drain from the peer.
     let filler = vec![9_u8; STREAM_BUFFER_BYTES];
     a_write.write_all(&filler).await.expect("fill");
-    let abandoned =
-        tokio::time::timeout(Duration::from_millis(20), a_write.write_all(b"stuck")).await;
+    let abandoned = tokio::time::timeout(
+        Duration::from_millis(20),
+        a_write.write_all(b"stuck"),
+    )
+    .await;
     assert!(abandoned.is_err(), "the ring was full");
     let mut drained = vec![0_u8; STREAM_BUFFER_BYTES];
     b.read_exact(&mut drained).await.expect("drain");
@@ -197,14 +217,18 @@ async fn a_body_behind_a_header_wakes_a_reader_that_parked_between_the_two() {
 
     let name = fleet_name("h");
     let owner = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet")),
-        Incarnation::new(10)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet"),
+        ),
+        Incarnation::new(10),
     )
     .expect("owner streams");
     owner.reset_all();
     let peer = Streams::new(
-        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet")),
-        Incarnation::new(11)
+        Arc::new(
+            Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("peer fleet"),
+        ),
+        Incarnation::new(11),
     )
     .expect("peer streams");
 

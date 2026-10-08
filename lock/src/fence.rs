@@ -20,7 +20,7 @@ impl FenceToken {
 impl fmt::Display for FenceToken {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         write!(f, "fence:{}", self.0)
     }
@@ -29,7 +29,7 @@ impl fmt::Display for FenceToken {
 /// Atomic resource-side high-water mark for fencing stale holders.
 #[derive(Debug, Default)]
 pub struct Fence {
-    high_water: AtomicU64
+    high_water: AtomicU64,
 }
 
 impl Fence {
@@ -44,7 +44,7 @@ impl Fence {
     /// Admit this tenure unless a newer tenure was already observed.
     pub fn admit(
         &self,
-        token: FenceToken
+        token: FenceToken,
     ) -> bool {
         let previous = self.high_water.fetch_max(token.get(), Ordering::AcqRel);
         token.get() >= previous

@@ -13,7 +13,11 @@ use crate::id::NetId64;
 #[cfg(unix)]
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
 use crate::ring::{Frame, Ring, RingRegistry, RingTopology};
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 use crate::ring::{ParkedRingEventFd, RingEventFd};
 
 mod cursor;
@@ -31,7 +35,7 @@ pub use name::{FleetName, InvalidFleetName};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FleetObserver {
     name: String,
-    uid: u32
+    uid: u32,
 }
 
 #[cfg(unix)]
@@ -53,19 +57,19 @@ impl FleetObserver {
     /// user's SHM objects.
     pub fn attach_existing_for_uid(
         name: impl Into<String>,
-        uid: u32
+        uid: u32,
     ) -> std::io::Result<Self> {
         let name = name.into();
         if name.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "fleet name must not be empty"
+                "fleet name must not be empty",
             ));
         }
         if name.contains('/') || name.contains('\0') {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "fleet name must not contain '/' or a NUL byte"
+                "fleet name must not contain '/' or a NUL byte",
             ));
         }
         Ok(Self { name, uid })
@@ -82,31 +86,35 @@ impl FleetObserver {
     /// Attach read-only to one exact existing ring kind.
     pub fn ring(
         &self,
-        kind: u8
+        kind: u8,
     ) -> std::io::Result<crate::ring::shm::ShmRingView> {
-        crate::ring::shm::ShmRingView::attach_existing_for_uid(&self.name, kind, self.uid)
+        crate::ring::shm::ShmRingView::attach_existing_for_uid(
+            &self.name, kind, self.uid,
+        )
     }
 
     /// Attach read-only using an explicit per-ring maximum access policy.
     pub fn ring_with_policy(
         &self,
         kind: u8,
-        policy: crate::shm::ShmAccessPolicy
+        policy: crate::shm::ShmAccessPolicy,
     ) -> std::io::Result<crate::ring::shm::ShmRingView> {
         crate::ring::shm::ShmRingView::attach_existing_for_uid_with_policy(
-            &self.name, kind, self.uid, policy
+            &self.name, kind, self.uid, policy,
         )
     }
 
     /// Attach read-only and verify a linked [`OrbitTyped`] contract.
-    pub fn typed_ring<T: OrbitTyped>(&self) -> std::io::Result<crate::ring::shm::ShmRingView> {
+    pub fn typed_ring<T: OrbitTyped>(
+        &self
+    ) -> std::io::Result<crate::ring::shm::ShmRingView> {
         self.typed_ring_with_policy::<T>(crate::shm::ShmAccessPolicy::default())
     }
 
     /// Attach with a policy and additionally verify the typed ring layout.
     pub fn typed_ring_with_policy<T: OrbitTyped>(
         &self,
-        policy: crate::shm::ShmAccessPolicy
+        policy: crate::shm::ShmAccessPolicy,
     ) -> std::io::Result<crate::ring::shm::ShmRingView> {
         let view = self.ring_with_policy(T::KIND, policy)?;
         if view.metadata().spec != T::RING_SPEC {
@@ -117,7 +125,7 @@ impl FleetObserver {
                     T::KIND,
                     T::RING_SPEC,
                     view.metadata().spec
-                )
+                ),
             ));
         }
         Ok(view)
@@ -149,7 +157,7 @@ impl NodeId {
 impl std::fmt::Display for NodeId {
     fn fmt(
         &self,
-        f: &mut std::fmt::Formatter<'_>
+        f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "node:{}", self.0)
     }
@@ -159,7 +167,7 @@ impl std::fmt::Display for NodeId {
 /// state is `Arc`-shared.
 #[derive(Clone)]
 pub struct Fleet {
-    inner: Arc<FleetInner>
+    inner: Arc<FleetInner>,
 }
 
 struct FleetInner {
@@ -180,7 +188,7 @@ struct FleetInner {
     /// to remove what is in use. Read-only attachments hold none.
     #[cfg(unix)]
     #[allow(dead_code)]
-    membership: Option<crate::shm::FleetMembership>
+    membership: Option<crate::shm::FleetMembership>,
 }
 
 /// Backing storage for the fleet's ring buffers — chosen at
@@ -195,7 +203,7 @@ enum RingBacking {
     /// joining the same fleet name share the same kernel-level
     /// memory; writes from one are visible to all immediately.
     #[cfg(unix)]
-    Shm(ShmRingRegistry)
+    Shm(ShmRingRegistry),
 }
 
 impl Fleet {
@@ -203,7 +211,7 @@ impl Fleet {
     /// node lanes. In-memory backings remain process-local.
     pub fn join(
         name: &str,
-        fleet_capacity: u16
+        fleet_capacity: u16,
     ) -> Result<Self> {
         Self::join_as(name, fleet_capacity, NodeId::ZERO)
     }
@@ -212,13 +220,16 @@ impl Fleet {
     pub fn join_as(
         name: &str,
         fleet_capacity: u16,
-        node_id: NodeId
+        node_id: NodeId,
     ) -> Result<Self> {
         if fleet_capacity == 0 {
             return Err(Error::EmptyFleet);
         }
         if node_id.get() >= fleet_capacity {
-            return Err(Error::NodeOutsideFleet { node_id: node_id.get(), fleet_capacity });
+            return Err(Error::NodeOutsideFleet {
+                node_id: node_id.get(),
+                fleet_capacity,
+            });
         }
         Ok(Self {
             inner: Arc::new(FleetInner {
@@ -226,10 +237,12 @@ impl Fleet {
                 fleet_capacity,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::InMemory(RingRegistry::new(fleet_capacity)),
+                backing: RingBacking::InMemory(RingRegistry::new(
+                    fleet_capacity,
+                )),
                 #[cfg(unix)]
-                membership: None
-            })
+                membership: None,
+            }),
         })
     }
 
@@ -247,7 +260,7 @@ impl Fleet {
     #[cfg(unix)]
     pub fn join_shm(
         name: &str,
-        fleet_capacity: u16
+        fleet_capacity: u16,
     ) -> Result<Self> {
         Self::join_shm_as(name, fleet_capacity, NodeId::ZERO)
     }
@@ -261,7 +274,7 @@ impl Fleet {
     pub fn join_shm_as(
         name: &str,
         fleet_capacity: u16,
-        node_id: NodeId
+        node_id: NodeId,
     ) -> Result<Self> {
         Self::join_shm_as_with_policies(name, fleet_capacity, node_id, [])
     }
@@ -274,16 +287,20 @@ impl Fleet {
         name: &str,
         fleet_capacity: u16,
         node_id: NodeId,
-        policies: impl IntoIterator<Item = (u8, crate::shm::ShmAccessPolicy)>
+        policies: impl IntoIterator<Item = (u8, crate::shm::ShmAccessPolicy)>,
     ) -> Result<Self> {
         if fleet_capacity == 0 {
             return Err(Error::EmptyFleet);
         }
         if node_id.get() >= fleet_capacity {
-            return Err(Error::NodeOutsideFleet { node_id: node_id.get(), fleet_capacity });
+            return Err(Error::NodeOutsideFleet {
+                node_id: node_id.get(),
+                fleet_capacity,
+            });
         }
         let name: Arc<str> = Arc::from(name);
-        let membership = crate::shm::join_fleet_membership(&name).map_err(Error::Io)?;
+        let membership =
+            crate::shm::join_fleet_membership(&name).map_err(Error::Io)?;
         Ok(Self {
             inner: Arc::new(FleetInner {
                 name: Arc::clone(&name),
@@ -293,10 +310,10 @@ impl Fleet {
                 backing: RingBacking::Shm(ShmRingRegistry::with_policies(
                     name.as_ref(),
                     fleet_capacity,
-                    policies
+                    policies,
                 )),
-                membership: Some(membership)
-            })
+                membership: Some(membership),
+            }),
         })
     }
 
@@ -356,7 +373,9 @@ impl Fleet {
             RingBacking::InMemory(r) => r.get_or_create::<T>(),
             #[cfg(unix)]
             RingBacking::Shm(_) => {
-                panic!("Fleet::ring called on SHM-backed fleet — use Fleet::shm_ring instead");
+                panic!(
+                    "Fleet::ring called on SHM-backed fleet — use Fleet::shm_ring instead"
+                );
             }
         }
     }
@@ -377,7 +396,9 @@ impl Fleet {
         match &self.inner.backing {
             RingBacking::Shm(r) => r.get_or_create_for::<T>(),
             RingBacking::InMemory(_) => {
-                panic!("Fleet::shm_ring called on in-memory fleet — use Fleet::ring instead");
+                panic!(
+                    "Fleet::shm_ring called on in-memory fleet — use Fleet::ring instead"
+                );
             }
         }
     }
@@ -395,7 +416,7 @@ impl Fleet {
         &self,
         frame_kind: u8,
         ver: u64,
-        payload: Bytes
+        payload: Bytes,
     ) -> NetId64 {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
@@ -404,9 +425,11 @@ impl Fleet {
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                let ring =
-                    r.get_or_create_for::<T>().expect("SHM ring open failed — fleet unusable");
-                ring.write(self.node_id(), frame_kind, ver, payload).expect("SHM ring write failed")
+                let ring = r
+                    .get_or_create_for::<T>()
+                    .expect("SHM ring open failed — fleet unusable");
+                ring.write(self.node_id(), frame_kind, ver, payload)
+                    .expect("SHM ring write failed")
             }
         }
     }
@@ -427,7 +450,7 @@ impl Fleet {
         &self,
         frame_kind: u8,
         ver: u64,
-        payloads: Vec<Bytes>
+        payloads: Vec<Bytes>,
     ) -> Vec<NetId64> {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
@@ -436,8 +459,9 @@ impl Fleet {
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                let ring =
-                    r.get_or_create_for::<T>().expect("SHM ring open failed — fleet unusable");
+                let ring = r
+                    .get_or_create_for::<T>()
+                    .expect("SHM ring open failed — fleet unusable");
                 ring.write_batch(self.node_id(), frame_kind, ver, payloads)
                     .expect("SHM ring batch write failed")
             }
@@ -449,12 +473,12 @@ impl Fleet {
     /// not wrapped past it).
     pub fn read(
         &self,
-        id: NetId64
+        id: NetId64,
     ) -> Option<Frame> {
         match &self.inner.backing {
             RingBacking::InMemory(r) => r.lookup(id.kind())?.read(id),
             #[cfg(unix)]
-            RingBacking::Shm(r) => r.lookup(id.kind())?.read(id)
+            RingBacking::Shm(r) => r.lookup(id.kind())?.read(id),
         }
     }
 
@@ -463,7 +487,9 @@ impl Fleet {
     pub fn read_head<T: OrbitTyped>(&self) -> Option<Frame> {
         if T::RING_SPEC.topology == RingTopology::PerNode {
             let head = self.lane_head::<T>(self.node_id());
-            return (head > 0).then(|| self.read_lane_at::<T>(self.node_id(), head - 1)).flatten();
+            return (head > 0)
+                .then(|| self.read_lane_at::<T>(self.node_id(), head - 1))
+                .flatten();
         }
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
@@ -493,7 +519,9 @@ impl Fleet {
         match &self.inner.backing {
             RingBacking::InMemory(r) => r.get_or_create::<T>().head(),
             #[cfg(unix)]
-            RingBacking::Shm(r) => r.get_or_create_for::<T>().map(|ring| ring.head()).unwrap_or(0)
+            RingBacking::Shm(r) => {
+                r.get_or_create_for::<T>().map(|ring| ring.head()).unwrap_or(0)
+            }
         }
     }
 
@@ -506,7 +534,7 @@ impl Fleet {
     /// prefer [`Fleet::read`].
     pub fn read_at<T: OrbitTyped>(
         &self,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         if T::RING_SPEC.topology == RingTopology::PerNode {
             return self.read_lane_at::<T>(self.node_id(), counter);
@@ -514,24 +542,28 @@ impl Fleet {
         match &self.inner.backing {
             RingBacking::InMemory(r) => r.get_or_create::<T>().read_at(counter),
             #[cfg(unix)]
-            RingBacking::Shm(r) => r.get_or_create_for::<T>().ok()?.read_at(counter)
+            RingBacking::Shm(r) => {
+                r.get_or_create_for::<T>().ok()?.read_at(counter)
+            }
         }
     }
 
     pub(crate) fn read_state_at<T: OrbitTyped>(
         &self,
-        counter: u64
+        counter: u64,
     ) -> crate::ring::cursor::RingRead {
         if T::RING_SPEC.topology == RingTopology::PerNode {
             return self.read_lane_state_at::<T>(self.node_id(), counter);
         }
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().read_state_at(counter),
+            RingBacking::InMemory(r) => {
+                r.get_or_create::<T>().read_state_at(counter)
+            }
             #[cfg(unix)]
             RingBacking::Shm(r) => r
                 .get_or_create_for::<T>()
                 .map(|ring| ring.read_state_at(counter))
-                .unwrap_or(crate::ring::cursor::RingRead::Unavailable)
+                .unwrap_or(crate::ring::cursor::RingRead::Unavailable),
         }
     }
 
@@ -540,14 +572,17 @@ impl Fleet {
     /// On a shared ring every node id addresses the sole shared lane.
     pub fn lane_head<T: OrbitTyped>(
         &self,
-        node_id: NodeId
+        node_id: NodeId,
     ) -> u64 {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().lane_head(node_id),
-            #[cfg(unix)]
-            RingBacking::Shm(r) => {
-                r.get_or_create_for::<T>().map(|ring| ring.lane_head(node_id)).unwrap_or(0)
+            RingBacking::InMemory(r) => {
+                r.get_or_create::<T>().lane_head(node_id)
             }
+            #[cfg(unix)]
+            RingBacking::Shm(r) => r
+                .get_or_create_for::<T>()
+                .map(|ring| ring.lane_head(node_id))
+                .unwrap_or(0),
         }
     }
 
@@ -555,27 +590,33 @@ impl Fleet {
     pub fn read_lane_at<T: OrbitTyped>(
         &self,
         node_id: NodeId,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().read_lane_at(node_id, counter),
+            RingBacking::InMemory(r) => {
+                r.get_or_create::<T>().read_lane_at(node_id, counter)
+            }
             #[cfg(unix)]
-            RingBacking::Shm(r) => r.get_or_create_for::<T>().ok()?.read_lane_at(node_id, counter)
+            RingBacking::Shm(r) => {
+                r.get_or_create_for::<T>().ok()?.read_lane_at(node_id, counter)
+            }
         }
     }
 
     pub(crate) fn read_lane_state_at<T: OrbitTyped>(
         &self,
         node_id: NodeId,
-        counter: u64
+        counter: u64,
     ) -> crate::ring::cursor::RingRead {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().read_lane_state_at(node_id, counter),
+            RingBacking::InMemory(r) => {
+                r.get_or_create::<T>().read_lane_state_at(node_id, counter)
+            }
             #[cfg(unix)]
             RingBacking::Shm(r) => r
                 .get_or_create_for::<T>()
                 .map(|ring| ring.read_lane_state_at(node_id, counter))
-                .unwrap_or(crate::ring::cursor::RingRead::Unavailable)
+                .unwrap_or(crate::ring::cursor::RingRead::Unavailable),
         }
     }
 
@@ -589,7 +630,7 @@ impl Fleet {
             RingBacking::Shm(r) => r
                 .get_or_create_for::<T>()
                 .map(|ring| ring.capacity())
-                .unwrap_or(T::RING_SPEC.capacity)
+                .unwrap_or(T::RING_SPEC.capacity),
         }
     }
 
@@ -605,19 +646,21 @@ impl Fleet {
             RingBacking::Shm(r) => r
                 .get_or_create_for::<T>()
                 .expect("SHM ring open failed — fleet unusable")
-                .next_version()
+                .next_version(),
         }
     }
 
     /// Return the last semantic version allocated for `T` without advancing it.
     pub fn current_ring_version<T: OrbitTyped>(&self) -> u64 {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().current_version(),
+            RingBacking::InMemory(r) => {
+                r.get_or_create::<T>().current_version()
+            }
             #[cfg(unix)]
             RingBacking::Shm(r) => r
                 .get_or_create_for::<T>()
                 .expect("SHM ring open failed — fleet unusable")
-                .current_version()
+                .current_version(),
         }
     }
 
@@ -642,7 +685,11 @@ impl Fleet {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     /// Create a process-local readiness fd for one notified SHM ring.
     ///
     /// The fd only signals that the ring generation changed. After draining
@@ -650,52 +697,71 @@ impl Fleet {
     /// may coalesce into one readiness notification.
     pub fn ring_event_fd<T: OrbitTyped>(&self) -> std::io::Result<RingEventFd> {
         match &self.inner.backing {
-            RingBacking::Shm(rings) => RingEventFd::new(rings.get_or_create_for::<T>()?),
+            RingBacking::Shm(rings) => {
+                RingEventFd::new(rings.get_or_create_for::<T>()?)
+            }
             RingBacking::InMemory(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "Orbit eventfd requires a shared-memory fleet"
-            ))
+                "Orbit eventfd requires a shared-memory fleet",
+            )),
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     /// Publish one frame and notify native waiters after it commits.
     pub fn publish_notified<T: OrbitTyped>(
         &self,
         frame_kind: u8,
         ver: u64,
-        payload: Bytes
+        payload: Bytes,
     ) -> std::io::Result<NetId64> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
                 let ring = rings.get_or_create_for::<T>()?;
-                let id = ring.write(self.node_id(), frame_kind, ver, payload)?;
+                let id =
+                    ring.write(self.node_id(), frame_kind, ver, payload)?;
                 RingEventFd::notify(&ring)?;
                 Ok(id)
             }
             // Process-local fleets do not need a kernel wake bridge.
-            RingBacking::InMemory(rings) => {
-                Ok(rings.get_or_create::<T>().write(self.node_id(), frame_kind, ver, payload))
-            }
+            RingBacking::InMemory(rings) => Ok(rings
+                .get_or_create::<T>()
+                .write(self.node_id(), frame_kind, ver, payload)),
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     /// Readiness for a ring published with
     /// [`publish_notified_parked`](Self::publish_notified_parked). See
     /// [`ParkedRingEventFd`]: every reader of such a ring uses this, not
     /// [`ring_event_fd`](Self::ring_event_fd).
-    pub fn ring_event_fd_parked<T: OrbitTyped>(&self) -> std::io::Result<ParkedRingEventFd> {
+    pub fn ring_event_fd_parked<T: OrbitTyped>(
+        &self
+    ) -> std::io::Result<ParkedRingEventFd> {
         match &self.inner.backing {
-            RingBacking::Shm(rings) => ParkedRingEventFd::new(rings.get_or_create_for::<T>()?),
+            RingBacking::Shm(rings) => {
+                ParkedRingEventFd::new(rings.get_or_create_for::<T>()?)
+            }
             RingBacking::InMemory(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "Orbit parked readiness requires a shared-memory fleet"
-            ))
+                "Orbit parked readiness requires a shared-memory fleet",
+            )),
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     /// Publish one frame and wake the ring's readers only if one is parked.
     ///
     /// For rings read through [`ring_event_fd_parked`](Self::ring_event_fd_parked):
@@ -706,22 +772,27 @@ impl Fleet {
         &self,
         frame_kind: u8,
         ver: u64,
-        payload: Bytes
+        payload: Bytes,
     ) -> std::io::Result<NetId64> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
                 let ring = rings.get_or_create_for::<T>()?;
-                let id = ring.write(self.node_id(), frame_kind, ver, payload)?;
+                let id =
+                    ring.write(self.node_id(), frame_kind, ver, payload)?;
                 ParkedRingEventFd::notify(&ring)?;
                 Ok(id)
             }
-            RingBacking::InMemory(rings) => {
-                Ok(rings.get_or_create::<T>().write(self.node_id(), frame_kind, ver, payload))
-            }
+            RingBacking::InMemory(rings) => Ok(rings
+                .get_or_create::<T>()
+                .write(self.node_id(), frame_kind, ver, payload)),
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     /// Publish one contiguous batch and wake the ring's readers only if one
     /// is parked — [`publish_notified_parked`](Self::publish_notified_parked)
     /// for a batch. A per-node lane commits the whole batch before a reader
@@ -730,50 +801,58 @@ impl Fleet {
         &self,
         frame_kind: u8,
         ver: u64,
-        payloads: Vec<Bytes>
+        payloads: Vec<Bytes>,
     ) -> std::io::Result<Vec<NetId64>> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
                 let ring = rings.get_or_create_for::<T>()?;
-                let ids = ring.write_batch(self.node_id(), frame_kind, ver, payloads)?;
+                let ids = ring.write_batch(
+                    self.node_id(),
+                    frame_kind,
+                    ver,
+                    payloads,
+                )?;
                 if !ids.is_empty() {
                     ParkedRingEventFd::notify(&ring)?;
                 }
                 Ok(ids)
             }
-            RingBacking::InMemory(rings) => Ok(rings.get_or_create::<T>().write_batch(
-                self.node_id(),
-                frame_kind,
-                ver,
-                payloads
-            ))
+            RingBacking::InMemory(rings) => Ok(rings
+                .get_or_create::<T>()
+                .write_batch(self.node_id(), frame_kind, ver, payloads)),
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     /// Publish one contiguous batch and notify native waiters once after the
     /// complete batch commits.
     pub fn publish_batch_notified<T: OrbitTyped>(
         &self,
         frame_kind: u8,
         ver: u64,
-        payloads: Vec<Bytes>
+        payloads: Vec<Bytes>,
     ) -> std::io::Result<Vec<NetId64>> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
                 let ring = rings.get_or_create_for::<T>()?;
-                let ids = ring.write_batch(self.node_id(), frame_kind, ver, payloads)?;
+                let ids = ring.write_batch(
+                    self.node_id(),
+                    frame_kind,
+                    ver,
+                    payloads,
+                )?;
                 if !ids.is_empty() {
                     RingEventFd::notify(&ring)?;
                 }
                 Ok(ids)
             }
-            RingBacking::InMemory(rings) => Ok(rings.get_or_create::<T>().write_batch(
-                self.node_id(),
-                frame_kind,
-                ver,
-                payloads
-            ))
+            RingBacking::InMemory(rings) => Ok(rings
+                .get_or_create::<T>()
+                .write_batch(self.node_id(), frame_kind, ver, payloads)),
         }
     }
 }
@@ -781,7 +860,7 @@ impl Fleet {
 impl std::fmt::Debug for Fleet {
     fn fmt(
         &self,
-        f: &mut std::fmt::Formatter<'_>
+        f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.debug_struct("Fleet")
             .field("name", &self.inner.name)

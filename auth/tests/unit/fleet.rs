@@ -7,7 +7,7 @@ fn setup() -> (Authority, FleetAuth<Blake3State>) {
     let authority = Authority::new(
         "prod",
         "login",
-        Keyring::new(1, [(1, SecretKey::from_bytes([1; 32]))]).unwrap()
+        Keyring::new(1, [(1, SecretKey::from_bytes([1; 32]))]).unwrap(),
     )
     .unwrap();
     let auth = FleetAuth::new(
@@ -15,14 +15,14 @@ fn setup() -> (Authority, FleetAuth<Blake3State>) {
         &authority,
         SecretKey::from_bytes([2; 32]),
         NonZeroUsize::new(2).unwrap(),
-        Blake3State
+        Blake3State,
     )
     .unwrap();
     (authority, auth)
 }
 fn principal(
     authority: &Authority,
-    auth: &FleetAuth<Blake3State>
+    auth: &FleetAuth<Blake3State>,
 ) -> Arc<Principal> {
     let session = auth.create_session("sensitive-subject", 100, 300).unwrap();
     let audience = Audience::new("api").unwrap();
@@ -35,16 +35,16 @@ fn principal(
                 capabilities: BTreeSet::new(),
                 issued_at: 100,
                 not_before: 100,
-                expires_at: 250
+                expires_at: 250,
             },
-            &session
+            &session,
         )
         .unwrap();
     authority
         .validator(Validation {
             audience,
             purpose: Purpose::Access,
-            required_capabilities: BTreeSet::new()
+            required_capabilities: BTreeSet::new(),
         })
         .validate(token.expose(), 110, auth)
         .unwrap()
@@ -59,10 +59,15 @@ fn warm_checks_compare_authenticated_bytes_even_while_writer_lock_is_held() {
         .write(|slots| {
             // Would deadlock if a warm check tried to reacquire the state lock.
             auth.check(&principal, 111)?;
-            let snapshot = find(slots, auth.session_key(id), &auth.protection)?.unwrap();
+            let snapshot =
+                find(slots, auth.session_key(id), &auth.protection)?.unwrap();
             let mut record = snapshot.record;
             record.status = REVOKED;
-            slots[snapshot.index].store(record, snapshot.index, &auth.protection)?;
+            slots[snapshot.index].store(
+                record,
+                snapshot.index,
+                &auth.protection,
+            )?;
             // A changed revision reloads atomics without decrypting or acquiring
             // the writer lock when the committed snapshot is stable.
             assert_eq!(auth.check(&principal, 112), Err(Error::Revoked));
@@ -95,7 +100,11 @@ fn reused_slot_cannot_authorize_the_old_cached_session() {
             let snapshot = find(slots, key, &auth.protection)?.unwrap();
             let mut other = snapshot.record;
             other.key = StoreKey([8; 4]);
-            slots[snapshot.index].store(other, snapshot.index, &auth.protection)?;
+            slots[snapshot.index].store(
+                other,
+                snapshot.index,
+                &auth.protection,
+            )?;
             Ok(())
         })
         .unwrap();

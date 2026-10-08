@@ -21,13 +21,13 @@ pub(crate) const MIN_MUTATION_HEADER_LEN: usize = 1 + 2 + 2 + 8 + 8 + 8 + 4 + 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CacheRevision {
     pub sequence: u64,
-    pub mutation_id: NetId64
+    pub mutation_id: NetId64,
 }
 
 impl Ord for CacheRevision {
     fn cmp(
         &self,
-        other: &Self
+        other: &Self,
     ) -> Ordering {
         self.sequence
             .cmp(&other.sequence)
@@ -38,7 +38,7 @@ impl Ord for CacheRevision {
 impl PartialOrd for CacheRevision {
     fn partial_cmp(
         &self,
-        other: &Self
+        other: &Self,
     ) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -50,7 +50,7 @@ pub struct PayloadRef {
     pub first_id: NetId64,
     pub payload_version: u64,
     pub chunk_count: u32,
-    pub value_len: u64
+    pub value_len: u64,
 }
 
 /// One cache fact decoded from the mutation ring.
@@ -61,25 +61,25 @@ pub enum CacheMutation {
         key: Bytes,
         revision: CacheRevision,
         expires_at_ms: Option<u64>,
-        payload: PayloadRef
+        payload: PayloadRef,
     },
     Delete {
         store: Bytes,
         key: Bytes,
-        revision: CacheRevision
+        revision: CacheRevision,
     },
     Reset {
         store: Bytes,
-        revision: CacheRevision
-    }
+        revision: CacheRevision,
+    },
 }
 
 impl CacheMutation {
     pub fn store(&self) -> &Bytes {
         match self {
-            Self::Put { store, .. } | Self::Delete { store, .. } | Self::Reset { store, .. } => {
-                store
-            }
+            Self::Put { store, .. }
+            | Self::Delete { store, .. }
+            | Self::Reset { store, .. } => store,
         }
     }
 
@@ -87,7 +87,7 @@ impl CacheMutation {
         match self {
             Self::Put { revision, .. }
             | Self::Delete { revision, .. }
-            | Self::Reset { revision, .. } => *revision
+            | Self::Reset { revision, .. } => *revision,
         }
     }
 }
@@ -113,11 +113,13 @@ pub(crate) fn encode_put<L: CacheLayout>(
     store: &[u8],
     key: &[u8],
     expires_at_ms: Option<u64>,
-    payload: PayloadRef
+    payload: PayloadRef,
 ) -> Result<Bytes> {
     validate_store::<L>(store)?;
     validate_key::<L>(store.len(), key)?;
-    let mut out = BytesMut::with_capacity(MIN_MUTATION_HEADER_LEN + store.len() + key.len());
+    let mut out = BytesMut::with_capacity(
+        MIN_MUTATION_HEADER_LEN + store.len() + key.len(),
+    );
     out.put_u8(PROTOCOL_VERSION);
     out.put_u16_le(store.len() as u16);
     out.put_u16_le(key.len() as u16);
@@ -133,11 +135,13 @@ pub(crate) fn encode_put<L: CacheLayout>(
 
 pub(crate) fn encode_delete<L: CacheLayout>(
     store: &[u8],
-    key: &[u8]
+    key: &[u8],
 ) -> Result<Bytes> {
     validate_store::<L>(store)?;
     validate_key::<L>(store.len(), key)?;
-    let mut out = BytesMut::with_capacity(MIN_MUTATION_HEADER_LEN + store.len() + key.len());
+    let mut out = BytesMut::with_capacity(
+        MIN_MUTATION_HEADER_LEN + store.len() + key.len(),
+    );
     out.put_u8(PROTOCOL_VERSION);
     out.put_u16_le(store.len() as u16);
     out.put_u16_le(key.len() as u16);
@@ -153,7 +157,8 @@ pub(crate) fn encode_delete<L: CacheLayout>(
 
 pub(crate) fn encode_reset<L: CacheLayout>(store: &[u8]) -> Result<Bytes> {
     validate_store::<L>(store)?;
-    let mut out = BytesMut::with_capacity(MIN_MUTATION_HEADER_LEN + store.len());
+    let mut out =
+        BytesMut::with_capacity(MIN_MUTATION_HEADER_LEN + store.len());
     out.put_u8(PROTOCOL_VERSION);
     out.put_u16_le(store.len() as u16);
     out.put_u16_le(0);
@@ -167,17 +172,25 @@ pub(crate) fn encode_reset<L: CacheLayout>(store: &[u8]) -> Result<Bytes> {
 }
 
 pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
-    if frame.payload.len() < MIN_MUTATION_HEADER_LEN || frame.payload[0] != PROTOCOL_VERSION {
+    if frame.payload.len() < MIN_MUTATION_HEADER_LEN
+        || frame.payload[0] != PROTOCOL_VERSION
+    {
         return None;
     }
 
-    let store_len = u16::from_le_bytes(frame.payload[1..3].try_into().ok()?) as usize;
-    let key_len = u16::from_le_bytes(frame.payload[3..5].try_into().ok()?) as usize;
-    let expires_at_ms = u64::from_le_bytes(frame.payload[5..13].try_into().ok()?);
-    let first_payload_id =
-        NetId64::from_raw(u64::from_le_bytes(frame.payload[13..21].try_into().ok()?));
-    let payload_version = u64::from_le_bytes(frame.payload[21..29].try_into().ok()?);
-    let chunk_count = u32::from_le_bytes(frame.payload[29..33].try_into().ok()?);
+    let store_len =
+        u16::from_le_bytes(frame.payload[1..3].try_into().ok()?) as usize;
+    let key_len =
+        u16::from_le_bytes(frame.payload[3..5].try_into().ok()?) as usize;
+    let expires_at_ms =
+        u64::from_le_bytes(frame.payload[5..13].try_into().ok()?);
+    let first_payload_id = NetId64::from_raw(u64::from_le_bytes(
+        frame.payload[13..21].try_into().ok()?,
+    ));
+    let payload_version =
+        u64::from_le_bytes(frame.payload[21..29].try_into().ok()?);
+    let chunk_count =
+        u32::from_le_bytes(frame.payload[29..33].try_into().ok()?);
     let value_len = u64::from_le_bytes(frame.payload[33..41].try_into().ok()?);
     let store_end = MIN_MUTATION_HEADER_LEN.checked_add(store_len)?;
     let key_end = store_end.checked_add(key_len)?;
@@ -205,8 +218,8 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
                     first_id: first_payload_id,
                     payload_version,
                     chunk_count,
-                    value_len
-                }
+                    value_len,
+                },
             })
         }
         FRAME_KIND_DELETE
@@ -231,7 +244,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
         {
             Some(CacheMutation::Reset { store, revision })
         }
-        _ => None
+        _ => None,
     }
 }
 
@@ -248,7 +261,7 @@ fn validate_store<L: CacheLayout>(store: &[u8]) -> Result<()> {
 
 fn validate_key<L: CacheLayout>(
     store_len: usize,
-    key: &[u8]
+    key: &[u8],
 ) -> Result<()> {
     if key.is_empty() {
         return Err(Error::KeyEmpty);

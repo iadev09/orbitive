@@ -14,10 +14,15 @@ use crate::{Error, HEADER_LEN, Result};
 /// Event frame payload limit for the default ring. This is the event lane's
 /// own SHM payload capacity; non-Unix keeps the same contract so callers do
 /// not accidentally rely on unbounded in-memory frames.
-pub const EVENT_RING_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_EVENT_RING_CAPACITY"), 1_024);
+pub const EVENT_RING_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_EVENT_RING_CAPACITY"),
+    1_024,
+);
 pub const EVENT_RING_PAYLOAD_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_EVENT_RING_PAYLOAD_CAPACITY"), 512);
+    orbit_core::compile::usize_from_env(
+        option_env!("ORBIT_EVENT_RING_PAYLOAD_CAPACITY"),
+        512,
+    );
 pub const EVENT_RING_SPEC: RingSpec =
     RingSpec::per_node(EVENT_RING_CAPACITY, EVENT_RING_PAYLOAD_CAPACITY);
 pub const EVENT_PAYLOAD_MAX: usize = EVENT_RING_SPEC.payload_capacity;
@@ -57,22 +62,32 @@ impl<L: EventLayout> OrbitTyped for EventRecord<L> {
     // Hand-picked V0 kinds. Build-time KIND allocation will replace
     // these manual values later.
     const KIND: u8 = L::RING_KIND;
-    const RING_SPEC: RingSpec =
-        RingSpec::per_node(L::RING_SPEC.capacity, L::RING_SPEC.payload_capacity);
+    const RING_SPEC: RingSpec = RingSpec::per_node(
+        L::RING_SPEC.capacity,
+        L::RING_SPEC.payload_capacity,
+    );
 }
 
 pub(crate) fn validate<L: EventLayout>() -> Result<()> {
     if L::RING_SPEC.topology != RingTopology::PerNode {
-        return Err(Error::InvalidLayout("the event ring must use per-node lanes"));
+        return Err(Error::InvalidLayout(
+            "the event ring must use per-node lanes",
+        ));
     }
     if L::RING_SPEC.capacity == 0 || !L::RING_SPEC.capacity.is_power_of_two() {
-        return Err(Error::InvalidLayout("event-ring capacity must be a non-zero power of two"));
+        return Err(Error::InvalidLayout(
+            "event-ring capacity must be a non-zero power of two",
+        ));
     }
     if L::RING_SPEC.payload_capacity < HEADER_LEN {
-        return Err(Error::InvalidLayout("event-ring payload cannot fit an event header"));
+        return Err(Error::InvalidLayout(
+            "event-ring payload cannot fit an event header",
+        ));
     }
     if L::RING_SPEC.payload_capacity > u32::MAX as usize {
-        return Err(Error::InvalidLayout("event-ring payload exceeds the frame length field"));
+        return Err(Error::InvalidLayout(
+            "event-ring payload exceeds the frame length field",
+        ));
     }
     Ok(())
 }

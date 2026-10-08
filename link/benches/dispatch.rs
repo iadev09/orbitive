@@ -17,49 +17,70 @@ use orbit_stream::{Endpoint, StreamSpec, Ticket};
 
 // Representative production geometry rather than a tiny test-only table.
 // The benchmark remains a c1 protocol-cost microbenchmark.
-const SPEC: LinkSpec =
-    LinkSpec::new(2, 196, InboxGeometry::new(128, 17 * 1024), StreamSpec::new(197, 128, 64 * 1024));
+const SPEC: LinkSpec = LinkSpec::new(
+    2,
+    196,
+    InboxGeometry::new(128, 17 * 1024),
+    StreamSpec::new(197, 128, 64 * 1024),
+);
 const REQUEST: &[u8] = b"small request body";
 const RESPONSE: &[u8] = b"small response body";
 
 fn fleet_name() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    format!("olb{:x}{:x}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "olb{:x}{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 struct Fixtures {
     segment: LinkSegment,
     caller: LinkBodies,
-    target: LinkBodies
+    target: LinkBodies,
 }
 
 impl Fixtures {
     fn new() -> Self {
         let name = fleet_name();
         let segment = LinkSegment::open(&name, SPEC).expect("link inbox");
-        segment.inbox().claim_lane(0, "caller", "edge", 1).expect("caller lane");
-        segment.inbox().claim_lane(1, "service", "worker", 2).expect("target lane");
-        let caller = LinkBodies::for_name(&name, 0, 1, SPEC).expect("caller bodies");
+        segment
+            .inbox()
+            .claim_lane(0, "caller", "edge", 1)
+            .expect("caller lane");
+        segment
+            .inbox()
+            .claim_lane(1, "service", "worker", 2)
+            .expect("target lane");
+        let caller =
+            LinkBodies::for_name(&name, 0, 1, SPEC).expect("caller bodies");
         caller.streams().reset_all();
-        let target = LinkBodies::for_name(&name, 1, 2, SPEC).expect("target bodies");
+        let target =
+            LinkBodies::for_name(&name, 1, 2, SPEC).expect("target bodies");
         Self { segment, caller, target }
     }
 
     fn announce(
         &self,
-        ticket: Ticket
+        ticket: Ticket,
     ) -> Ticket {
         let target = self.segment.inbox().targets("service")[0].0;
-        self.segment.inbox().write(target, ticket.to_string().as_bytes()).expect("dispatch frame");
+        self.segment
+            .inbox()
+            .write(target, ticket.to_string().as_bytes())
+            .expect("dispatch frame");
         let mut frame = Vec::new();
-        assert!(self.segment.inbox().read(target, &mut frame).expect("read frame"));
+        assert!(
+            self.segment.inbox().read(target, &mut frame).expect("read frame")
+        );
         String::from_utf8(frame).expect("ticket text").parse().expect("ticket")
     }
 
     fn exchange(
         &self,
         creator: &Endpoint,
-        ticket: Ticket
+        ticket: Ticket,
     ) {
         let peer = self.target.accept(self.announce(ticket)).expect("accept");
         creator.try_write_exact(REQUEST).expect("request write");
@@ -89,7 +110,8 @@ fn benches(criterion: &mut Criterion) {
         });
     });
 
-    let (mut retained, ticket) = fixtures.caller.create().expect("retained creator");
+    let (mut retained, ticket) =
+        fixtures.caller.create().expect("retained creator");
     let mut first = true;
     group.bench_function("orbit-link-rearmed-slot", |bencher| {
         bencher.iter(|| {
@@ -104,7 +126,8 @@ fn benches(criterion: &mut Criterion) {
 
     group.bench_function("unix-stream-pair", |bencher| {
         bencher.iter(|| {
-            let (mut caller, mut target) = UnixStream::pair().expect("socket pair");
+            let (mut caller, mut target) =
+                UnixStream::pair().expect("socket pair");
             caller.write_all(REQUEST).expect("request write");
             let mut request = [0_u8; REQUEST.len()];
             target.read_exact(&mut request).expect("request read");

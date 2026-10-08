@@ -14,8 +14,8 @@ use orbit_core::shm::{ShmRegion, ring_segment_name};
 use orbit_core::{Fleet, OrbitEpoch};
 
 use crate::layout::{
-    Direction, Doorbell, FLAG_READER_GONE, FLAG_RESET, Geometry, Header, SIDE_CLAIMED, SIDE_DEAD,
-    SLOT_EMPTY, SLOT_LIVE, Slot
+    Direction, Doorbell, FLAG_READER_GONE, FLAG_RESET, Geometry, Header,
+    SIDE_CLAIMED, SIDE_DEAD, SLOT_EMPTY, SLOT_LIVE, Slot,
 };
 use crate::wake::{Doorstep, Driver, Interest, Registry};
 use crate::{Error, Incarnation, Result, StreamSpec, lock_unpoisoned};
@@ -23,19 +23,20 @@ use crate::{Error, Incarnation, Result, StreamSpec, lock_unpoisoned};
 enum Backing {
     Memory(AlignedBytes),
     #[cfg(unix)]
-    Shm(ShmRegion)
+    Shm(ShmRegion),
 }
 
 /// Heap bytes aligned like the mapping, so slots keep their cache lines in
 /// the standalone backend too.
 struct AlignedBytes {
     ptr: *mut u8,
-    layout: std::alloc::Layout
+    layout: std::alloc::Layout,
 }
 
 impl AlignedBytes {
     fn zeroed(size: usize) -> Self {
-        let layout = std::alloc::Layout::from_size_align(size, 64).expect("segment layout");
+        let layout = std::alloc::Layout::from_size_align(size, 64)
+            .expect("segment layout");
         // SAFETY: the layout has a nonzero size (a header at least).
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!ptr.is_null(), "stream table allocation failed");
@@ -77,7 +78,7 @@ pub(crate) struct Table {
     /// The driver's end of this process's readiness descriptor, once
     /// somebody has asked for one. Read on every drain, so it is a
     /// `OnceLock` rather than a lock.
-    readiness: std::sync::OnceLock<Signal>
+    readiness: std::sync::OnceLock<Signal>,
 }
 
 impl Table {
@@ -85,7 +86,7 @@ impl Table {
         match &self.backing {
             Backing::Memory(bytes) => bytes.ptr,
             #[cfg(unix)]
-            Backing::Shm(region) => region.as_ptr()
+            Backing::Shm(region) => region.as_ptr(),
         }
     }
 
@@ -93,7 +94,7 @@ impl Table {
         match &self.backing {
             Backing::Memory(_) => false,
             #[cfg(unix)]
-            Backing::Shm(_) => true
+            Backing::Shm(_) => true,
         }
     }
 
@@ -130,7 +131,7 @@ impl Table {
 
     fn doorbell(
         &self,
-        node: usize
+        node: usize,
     ) -> &Doorbell {
         debug_assert!(node < self.geometry.fleet_capacity);
         // SAFETY: `fleet_capacity` doorbells follow the header, zeroed at
@@ -138,7 +139,10 @@ impl Table {
         unsafe {
             &*self
                 .base()
-                .add(self.geometry.doorbells_offset + node * size_of::<Doorbell>())
+                .add(
+                    self.geometry.doorbells_offset
+                        + node * size_of::<Doorbell>(),
+                )
                 .cast::<Doorbell>()
         }
     }
@@ -147,15 +151,22 @@ impl Table {
         &self,
         offset: usize,
         node: usize,
-        word: usize
+        word: usize,
     ) -> &AtomicU64 {
-        debug_assert!(node < self.geometry.fleet_capacity && word < self.geometry.bitmap_words);
+        debug_assert!(
+            node < self.geometry.fleet_capacity
+                && word < self.geometry.bitmap_words
+        );
         // SAFETY: both bitmaps sit between the doorbells and the slots;
         // atomic words only.
         unsafe {
             &*self
                 .base()
-                .add(offset + (node * self.geometry.bitmap_words + word) * size_of::<AtomicU64>())
+                .add(
+                    offset
+                        + (node * self.geometry.bitmap_words + word)
+                            * size_of::<AtomicU64>(),
+                )
                 .cast::<AtomicU64>()
         }
     }
@@ -163,7 +174,7 @@ impl Table {
     fn pending_word(
         &self,
         node: usize,
-        word: usize
+        word: usize,
     ) -> &AtomicU64 {
         self.bitmap_word(self.geometry.pending_offset, node, word)
     }
@@ -171,7 +182,7 @@ impl Table {
     fn offer_word(
         &self,
         node: usize,
-        word: usize
+        word: usize,
     ) -> &AtomicU64 {
         self.bitmap_word(self.geometry.offers_offset, node, word)
     }
@@ -182,7 +193,7 @@ impl Table {
         unsafe {
             std::slice::from_raw_parts(
                 self.base().add(self.geometry.slots_offset).cast::<Slot>(),
-                self.geometry.total_slots
+                self.geometry.total_slots,
             )
         }
     }
@@ -192,7 +203,7 @@ impl Table {
     pub(crate) fn buffer(
         &self,
         slot: usize,
-        direction: usize
+        direction: usize,
     ) -> *mut u8 {
         // SAFETY: inside the segment by construction of `Geometry`.
         unsafe { self.base().add(self.geometry.buffer_offset(slot, direction)) }
@@ -209,7 +220,8 @@ impl Table {
             let index = lane_start + ((*hint + offset) & (lane_capacity - 1));
             let slot = &slots[index];
             if slot.state.load(Ordering::Acquire) == SLOT_EMPTY
-                && let Some(generation) = slot.install(self.node, self.incarnation)
+                && let Some(generation) =
+                    slot.install(self.node, self.incarnation)
             {
                 *hint = (index - lane_start + 1) & (lane_capacity - 1);
                 return Ok((index, generation));
@@ -227,7 +239,7 @@ impl Table {
         index: usize,
         slot: &Slot,
         direction: &Direction,
-        ring: Ring
+        ring: Ring,
     ) {
         direction.changes.fetch_add(1, Ordering::SeqCst);
         if direction.waiters.load(Ordering::SeqCst) > 0 {
@@ -236,7 +248,7 @@ impl Table {
         let sides: &[usize] = match ring {
             Ring::Nobody => return,
             Ring::Side(side) => &[side],
-            Ring::Both => &[0, 1]
+            Ring::Both => &[0, 1],
         };
         if !self.is_shared() {
             self.registry.wake(index);
@@ -258,10 +270,11 @@ impl Table {
     fn ring(
         &self,
         node: usize,
-        pending: Option<usize>
+        pending: Option<usize>,
     ) {
         if let Some(index) = pending {
-            self.pending_word(node, index / 64).fetch_or(1 << (index % 64), Ordering::SeqCst);
+            self.pending_word(node, index / 64)
+                .fetch_or(1 << (index % 64), Ordering::SeqCst);
         }
         let doorbell = self.doorbell(node);
         doorbell.generation.fetch_add(1, Ordering::SeqCst);
@@ -270,7 +283,9 @@ impl Table {
         let listening = {
             use crate::bell::ARMED;
             if listening & ARMED != 0
-                && doorbell.listening.fetch_and(!ARMED, Ordering::SeqCst) & ARMED != 0
+                && doorbell.listening.fetch_and(!ARMED, Ordering::SeqCst)
+                    & ARMED
+                    != 0
                 && let Some(bell) = &self.bell
             {
                 bell.ring(node);
@@ -286,16 +301,19 @@ impl Table {
     pub(crate) fn offer(
         &self,
         index: usize,
-        node: u16
+        node: u16,
     ) -> Result<()> {
         let node = usize::from(node);
         if node >= self.geometry.fleet_capacity {
-            return Err(Error::Malformed(format!("node {node} is outside the fleet")));
+            return Err(Error::Malformed(format!(
+                "node {node} is outside the fleet"
+            )));
         }
         // One process holds every node of a memory table: the offer goes to
         // whoever takes offers here, and the local waker is told directly.
         let node = if self.is_shared() { node } else { usize::from(self.node) };
-        self.offer_word(node, index / 64).fetch_or(1 << (index % 64), Ordering::SeqCst);
+        self.offer_word(node, index / 64)
+            .fetch_or(1 << (index % 64), Ordering::SeqCst);
         self.ring(node, None);
         if !self.is_shared() {
             self.registry.wake_offer();
@@ -333,10 +351,14 @@ impl Table {
 
     /// Park the calling thread until an offer arrives for this node.
     /// The same wait, bounded: `false` is the timeout and nothing else.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     pub(crate) fn wait_offer_timeout(
         &self,
-        timeout: std::time::Duration
+        timeout: std::time::Duration,
     ) -> Result<bool> {
         let doorbell = self.doorbell(usize::from(self.node));
         if self.has_offer() {
@@ -361,8 +383,11 @@ impl Table {
             }
             doorbell.listening.fetch_add(1, Ordering::SeqCst);
             let seen = doorbell.generation.load(Ordering::SeqCst);
-            let outcome =
-                if self.has_offer() { Ok(()) } else { crate::wait_on(&doorbell.generation, seen) };
+            let outcome = if self.has_offer() {
+                Ok(())
+            } else {
+                crate::wait_on(&doorbell.generation, seen)
+            };
             doorbell.listening.fetch_sub(1, Ordering::SeqCst);
             outcome?;
         }
@@ -374,7 +399,7 @@ impl Table {
         self: &Arc<Self>,
         slot: usize,
         interest: Interest,
-        waker: &std::task::Waker
+        waker: &std::task::Waker,
     ) -> Result<()> {
         self.registry.register(slot, interest, waker);
         self.ensure_driver()
@@ -382,7 +407,7 @@ impl Table {
 
     pub(crate) fn register_offer(
         self: &Arc<Self>,
-        waker: &std::task::Waker
+        waker: &std::task::Waker,
     ) -> Result<()> {
         self.registry.register_offer(waker);
         self.ensure_driver()
@@ -419,13 +444,13 @@ impl Table {
                 {
                     *driver = Some(Driving::Reactor(
                         crate::bell::ReactorDriver::start(self, bell, &runtime)
-                            .map_err(Error::Io)?
+                            .map_err(Error::Io)?,
                     ));
                     return Ok(());
                 }
                 *driver = Some(Driving::Thread(Driver::start(
                     Arc::as_ptr(self),
-                    format!("orbit-stream-{}-driver", self.node)
+                    format!("orbit-stream-{}-driver", self.node),
                 )?));
             }
         }
@@ -438,7 +463,7 @@ impl Table {
     pub(crate) fn node_dead(
         &self,
         node: u16,
-        incarnation: u64
+        incarnation: u64,
     ) {
         self.end_sides(node, |held| held == incarnation);
         let doorbell = self.doorbell(usize::from(node));
@@ -463,7 +488,7 @@ impl Table {
     fn end_sides(
         &self,
         node: u16,
-        dead: impl Fn(u64) -> bool
+        dead: impl Fn(u64) -> bool,
     ) {
         for (index, slot) in self.slots().iter().enumerate() {
             if slot.state.load(Ordering::Acquire) != SLOT_LIVE {
@@ -478,7 +503,12 @@ impl Table {
                     continue;
                 }
                 if slot.claimed[side]
-                    .compare_exchange(SIDE_CLAIMED, SIDE_DEAD, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(
+                        SIDE_CLAIMED,
+                        SIDE_DEAD,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
                     .is_err()
                 {
                     continue;
@@ -492,13 +522,16 @@ impl Table {
                 self.notify(index, slot, reads, Ring::Both);
             }
             if touched
-                && slot.claimed.iter().all(|side| side.load(Ordering::SeqCst) != SIDE_CLAIMED)
+                && slot
+                    .claimed
+                    .iter()
+                    .all(|side| side.load(Ordering::SeqCst) != SIDE_CLAIMED)
             {
                 let _ = slot.state.compare_exchange(
                     SLOT_LIVE,
                     SLOT_EMPTY,
                     Ordering::SeqCst,
-                    Ordering::SeqCst
+                    Ordering::SeqCst,
                 );
             }
         }
@@ -536,7 +569,7 @@ impl Table {
                 self.reset_all();
                 Ok(())
             }
-            Backing::Shm(region) => region.unlink().map_err(Error::Io)
+            Backing::Shm(region) => region.unlink().map_err(Error::Io),
         }
     }
 }
@@ -554,7 +587,7 @@ impl Doorstep for Table {
 
     fn listening(
         &self,
-        delta: i32
+        delta: i32,
     ) {
         let doorbell = self.doorbell(usize::from(self.node));
         if delta > 0 {
@@ -568,7 +601,8 @@ impl Doorstep for Table {
     fn drain(&self) {
         let node = usize::from(self.node);
         for word in 0..self.geometry.bitmap_words {
-            let mut bits = self.pending_word(node, word).swap(0, Ordering::SeqCst);
+            let mut bits =
+                self.pending_word(node, word).swap(0, Ordering::SeqCst);
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
@@ -608,14 +642,14 @@ impl Drop for Table {
 enum Driving {
     Thread(Driver),
     #[cfg(all(unix, feature = "tokio"))]
-    Reactor(crate::bell::ReactorDriver)
+    Reactor(crate::bell::ReactorDriver),
 }
 
 #[derive(Hash, PartialEq, Eq)]
 enum Key {
     Memory(usize, u8),
     #[cfg(unix)]
-    Shm(String, u16)
+    Shm(String, u16),
 }
 
 static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
@@ -627,18 +661,21 @@ static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
 pub(crate) fn open(
     fleet: &Arc<Fleet>,
     incarnation: Incarnation,
-    spec: StreamSpec
+    spec: StreamSpec,
 ) -> Result<Arc<Table>> {
     if !crate::waits_supported() {
         return Err(Error::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "orbit-stream needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later"
+            "orbit-stream needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later",
         )));
     }
     let key = if fleet.is_shm() {
         #[cfg(unix)]
         {
-            Key::Shm(ring_segment_name(fleet.name(), spec.kind), fleet.node_id().get())
+            Key::Shm(
+                ring_segment_name(fleet.name(), spec.kind),
+                fleet.node_id().get(),
+            )
         }
         #[cfg(not(unix))]
         unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -661,7 +698,9 @@ pub(crate) fn open(
         {
             return Err(Error::Malformed(format!(
                 "this process already opened kind {} with lane_capacity={} buffer_bytes={}",
-                spec.kind, table.geometry.lane_capacity, table.geometry.buffer_bytes
+                spec.kind,
+                table.geometry.lane_capacity,
+                table.geometry.buffer_bytes
             )));
         }
         return Ok(table);
@@ -674,13 +713,19 @@ pub(crate) fn open(
             unsafe {
                 std::ptr::write(
                     bytes.ptr.cast::<Header>(),
-                    Header::new(fleet.fleet_capacity(), &geometry, next_epoch(0))
+                    Header::new(
+                        fleet.fleet_capacity(),
+                        &geometry,
+                        next_epoch(0),
+                    ),
                 )
             };
             Backing::Memory(bytes)
         }
         #[cfg(unix)]
-        Key::Shm(name, _) => Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?)
+        Key::Shm(name, _) => {
+            Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?)
+        }
     };
     let table = Arc::new(Table {
         _fleet: Arc::clone(fleet),
@@ -694,10 +739,12 @@ pub(crate) fn open(
         driver: Mutex::new(None),
         #[cfg(unix)]
         bell: match &key {
-            Key::Shm(name, _) => Some(crate::bell::Bell::new(name).map_err(Error::Io)?),
-            Key::Memory(..) => None
+            Key::Shm(name, _) => {
+                Some(crate::bell::Bell::new(name).map_err(Error::Io)?)
+            }
+            Key::Memory(..) => None,
         },
-        readiness: std::sync::OnceLock::new()
+        readiness: std::sync::OnceLock::new(),
     });
     tables.insert(key, Arc::downgrade(&table));
     Ok(table)
@@ -707,7 +754,7 @@ pub(crate) fn open(
 fn open_shm(
     name: &str,
     fleet_capacity: u16,
-    geometry: &Geometry
+    geometry: &Geometry,
 ) -> Result<ShmRegion> {
     use std::io;
 
@@ -720,14 +767,14 @@ fn open_shm(
         unsafe {
             std::ptr::write(
                 region.as_ptr().cast::<Header>(),
-                Header::new(fleet_capacity, geometry, next_epoch(0))
+                Header::new(fleet_capacity, geometry, next_epoch(0)),
             );
         }
     } else {
         if region.len() < geometry.segment_size {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("SHM segment {name} is smaller than the stream table")
+                format!("SHM segment {name} is smaller than the stream table"),
             )));
         }
         // SAFETY: the region is at least a header long.
@@ -739,13 +786,15 @@ fn open_shm(
                     "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{:08X})",
                     header.magic,
                     crate::layout::MAGIC
-                )
+                ),
             )));
         }
         if !header.compatible(fleet_capacity, geometry) {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("SHM segment {name} has an incompatible stream-table layout")
+                format!(
+                    "SHM segment {name} has an incompatible stream-table layout"
+                ),
             )));
         }
     }
@@ -761,7 +810,7 @@ pub fn segment_size(fleet_capacity: u16) -> usize {
 /// Bytes `spec`'s segment needs for `fleet_capacity` lanes.
 pub fn segment_size_for(
     fleet_capacity: u16,
-    spec: StreamSpec
+    spec: StreamSpec,
 ) -> usize {
     Geometry::new(fleet_capacity, spec).segment_size
 }
@@ -781,5 +830,5 @@ pub(crate) enum Ring {
     /// The side at this index: the one that can be waiting on the change.
     Side(usize),
     /// A death report, on behalf of a process that is gone: both.
-    Both
+    Both,
 }

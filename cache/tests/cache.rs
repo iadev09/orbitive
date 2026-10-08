@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orbit_cache::{
-    Cache, CacheAddress, CacheLayout, CacheMutation, CacheRead, CacheTransport, Error, PayloadRef,
-    Store
+    Cache, CacheAddress, CacheLayout, CacheMutation, CacheRead, CacheTransport,
+    Error, PayloadRef, Store,
 };
 use orbit_core::{Fleet, RingSpec};
 
@@ -30,7 +30,8 @@ fn open(cache: &Cache<TinyLayout>) -> Store<TinyLayout> {
 #[test]
 fn put_payload_spans_slots_and_peer_applies_the_descriptor() {
     let fleet = Arc::new(Fleet::join("cache_chunks", 1).expect("fleet"));
-    let publisher_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
+    let publisher_cache =
+        Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
     let publisher = open(&publisher_cache);
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
     let peer = open(&peer_cache);
@@ -50,7 +51,8 @@ fn put_payload_spans_slots_and_peer_applies_the_descriptor() {
 #[test]
 fn mutation_contains_a_payload_reference_not_the_value_bytes() {
     let fleet = Arc::new(Fleet::join("cache_ref", 1).expect("fleet"));
-    let transport = CacheTransport::<TinyLayout>::new(fleet.clone()).expect("transport");
+    let transport =
+        CacheTransport::<TinyLayout>::new(fleet.clone()).expect("transport");
     let mut cursor = transport.cursor_at_head();
 
     transport.publish_put(STORE, b"key", b"eight888", None).expect("put");
@@ -61,13 +63,17 @@ fn mutation_contains_a_payload_reference_not_the_value_bytes() {
     };
     assert_eq!(payload.chunk_count, 2);
     assert_eq!(payload.value_len, 8);
-    assert_eq!(transport.read_payload(*payload).as_deref(), Some(&b"eight888"[..]));
+    assert_eq!(
+        transport.read_payload(*payload).as_deref(),
+        Some(&b"eight888"[..])
+    );
 }
 
 #[test]
 fn delete_and_reset_propagate_through_the_mutation_ring() {
     let fleet = Arc::new(Fleet::join("cache_delete", 1).expect("fleet"));
-    let publisher_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
+    let publisher_cache =
+        Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
     let publisher = open(&publisher_cache);
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
     let peer = open(&peer_cache);
@@ -92,7 +98,8 @@ fn delete_and_reset_propagate_through_the_mutation_ring() {
 #[test]
 fn overwritten_payload_is_reported_and_never_misread() {
     let fleet = Arc::new(Fleet::join("cache_payload_wrap", 1).expect("fleet"));
-    let publisher_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
+    let publisher_cache =
+        Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
     let publisher = open(&publisher_cache);
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
     let peer = open(&peer_cache);
@@ -117,7 +124,8 @@ fn overwritten_payload_is_reported_and_never_misread() {
 #[test]
 fn mutation_lag_disables_local_hits_until_resync() {
     let fleet = Arc::new(Fleet::join("cache_mutation_wrap", 1).expect("fleet"));
-    let publisher_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
+    let publisher_cache =
+        Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
     let publisher = open(&publisher_cache);
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
     let peer = open(&peer_cache);
@@ -135,7 +143,8 @@ fn mutation_lag_disables_local_hits_until_resync() {
 #[test]
 fn backing_recovery_resubscribes_with_an_empty_coherent_l1() {
     let fleet = Arc::new(Fleet::join("cache_recover", 1).expect("fleet"));
-    let publisher_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
+    let publisher_cache =
+        Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
     let publisher = open(&publisher_cache);
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
     let peer = open(&peer_cache);
@@ -167,7 +176,8 @@ fn ttl_expiry_becomes_a_local_miss() {
 #[test]
 fn value_larger_than_the_payload_lane_is_rejected_before_publication() {
     let fleet = Arc::new(Fleet::join("cache_large", 1).expect("fleet"));
-    let transport = CacheTransport::<TinyLayout>::new(fleet).expect("transport");
+    let transport =
+        CacheTransport::<TinyLayout>::new(fleet).expect("transport");
     let mut cursor = transport.cursor_at_head();
 
     let error = transport
@@ -180,7 +190,8 @@ fn value_larger_than_the_payload_lane_is_rejected_before_publication() {
 #[test]
 fn empty_values_still_have_one_addressable_payload_frame() {
     let fleet = Arc::new(Fleet::join("cache_empty", 1).expect("fleet"));
-    let transport = CacheTransport::<TinyLayout>::new(fleet).expect("transport");
+    let transport =
+        CacheTransport::<TinyLayout>::new(fleet).expect("transport");
     let CacheMutation::Put { payload, .. } =
         transport.publish_put(STORE, b"empty", b"", None).expect("empty put")
     else {
@@ -204,7 +215,10 @@ fn store_and_key_are_separate_non_empty_address_parts() {
     let fleet = Arc::new(Fleet::join("cache_address", 1).expect("fleet"));
     let cache = Cache::<TinyLayout>::new(fleet).expect("cache");
 
-    assert!(matches!(cache.open_store(b"", capacity(8)), Err(Error::StoreEmpty)));
+    assert!(matches!(
+        cache.open_store(b"", capacity(8)),
+        Err(Error::StoreEmpty)
+    ));
     let store = cache.open_store(b"models", capacity(8)).expect("store");
     assert!(matches!(store.validate_key(b""), Err(Error::KeyEmpty)));
 }
@@ -212,14 +226,19 @@ fn store_and_key_are_separate_non_empty_address_parts() {
 #[test]
 fn logical_stores_keep_the_same_key_in_independent_l1s() {
     let fleet = Arc::new(Fleet::join("cache_stores", 1).expect("fleet"));
-    let publisher_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
-    let publisher_models = publisher_cache.open_store(b"models", capacity(8)).expect("models");
-    let publisher_responses =
-        publisher_cache.open_store(b"responses", capacity(8)).expect("responses");
+    let publisher_cache =
+        Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
+    let publisher_models =
+        publisher_cache.open_store(b"models", capacity(8)).expect("models");
+    let publisher_responses = publisher_cache
+        .open_store(b"responses", capacity(8))
+        .expect("responses");
 
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
-    let peer_models = peer_cache.open_store(b"models", capacity(8)).expect("models");
-    let peer_responses = peer_cache.open_store(b"responses", capacity(8)).expect("responses");
+    let peer_models =
+        peer_cache.open_store(b"models", capacity(8)).expect("models");
+    let peer_responses =
+        peer_cache.open_store(b"responses", capacity(8)).expect("responses");
 
     publisher_models.put(b"42", b"model", None).expect("model put");
     publisher_responses.put(b"42", b"response", None).expect("response put");

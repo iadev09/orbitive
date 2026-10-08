@@ -8,14 +8,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use orbit_core::ring::shm::{ShmRing, ShmRingView};
 use orbit_core::shm::{
-    ShmAccessPolicy, ShmRegion, ShmValidation, ring_segment_name, ring_segment_name_for_uid
+    ShmAccessPolicy, ShmRegion, ShmValidation, ring_segment_name,
+    ring_segment_name_for_uid,
 };
 use orbit_core::{Fleet, FleetObserver, NodeId, OrbitTyped, RingSpec};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn fleet_name() -> String {
-    format!("ap{:x}{:x}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "ap{:x}{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 fn uid() -> u32 {
     unsafe { libc::geteuid() }
@@ -52,11 +57,16 @@ fn stat(fd: &OwnedFd) -> libc::stat {
 }
 fn raw_create(
     name: &str,
-    mode: u32
+    mode: u32,
 ) -> OwnedFd {
     let name = CString::new(name).unwrap();
-    let fd =
-        unsafe { libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, mode) };
+    let fd = unsafe {
+        libc::shm_open(
+            name.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            mode,
+        )
+    };
     assert!(fd >= 0, "{}", std::io::Error::last_os_error());
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     assert_eq!(unsafe { libc::ftruncate(fd.as_raw_fd(), 8192) }, 0);
@@ -64,8 +74,10 @@ fn raw_create(
 }
 fn denied<T>(result: std::io::Result<T>) {
     match result {
-        Err(error) => assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}"),
-        Ok(_) => panic!("unexpected access granted")
+        Err(error) => {
+            assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}")
+        }
+        Ok(_) => panic!("unexpected access granted"),
     }
 }
 
@@ -74,11 +86,16 @@ fn denied<T>(result: std::io::Result<T>) {
 fn access_policies_in_isolated_process() {
     const CHILD: &str = "ORBIT_ACCESS_POLICY_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "access_policies_in_isolated_process", "--nocapture"])
-            .env(CHILD, "1")
-            .status()
-            .unwrap();
+        let status =
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "access_policies_in_isolated_process",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
         assert!(status.success());
         return;
     }
@@ -102,21 +119,31 @@ fn defaults_and_modes() {
     for policy in [
         ShmAccessPolicy::OwnerOnly,
         ShmAccessPolicy::GroupRead { gid: gid() },
-        ShmAccessPolicy::GroupReadWrite { gid: gid() }
+        ShmAccessPolicy::GroupReadWrite { gid: gid() },
     ] {
         let name = ring_segment_name(&fleet_name(), 250);
         let _cleanup = Cleanup::new(&name);
-        let region = ShmRegion::open_or_create_with_policy(&name, 8192, policy).unwrap();
+        let region =
+            ShmRegion::open_or_create_with_policy(&name, 8192, policy).unwrap();
         assert!(region.created());
         let fd = open(&name);
         let metadata = stat(&fd);
-        assert_eq!(u64::from(metadata.st_mode) & 0o7777, u64::from(policy.mode()));
+        assert_eq!(
+            u64::from(metadata.st_mode) & 0o7777,
+            u64::from(policy.mode())
+        );
         assert_eq!(metadata.st_uid, uid());
         assert_eq!(metadata.st_gid, gid());
-        let peer = ShmRegion::open_or_create_with_policy(&name, 8192, policy).unwrap();
+        let peer =
+            ShmRegion::open_or_create_with_policy(&name, 8192, policy).unwrap();
         assert!(!peer.created());
         assert!(matches!(
-            ShmRegion::validate_existing_with_policy(&name, 8192, uid(), policy),
+            ShmRegion::validate_existing_with_policy(
+                &name,
+                8192,
+                uid(),
+                policy
+            ),
             Ok(ShmValidation::Valid { .. })
         ));
         if policy == ShmAccessPolicy::OwnerOnly {
@@ -152,7 +179,7 @@ fn rejects_existing_without_mutation() {
     denied(ShmRegion::open_or_create_with_policy(
         &name,
         1024,
-        ShmAccessPolicy::GroupRead { gid: gid() }
+        ShmAccessPolicy::GroupRead { gid: gid() },
     ));
     assert_eq!(u64::from(stat(&fd).st_mode) & 0o777, 0o660);
 }
@@ -165,11 +192,16 @@ fn owner_and_gid_checks() {
         &name,
         1,
         uid() + 1,
-        ShmAccessPolicy::OwnerOnly
+        ShmAccessPolicy::OwnerOnly,
     ));
     let wrong_group = ShmAccessPolicy::GroupRead { gid: gid() + 1 };
     denied(ShmRegion::open_or_create_with_policy(&name, 8192, wrong_group));
-    denied(ShmRegion::validate_existing_with_policy(&name, 1, uid(), wrong_group));
+    denied(ShmRegion::validate_existing_with_policy(
+        &name,
+        1,
+        uid(),
+        wrong_group,
+    ));
 
     let fleet = fleet_name();
     let fake_uid = uid() + 1;
@@ -194,15 +226,25 @@ impl OrbitTyped for Private {
 fn rings_and_fleet_configuration() {
     let name = fleet_name();
     let _shared_cleanup = Cleanup::new(&ring_segment_name(&name, Shared::KIND));
-    let _private_cleanup = Cleanup::new(&ring_segment_name(&name, Private::KIND));
+    let _private_cleanup =
+        Cleanup::new(&ring_segment_name(&name, Private::KIND));
     let policy = ShmAccessPolicy::GroupRead { gid: gid() };
-    let fleet =
-        Fleet::join_shm_as_with_policies(&name, 2, NodeId::ZERO, [(Shared::KIND, policy)]).unwrap();
+    let fleet = Fleet::join_shm_as_with_policies(
+        &name,
+        2,
+        NodeId::ZERO,
+        [(Shared::KIND, policy)],
+    )
+    .unwrap();
     let shared = fleet.shm_ring::<Shared>().unwrap();
     let private = fleet.shm_ring::<Private>().unwrap();
     assert_eq!(shared.spec(), Shared::RING_SPEC);
-    assert!(std::sync::Arc::ptr_eq(&shared, &fleet.shm_ring::<Shared>().unwrap()));
-    let id = shared.write(NodeId::ZERO, 0, 1, Bytes::from_static(b"hello")).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &shared,
+        &fleet.shm_ring::<Shared>().unwrap()
+    ));
+    let id =
+        shared.write(NodeId::ZERO, 0, 1, Bytes::from_static(b"hello")).unwrap();
     let observer = FleetObserver::attach_existing(&name).unwrap();
     denied(observer.ring(Shared::KIND));
     let view = observer.ring_with_policy(Shared::KIND, policy).unwrap();
@@ -211,7 +253,9 @@ fn rings_and_fleet_configuration() {
     assert_eq!(view.lane(0).unwrap().read_head().unwrap().id, id);
     assert!(observer.ring(Private::KIND).is_ok());
     assert_eq!(
-        u64::from(stat(&open(&ring_segment_name(&name, Private::KIND))).st_mode) & 0o777,
+        u64::from(
+            stat(&open(&ring_segment_name(&name, Private::KIND))).st_mode
+        ) & 0o777,
         0o600
     );
     let peer = ShmRing::open_or_create_for_fleet_with_policy(
@@ -219,11 +263,16 @@ fn rings_and_fleet_configuration() {
         Shared::KIND,
         Shared::RING_SPEC,
         2,
-        policy
+        policy,
     )
     .unwrap();
     assert_eq!(peer.read(id).unwrap().payload.as_ref(), b"hello");
-    denied(ShmRing::open_or_create_for_fleet(&name, Shared::KIND, Shared::RING_SPEC, 2));
+    denied(ShmRing::open_or_create_for_fleet(
+        &name,
+        Shared::KIND,
+        Shared::RING_SPEC,
+        2,
+    ));
     shared.unlink().unwrap();
     private.unlink().unwrap();
 }
@@ -246,7 +295,7 @@ fn narrowed_permissions_are_accepted() {
     let _group = ShmRegion::open_or_create_with_policy(
         &third,
         8192,
-        ShmAccessPolicy::GroupRead { gid: gid() }
+        ShmAccessPolicy::GroupRead { gid: gid() },
     )
     .unwrap();
     #[cfg(target_os = "macos")]
@@ -263,10 +312,15 @@ fn macos_rejects_creation_for_another_group() {
     let result = ShmRegion::open_or_create_with_policy(
         &name,
         8192,
-        ShmAccessPolicy::GroupRead { gid: gid() + 1 }
+        ShmAccessPolicy::GroupRead { gid: gid() + 1 },
     );
-    assert!(matches!(result, Err(error) if error.kind() == ErrorKind::InvalidInput));
-    assert_eq!(ShmRegion::validate_existing(&name, 1).unwrap(), ShmValidation::Missing);
+    assert!(
+        matches!(result, Err(error) if error.kind() == ErrorKind::InvalidInput)
+    );
+    assert_eq!(
+        ShmRegion::validate_existing(&name, 1).unwrap(),
+        ShmValidation::Missing
+    );
 }
 
 fn invalid_group_does_not_leave_an_object() {
@@ -275,21 +329,31 @@ fn invalid_group_does_not_leave_an_object() {
     let result = ShmRegion::open_or_create_with_policy(
         &name,
         8192,
-        ShmAccessPolicy::GroupRead { gid: u32::MAX }
+        ShmAccessPolicy::GroupRead { gid: u32::MAX },
     );
-    assert!(matches!(result, Err(error) if error.kind() == ErrorKind::InvalidInput));
-    assert_eq!(ShmRegion::validate_existing(&name, 1).unwrap(), ShmValidation::Missing);
+    assert!(
+        matches!(result, Err(error) if error.kind() == ErrorKind::InvalidInput)
+    );
+    assert_eq!(
+        ShmRegion::validate_existing(&name, 1).unwrap(),
+        ShmValidation::Missing
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
 fn unix_sets_group_before_exposing_new_object() {
     // Pick a permitted supplementary gid, if available, without changing process credentials.
     let groups = nix::unistd::getgroups().unwrap();
-    let selected = groups.into_iter().map(|g| g.as_raw()).find(|g| *g != gid()).unwrap_or(gid());
+    let selected = groups
+        .into_iter()
+        .map(|g| g.as_raw())
+        .find(|g| *g != gid())
+        .unwrap_or(gid());
     let name = ring_segment_name(&fleet_name(), 250);
     let _cleanup = Cleanup::new(&name);
     let policy = ShmAccessPolicy::GroupRead { gid: selected };
-    let _region = ShmRegion::open_or_create_with_policy(&name, 8192, policy).unwrap();
+    let _region =
+        ShmRegion::open_or_create_with_policy(&name, 8192, policy).unwrap();
     let metadata = stat(&open(&name));
     assert_eq!(metadata.st_gid, selected);
     assert_eq!(metadata.st_mode & 0o777, 0o640);

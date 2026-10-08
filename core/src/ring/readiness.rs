@@ -32,7 +32,7 @@ pub struct RingEventFd {
     fd: Readiness,
     ring: Arc<ShmRing>,
     stop: Arc<AtomicBool>,
-    driver: Option<JoinHandle<()>>
+    driver: Option<JoinHandle<()>>,
 }
 
 impl RingEventFd {
@@ -41,7 +41,8 @@ impl RingEventFd {
         let stop = Arc::new(AtomicBool::new(false));
         let driver_stop = stop.clone();
         let driver_ring = ring.clone();
-        let mut observed = ring.notification_generation().load(Ordering::Acquire);
+        let mut observed =
+            ring.notification_generation().load(Ordering::Acquire);
 
         // A pipe has two distinct ends; an eventfd is one descriptor cloned.
         #[cfg(target_os = "macos")]
@@ -51,7 +52,9 @@ impl RingEventFd {
             .name(format!("orbit-ring-{}-eventfd", ring.kind()))
             .spawn(move || {
                 while !driver_stop.load(Ordering::Acquire) {
-                    let current = driver_ring.notification_generation().load(Ordering::Acquire);
+                    let current = driver_ring
+                        .notification_generation()
+                        .load(Ordering::Acquire);
                     if current != observed {
                         observed = current;
                         if driver_fd.signal().is_err() {
@@ -59,8 +62,11 @@ impl RingEventFd {
                         }
                         continue;
                     }
-                    if crate::sync::wait_word(driver_ring.notification_generation(), observed)
-                        .is_err()
+                    if crate::sync::wait_word(
+                        driver_ring.notification_generation(),
+                        observed,
+                    )
+                    .is_err()
                     {
                         break;
                     }
@@ -99,7 +105,7 @@ impl AsFd for RingEventFd {
 impl fmt::Debug for RingEventFd {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         f.debug_struct("RingEventFd")
             .field("fd", &self.fd.as_raw_fd())
@@ -154,7 +160,7 @@ pub struct ParkedRingEventFd {
     ring: Arc<ShmRing>,
     stop: Arc<AtomicBool>,
     drained: Arc<Drained>,
-    driver: Option<JoinHandle<()>>
+    driver: Option<JoinHandle<()>>,
 }
 
 /// Whether the consumer has taken the last signal. The driver waits here,
@@ -162,7 +168,7 @@ pub struct ParkedRingEventFd {
 #[derive(Default)]
 struct Drained {
     pending: Mutex<bool>,
-    taken: Condvar
+    taken: Condvar,
 }
 
 impl ParkedRingEventFd {
@@ -172,7 +178,8 @@ impl ParkedRingEventFd {
         let drained = Arc::new(Drained::default());
         let (driver_stop, driver_drained, driver_ring) =
             (stop.clone(), drained.clone(), ring.clone());
-        let mut observed = ring.notification_generation().load(Ordering::Acquire);
+        let mut observed =
+            ring.notification_generation().load(Ordering::Acquire);
 
         let driver = std::thread::Builder::new()
             .name(format!("orbit-ring-{}-parked", ring.kind()))
@@ -185,8 +192,11 @@ impl ParkedRingEventFd {
                     // sees the other, so a publish cannot fall between them.
                     waiters.fetch_add(1, Ordering::SeqCst);
                     let current = generation.load(Ordering::SeqCst);
-                    if current == observed && !driver_stop.load(Ordering::Acquire) {
-                        let parked = crate::sync::wait_word(generation, observed);
+                    if current == observed
+                        && !driver_stop.load(Ordering::Acquire)
+                    {
+                        let parked =
+                            crate::sync::wait_word(generation, observed);
                         waiters.fetch_sub(1, Ordering::SeqCst);
                         if parked.is_err() {
                             break;
@@ -245,7 +255,7 @@ impl AsFd for ParkedRingEventFd {
 impl fmt::Debug for ParkedRingEventFd {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         f.debug_struct("ParkedRingEventFd")
             .field("fd", &self.fd.as_raw_fd())
@@ -284,7 +294,7 @@ fn local_notification_pair() -> io::Result<(Readiness, Signal)> {
     if crate::sync::macos::api().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Orbit native readiness requires macOS 14.4 or later"
+            "Orbit native readiness requires macOS 14.4 or later",
         ));
     }
     crate::readiness::pair()

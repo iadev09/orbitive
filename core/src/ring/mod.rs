@@ -60,7 +60,11 @@ mod readiness;
 #[cfg(unix)]
 pub mod shm;
 
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 pub use readiness::{ParkedRingEventFd, RingEventFd};
 
 /// Writer ownership for one [`OrbitTyped`] ring.
@@ -76,7 +80,7 @@ pub enum RingTopology {
     /// Every fleet member publishes into one globally ordered sequence.
     /// Writers are serialized by a process-recoverable OS lock associated
     /// with the SHM name, and the head advances only after the slot commits.
-    SharedOrdered = 2
+    SharedOrdered = 2,
 }
 
 /// Physical policy for one [`OrbitTyped`] ring.
@@ -90,13 +94,13 @@ pub struct RingSpec {
     /// Maximum payload bytes stored inline in each slot.
     pub payload_capacity: usize,
     /// How writers own and publish physical lanes.
-    pub topology: RingTopology
+    pub topology: RingTopology,
 }
 
 impl RingSpec {
     pub const fn new(
         capacity: usize,
-        payload_capacity: usize
+        payload_capacity: usize,
     ) -> Self {
         Self { capacity, payload_capacity, topology: RingTopology::Shared }
     }
@@ -104,7 +108,7 @@ impl RingSpec {
     /// Declare one independent writer lane per fleet node.
     pub const fn per_node(
         capacity: usize,
-        payload_capacity: usize
+        payload_capacity: usize,
     ) -> Self {
         Self { capacity, payload_capacity, topology: RingTopology::PerNode }
     }
@@ -112,14 +116,21 @@ impl RingSpec {
     /// Declare one crash-recoverable, globally ordered writer lane.
     pub const fn shared_ordered(
         capacity: usize,
-        payload_capacity: usize
+        payload_capacity: usize,
     ) -> Self {
-        Self { capacity, payload_capacity, topology: RingTopology::SharedOrdered }
+        Self {
+            capacity,
+            payload_capacity,
+            topology: RingTopology::SharedOrdered,
+        }
     }
 
     pub(crate) fn assert_valid(self) {
         assert!(self.capacity > 0, "ring capacity must be > 0");
-        assert!(self.capacity.is_power_of_two(), "ring capacity must be a power of two");
+        assert!(
+            self.capacity.is_power_of_two(),
+            "ring capacity must be a power of two"
+        );
         assert!(
             self.payload_capacity <= u32::MAX as usize,
             "ring payload capacity must fit in u32"
@@ -130,7 +141,7 @@ impl RingSpec {
 struct RingLane {
     write_pos: AtomicU64,
     write_lock: Mutex<()>,
-    slots: Vec<RwLock<Option<Frame>>>
+    slots: Vec<RwLock<Option<Frame>>>,
 }
 
 impl RingLane {
@@ -149,7 +160,7 @@ pub struct Frame {
     pub id: NetId64,
     pub kind: u8,
     pub ver: u64,
-    pub payload: Bytes
+    pub payload: Bytes,
 }
 
 /// A fixed-capacity, fleet-wide append-only log keyed on KIND byte.
@@ -166,7 +177,7 @@ pub struct Ring {
     topology: RingTopology,
     /// Ring-wide semantic version allocator shared by every writer lane.
     version_counter: AtomicU64,
-    lanes: Vec<RingLane>
+    lanes: Vec<RingLane>,
 }
 
 impl Ring {
@@ -185,7 +196,7 @@ impl Ring {
         let capacity = spec.capacity;
         let lane_count = match spec.topology {
             RingTopology::Shared | RingTopology::SharedOrdered => 1,
-            RingTopology::PerNode => usize::from(fleet_capacity)
+            RingTopology::PerNode => usize::from(fleet_capacity),
         };
         let mut lanes = Vec::with_capacity(lane_count);
         for _ in 0..lane_count {
@@ -197,7 +208,7 @@ impl Ring {
             payload_capacity: spec.payload_capacity,
             topology: spec.topology,
             version_counter: AtomicU64::new(0),
-            lanes
+            lanes,
         }
     }
 
@@ -220,7 +231,7 @@ impl Ring {
         RingSpec {
             capacity: self.capacity,
             payload_capacity: self.payload_capacity,
-            topology: self.topology
+            topology: self.topology,
         }
     }
 
@@ -237,7 +248,7 @@ impl Ring {
     /// Current head for `node_id`'s logical lane.
     pub fn lane_head(
         &self,
-        node_id: NodeId
+        node_id: NodeId,
     ) -> u64 {
         self.lane(node_id).write_pos.load(Ordering::Acquire)
     }
@@ -271,7 +282,7 @@ impl Ring {
         node_id: NodeId,
         frame_kind: u8,
         ver: u64,
-        payload: Bytes
+        payload: Bytes,
     ) -> NetId64 {
         assert!(
             payload.len() <= self.payload_capacity,
@@ -283,13 +294,21 @@ impl Ring {
         match self.topology {
             RingTopology::Shared => {
                 let counter = lane.write_pos.fetch_add(1, Ordering::AcqRel);
-                self.write_frame(lane, node_id, counter, frame_kind, ver, payload)
+                self.write_frame(
+                    lane, node_id, counter, frame_kind, ver, payload,
+                )
             }
             RingTopology::PerNode | RingTopology::SharedOrdered => {
-                let _write = lane.write_lock.lock().unwrap_or_else(|error| error.into_inner());
+                let _write = lane
+                    .write_lock
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let counter = lane.write_pos.load(Ordering::Relaxed);
-                let id = self.write_frame(lane, node_id, counter, frame_kind, ver, payload);
-                lane.write_pos.store(counter.wrapping_add(1), Ordering::Release);
+                let id = self.write_frame(
+                    lane, node_id, counter, frame_kind, ver, payload,
+                );
+                lane.write_pos
+                    .store(counter.wrapping_add(1), Ordering::Release);
                 id
             }
         }
@@ -306,7 +325,7 @@ impl Ring {
         node_id: NodeId,
         frame_kind: u8,
         ver: u64,
-        payloads: Vec<Bytes>
+        payloads: Vec<Bytes>,
     ) -> Vec<NetId64> {
         assert!(
             payloads.len() <= self.capacity,
@@ -329,7 +348,9 @@ impl Ring {
         let lane = self.lane(node_id);
         match self.topology {
             RingTopology::Shared => {
-                let start = lane.write_pos.fetch_add(payloads.len() as u64, Ordering::AcqRel);
+                let start = lane
+                    .write_pos
+                    .fetch_add(payloads.len() as u64, Ordering::AcqRel);
                 payloads
                     .into_iter()
                     .enumerate()
@@ -340,13 +361,16 @@ impl Ring {
                             start.wrapping_add(offset as u64),
                             frame_kind,
                             ver,
-                            payload
+                            payload,
                         )
                     })
                     .collect()
             }
             RingTopology::PerNode | RingTopology::SharedOrdered => {
-                let _write = lane.write_lock.lock().unwrap_or_else(|error| error.into_inner());
+                let _write = lane
+                    .write_lock
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let start = lane.write_pos.load(Ordering::Relaxed);
                 let ids = payloads
                     .into_iter()
@@ -358,11 +382,14 @@ impl Ring {
                             start.wrapping_add(offset as u64),
                             frame_kind,
                             ver,
-                            payload
+                            payload,
                         )
                     })
                     .collect::<Vec<_>>();
-                lane.write_pos.store(start.wrapping_add(ids.len() as u64), Ordering::Release);
+                lane.write_pos.store(
+                    start.wrapping_add(ids.len() as u64),
+                    Ordering::Release,
+                );
                 ids
             }
         }
@@ -377,7 +404,7 @@ impl Ring {
     ///   different id than the one asked for.
     pub fn read(
         &self,
-        id: NetId64
+        id: NetId64,
     ) -> Option<Frame> {
         if id.kind() != self.kind {
             return None;
@@ -387,7 +414,7 @@ impl Ring {
         let guard = lane.slots[slot_idx].read().expect("ring slot poisoned");
         match &*guard {
             Some(f) if f.id == id => Some(f.clone()),
-            _ => None
+            _ => None,
         }
     }
 
@@ -400,7 +427,10 @@ impl Ring {
             return None;
         }
         let slot_idx = ((head - 1) as usize) % self.capacity;
-        self.lanes[0].slots[slot_idx].read().expect("ring slot poisoned").clone()
+        self.lanes[0].slots[slot_idx]
+            .read()
+            .expect("ring slot poisoned")
+            .clone()
     }
 
     /// Read whatever frame currently occupies the slot at
@@ -411,27 +441,34 @@ impl Ring {
     /// Returns `None` if the slot is empty.
     pub fn read_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         let slot_idx = (counter as usize) % self.capacity;
-        self.lanes[0].slots[slot_idx].read().expect("ring slot poisoned").clone()
+        self.lanes[0].slots[slot_idx]
+            .read()
+            .expect("ring slot poisoned")
+            .clone()
     }
 
     pub(crate) fn read_state_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> cursor::RingRead {
         match self.read_at(counter) {
-            Some(frame) if frame.id.counter() == counter => cursor::RingRead::Ready(frame),
-            Some(frame) if frame.id.counter() > counter => cursor::RingRead::Unavailable,
-            Some(_) | None => cursor::RingRead::Pending
+            Some(frame) if frame.id.counter() == counter => {
+                cursor::RingRead::Ready(frame)
+            }
+            Some(frame) if frame.id.counter() > counter => {
+                cursor::RingRead::Unavailable
+            }
+            Some(_) | None => cursor::RingRead::Pending,
         }
     }
 
     pub(crate) fn read_lane_at(
         &self,
         node_id: NodeId,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         let lane = self.lane(node_id);
         let slot_idx = (counter as usize) % self.capacity;
@@ -441,15 +478,19 @@ impl Ring {
     pub(crate) fn read_lane_state_at(
         &self,
         node_id: NodeId,
-        counter: u64
+        counter: u64,
     ) -> cursor::RingRead {
         match self.read_lane_at(node_id, counter) {
-            Some(frame) if frame.id.counter() == counter => cursor::RingRead::Ready(frame),
-            Some(frame) if frame.id.counter() > counter => cursor::RingRead::Unavailable,
+            Some(frame) if frame.id.counter() == counter => {
+                cursor::RingRead::Ready(frame)
+            }
+            Some(frame) if frame.id.counter() > counter => {
+                cursor::RingRead::Unavailable
+            }
             Some(_) | None if self.topology != RingTopology::Shared => {
                 cursor::RingRead::Unavailable
             }
-            Some(_) | None => cursor::RingRead::Pending
+            Some(_) | None => cursor::RingRead::Pending,
         }
     }
 
@@ -469,24 +510,28 @@ impl Ring {
 
     fn lane(
         &self,
-        node_id: NodeId
+        node_id: NodeId,
     ) -> &RingLane {
         let index = match self.topology {
             RingTopology::Shared | RingTopology::SharedOrdered => 0,
-            RingTopology::PerNode => usize::from(node_id.get())
+            RingTopology::PerNode => usize::from(node_id.get()),
         };
         self.lanes.get(index).unwrap_or_else(|| {
-            panic!("node {} is outside ring lane count {}", node_id.get(), self.lanes.len())
+            panic!(
+                "node {} is outside ring lane count {}",
+                node_id.get(),
+                self.lanes.len()
+            )
         })
     }
 
     fn lane_for_frame(
         &self,
-        id: NetId64
+        id: NetId64,
     ) -> Option<&RingLane> {
         let index = match self.topology {
             RingTopology::Shared | RingTopology::SharedOrdered => 0,
-            RingTopology::PerNode => usize::from(id.node())
+            RingTopology::PerNode => usize::from(id.node()),
         };
         self.lanes.get(index)
     }
@@ -498,12 +543,13 @@ impl Ring {
         counter: u64,
         frame_kind: u8,
         ver: u64,
-        payload: Bytes
+        payload: Bytes,
     ) -> NetId64 {
         let id = NetId64::make(self.kind, node_id.get(), counter);
         let slot_idx = (counter as usize) % self.capacity;
         let frame = Frame { id, kind: frame_kind, ver, payload };
-        let mut guard = lane.slots[slot_idx].write().expect("ring slot poisoned");
+        let mut guard =
+            lane.slots[slot_idx].write().expect("ring slot poisoned");
         *guard = Some(frame);
         id
     }
@@ -524,14 +570,14 @@ impl cursor::RingFrameSource for Ring {
 
     fn read_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         Ring::read_at(self, counter)
     }
 
     fn read_state_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> cursor::RingRead {
         Ring::read_state_at(self, counter)
     }
@@ -553,14 +599,14 @@ impl cursor::RingFrameSource for shm::ShmRing {
 
     fn read_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         shm::ShmRing::read_at(self, counter)
     }
 
     fn read_state_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> cursor::RingRead {
         shm::ShmRing::read_state_at(self, counter)
     }
@@ -569,7 +615,7 @@ impl cursor::RingFrameSource for shm::ShmRing {
 impl std::fmt::Debug for Ring {
     fn fmt(
         &self,
-        f: &mut std::fmt::Formatter<'_>
+        f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.debug_struct("Ring")
             .field("kind", &self.kind)
@@ -586,7 +632,7 @@ impl std::fmt::Debug for Ring {
 /// hands out `Arc<Ring>` per `OrbitTyped` kind on demand.
 pub(crate) struct RingRegistry {
     fleet_capacity: u16,
-    rings: dashmap::DashMap<u8, Arc<Ring>>
+    rings: dashmap::DashMap<u8, Arc<Ring>>,
 }
 
 impl RingRegistry {
@@ -599,7 +645,9 @@ impl RingRegistry {
         let ring = self
             .rings
             .entry(T::KIND)
-            .or_insert_with(|| Arc::new(Ring::new_for_fleet::<T>(self.fleet_capacity)))
+            .or_insert_with(|| {
+                Arc::new(Ring::new_for_fleet::<T>(self.fleet_capacity))
+            })
             .clone();
         assert_eq!(
             ring.spec(),
@@ -613,7 +661,7 @@ impl RingRegistry {
     /// Look up a ring by KIND byte (e.g. when only the id is known).
     pub fn lookup(
         &self,
-        kind: u8
+        kind: u8,
     ) -> Option<Arc<Ring>> {
         self.rings.get(&kind).map(|e| e.clone())
     }

@@ -41,12 +41,12 @@ fn fresh_name(_test_label: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let pid_short = std::process::id() & 0xFFFF;
+    let pid_short = std::process::id() & 0xffff;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .subsec_nanos();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFF;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xff;
     format!("x{pid_short:04x}{nonce:08x}{n:02x}")
 }
 
@@ -69,13 +69,16 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
             }
             Ok(WaitStatus::StillAlive) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = nix::sys::signal::kill(
+                        pid,
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
                     panic!("child timed out");
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(other) => panic!("unexpected child status: {:?}", other),
-            Err(e) => panic!("waitpid failed: {e}")
+            Err(e) => panic!("waitpid failed: {e}"),
         }
     }
 }
@@ -86,7 +89,8 @@ fn parent_writes_child_reads() {
 
     // Parent creates the segment and writes BEFORE forking so the
     // mapping is already populated when the child opens it.
-    let ring = ShmRing::open_or_create(&name, 7, spec()).expect("parent open_or_create");
+    let ring = ShmRing::open_or_create(&name, 7, spec())
+        .expect("parent open_or_create");
     let id = ring
         .write(NodeId::new(0), 0, 99, Bytes::from_static(b"hello-from-parent"))
         .expect("parent write");
@@ -102,11 +106,11 @@ fn parent_writes_child_reads() {
             // Child has its own address space; open the SAME named segment.
             let child_ring = match ShmRing::open_or_create(&name, 7, spec()) {
                 Ok(r) => r,
-                Err(_) => std::process::exit(11)
+                Err(_) => std::process::exit(11),
             };
             let frame = match child_ring.read(id) {
                 Some(f) => f,
-                None => std::process::exit(12)
+                None => std::process::exit(12),
             };
             if frame.id != id {
                 std::process::exit(13);
@@ -128,8 +132,8 @@ fn child_writes_parent_reads() {
     let name = fresh_name("child-writes");
 
     // Parent creates the segment empty, forks; child writes; parent reads.
-    let parent_ring =
-        ShmRing::open_or_create(&name, 11, spec()).expect("parent create empty segment");
+    let parent_ring = ShmRing::open_or_create(&name, 11, spec())
+        .expect("parent create empty segment");
 
     match unsafe { fork() }.expect("fork failed") {
         ForkResult::Parent { child } => {
@@ -137,7 +141,9 @@ fn child_writes_parent_reads() {
             assert_eq!(code, 0, "child reported failure (exit code {code})");
 
             // Now read what the child wrote.
-            let frame = parent_ring.read_head().expect("parent should see child's write");
+            let frame = parent_ring
+                .read_head()
+                .expect("parent should see child's write");
             assert_eq!(frame.kind, 0);
             assert_eq!(frame.ver, 7);
             assert_eq!(&frame.payload[..], b"hello-from-child");
@@ -147,14 +153,18 @@ fn child_writes_parent_reads() {
         ForkResult::Child => {
             let child_ring = match ShmRing::open_or_create(&name, 11, spec()) {
                 Ok(r) => r,
-                Err(_) => std::process::exit(21)
+                Err(_) => std::process::exit(21),
             };
             if child_ring.created() {
                 // We expected the parent to have created the segment.
                 std::process::exit(22);
             }
-            let result =
-                child_ring.write(NodeId::new(2), 0, 7, Bytes::from_static(b"hello-from-child"));
+            let result = child_ring.write(
+                NodeId::new(2),
+                0,
+                7,
+                Bytes::from_static(b"hello-from-child"),
+            );
             if result.is_err() {
                 std::process::exit(23);
             }
@@ -167,9 +177,11 @@ fn child_writes_parent_reads() {
 fn ping_pong_two_writes_one_each_side() {
     let name = fresh_name("ping-pong");
 
-    let parent_ring = ShmRing::open_or_create(&name, 13, spec()).expect("parent create");
-    let parent_id =
-        parent_ring.write(NodeId::new(0), 0, 1, Bytes::from_static(b"ping")).expect("parent write");
+    let parent_ring =
+        ShmRing::open_or_create(&name, 13, spec()).expect("parent create");
+    let parent_id = parent_ring
+        .write(NodeId::new(0), 0, 1, Bytes::from_static(b"ping"))
+        .expect("parent write");
 
     match unsafe { fork() }.expect("fork failed") {
         ForkResult::Parent { child } => {
@@ -192,18 +204,21 @@ fn ping_pong_two_writes_one_each_side() {
         ForkResult::Child => {
             let child_ring = match ShmRing::open_or_create(&name, 13, spec()) {
                 Ok(r) => r,
-                Err(_) => std::process::exit(31)
+                Err(_) => std::process::exit(31),
             };
             // Child should see parent's write.
             let frame = match child_ring.read(parent_id) {
                 Some(f) => f,
-                None => std::process::exit(32)
+                None => std::process::exit(32),
             };
             if &frame.payload[..] != b"ping" {
                 std::process::exit(33);
             }
             // Child writes back.
-            if child_ring.write(NodeId::new(2), 0, 2, Bytes::from_static(b"pong")).is_err() {
+            if child_ring
+                .write(NodeId::new(2), 0, 2, Bytes::from_static(b"pong"))
+                .is_err()
+            {
                 std::process::exit(34);
             }
             std::process::exit(0);

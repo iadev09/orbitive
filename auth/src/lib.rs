@@ -26,10 +26,12 @@ use hmac::{Hmac, Mac};
 pub use keyring::{KeyId, Keyring, SecretKey};
 use keyring::{context, derive};
 pub use principal::{
-    AllowReusable, Audience, Capability, Claims, MAX_CAPABILITIES, MAX_LABEL_LEN, Principal,
-    Purpose, TokenId, Validation, ValidationHook
+    AllowReusable, Audience, Capability, Claims, MAX_CAPABILITIES,
+    MAX_LABEL_LEN, Principal, Purpose, TokenId, Validation, ValidationHook,
 };
-pub use protection::{Blake3State, EncryptedState, StateProtection, UnprotectedState};
+pub use protection::{
+    Blake3State, EncryptedState, StateProtection, UnprotectedState,
+};
 use sha2::{Digest, Sha256};
 pub use table::{AUTH_STATE_CAPACITY, AUTH_STATE_KIND};
 use zeroize::Zeroizing;
@@ -53,7 +55,7 @@ impl Token {
 impl fmt::Debug for Token {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         f.write_str("Token([REDACTED])")
     }
@@ -65,14 +67,14 @@ pub struct Authority {
     realm: String,
     issuer: String,
     keyring: Keyring,
-    cache_seed: Zeroizing<[u8; 32]>
+    cache_seed: Zeroizing<[u8; 32]>,
 }
 
 impl Authority {
     pub fn new(
         realm: impl Into<String>,
         issuer: impl Into<String>,
-        keyring: Keyring
+        keyring: Keyring,
     ) -> Result<Self> {
         let realm = realm.into();
         let issuer = issuer.into();
@@ -82,7 +84,12 @@ impl Authority {
         let mut hash = Sha256::new();
         hash.update(b"orbit-auth/v1/cache-keyring");
         for (id, key) in &keyring.keys {
-            let info = context(&[b"cache", realm.as_bytes(), issuer.as_bytes(), &id.to_be_bytes()]);
+            let info = context(&[
+                b"cache",
+                realm.as_bytes(),
+                issuer.as_bytes(),
+                &id.to_be_bytes(),
+            ]);
             let cache_key = derive(key, &info);
             hash.update(id.to_be_bytes());
             hash.update(cache_key.as_ref());
@@ -94,7 +101,7 @@ impl Authority {
     /// Caller must authorize subject and capabilities before issuance.
     pub fn issue(
         &self,
-        claims: Claims
+        claims: Claims,
     ) -> Result<Token> {
         self.issue_bound(claims, None)
     }
@@ -104,7 +111,7 @@ impl Authority {
     pub fn issue_session(
         &self,
         claims: Claims,
-        session: &Session
+        session: &Session,
     ) -> Result<Token> {
         session.check_issuance(self, &claims)?;
         self.issue_bound(claims, Some(session.binding()))
@@ -113,7 +120,7 @@ impl Authority {
     fn issue_bound(
         &self,
         claims: Claims,
-        session: Option<fleet::SessionBinding>
+        session: Option<fleet::SessionBinding>,
     ) -> Result<Token> {
         claims.check_shape()?;
         let mut jti = [0; 16];
@@ -128,45 +135,57 @@ impl Authority {
             issuer: self.issuer.clone(),
             jti: TokenId(jti),
             session,
-            claims
+            claims,
         };
-        let plaintext =
-            Zeroizing::new(serde_json::to_vec(&principal).map_err(|_| Error::InvalidInput)?);
-        let wire_len = PREFIX.len() + ((HEADER_LEN + TAG_LEN + plaintext.len()) * 4).div_ceil(3);
+        let plaintext = Zeroizing::new(
+            serde_json::to_vec(&principal).map_err(|_| Error::InvalidInput)?,
+        );
+        let wire_len = PREFIX.len()
+            + ((HEADER_LEN + TAG_LEN + plaintext.len()) * 4).div_ceil(3);
         if wire_len > MAX_TOKEN_LEN {
             return Err(Error::TokenTooLarge);
         }
-        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref()).expect("256-bit key");
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+            .expect("256-bit key");
         let ciphertext = cipher
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: &plaintext, aad: &info })
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload { msg: &plaintext, aad: &info },
+            )
             .map_err(|_| Error::InvalidToken)?;
         let mut wire = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         wire.extend_from_slice(&id.to_be_bytes());
         wire.extend_from_slice(&nonce);
         wire.extend_from_slice(&ciphertext);
-        Ok(Token(Zeroizing::new(format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(wire)))))
+        Ok(Token(Zeroizing::new(format!(
+            "{PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(wire)
+        ))))
     }
 
     /// Build once per trusted recipient/use policy and reuse across requests.
     pub fn validator(
         &self,
-        validation: Validation
+        validation: Validation,
     ) -> Validator<'_> {
         let keys = self
             .keyring
             .keys
             .iter()
             .map(|(id, key)| {
-                let info = self.scope(&validation.audience, validation.purpose, *id);
+                let info =
+                    self.scope(&validation.audience, validation.purpose, *id);
                 (*id, derive(key, &info))
             })
             .collect();
-        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.cache_seed.as_ref())
-            .expect("HMAC key");
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(
+            self.cache_seed.as_ref(),
+        )
+        .expect("HMAC key");
         mac.update(&context(&[
             b"orbit-auth/v1/cache-policy",
             validation.audience.as_str().as_bytes(),
-            validation.purpose.as_bytes()
+            validation.purpose.as_bytes(),
         ]));
         for capability in &validation.required_capabilities {
             mac.update(&context(&[capability.as_str().as_bytes()]));
@@ -177,7 +196,7 @@ impl Authority {
             issuer: Cow::Borrowed(&self.issuer),
             validation,
             keys,
-            cache_secret
+            cache_secret,
         }
     }
 
@@ -185,7 +204,7 @@ impl Authority {
         &self,
         audience: &Audience,
         purpose: Purpose,
-        id: KeyId
+        id: KeyId,
     ) -> Vec<u8> {
         token_scope(&self.realm, &self.issuer, audience, purpose, id)
     }
@@ -197,7 +216,7 @@ pub struct Validator<'a> {
     issuer: Cow<'a, str>,
     validation: Validation,
     keys: BTreeMap<KeyId, Zeroizing<[u8; 32]>>,
-    cache_secret: Zeroizing<[u8; 32]>
+    cache_secret: Zeroizing<[u8; 32]>,
 }
 
 /// A prepared validator independent of the issuing Authority's lifetime.
@@ -215,7 +234,7 @@ impl Validator<'_> {
             issuer: Cow::Owned(self.issuer.into_owned()),
             validation: self.validation,
             keys: self.keys,
-            cache_secret: self.cache_secret
+            cache_secret: self.cache_secret,
         }
     }
 
@@ -223,7 +242,7 @@ impl Validator<'_> {
         &self,
         token: &str,
         now: u64,
-        hook: &dyn ValidationHook
+        hook: &dyn ValidationHook,
     ) -> Result<Arc<Principal>> {
         let principal = self.decrypt(token)?;
         self.check(&principal, now)?;
@@ -241,7 +260,7 @@ impl Validator<'_> {
         &self,
         token: &str,
         now: u64,
-        hook: &dyn ValidationHook
+        hook: &dyn ValidationHook,
     ) -> Result<Arc<Principal>> {
         let principal = self.decrypt(token)?;
         self.check_lapsed(&principal, now)?;
@@ -261,7 +280,7 @@ impl Validator<'_> {
         now: u64,
         cache: &dyn PrincipalCache,
         ttl: Duration,
-        hook: &dyn ValidationHook
+        hook: &dyn ValidationHook,
     ) -> Result<Arc<Principal>> {
         let ttl = ttl.as_secs();
         if ttl == 0 {
@@ -281,10 +300,16 @@ impl Validator<'_> {
             }
         }
         let principal = self.validate(token, now, hook)?;
-        let valid_until = now.saturating_add(ttl).min(principal.claims.expires_at);
+        let valid_until =
+            now.saturating_add(ttl).min(principal.claims.expires_at);
         cache.insert(
             key,
-            CachedPrincipal { key, principal: principal.clone(), cached_at: now, valid_until }
+            CachedPrincipal {
+                key,
+                principal: principal.clone(),
+                cached_at: now,
+                valid_until,
+            },
         );
         Ok(principal)
     }
@@ -292,42 +317,48 @@ impl Validator<'_> {
     /// Fingerprint calculation does not authenticate the token or expose its claims.
     pub fn cache_key(
         &self,
-        token: &str
+        token: &str,
     ) -> Result<CacheKey> {
         check_size(token)?;
-        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.cache_secret.as_ref())
-            .expect("HMAC key");
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(
+            self.cache_secret.as_ref(),
+        )
+        .expect("HMAC key");
         mac.update(token.as_bytes());
         Ok(CacheKey(mac.finalize().into_bytes().into()))
     }
 
     fn decrypt(
         &self,
-        token: &str
+        token: &str,
     ) -> Result<Principal> {
         check_size(token)?;
         let encoded = token.strip_prefix(PREFIX).ok_or(Error::InvalidToken)?;
-        let wire = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| Error::InvalidToken)?;
+        let wire =
+            URL_SAFE_NO_PAD.decode(encoded).map_err(|_| Error::InvalidToken)?;
         if wire.len() < HEADER_LEN + TAG_LEN {
             return Err(Error::InvalidToken);
         }
-        let id = KeyId::from_be_bytes(wire[..4].try_into().expect("checked header length"));
+        let id = KeyId::from_be_bytes(
+            wire[..4].try_into().expect("checked header length"),
+        );
         let key = self.keys.get(&id).ok_or(Error::InvalidToken)?;
         let info = token_scope(
             &self.realm,
             &self.issuer,
             &self.validation.audience,
             self.validation.purpose,
-            id
+            id,
         );
-        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref()).expect("256-bit key");
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+            .expect("256-bit key");
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
                     XNonce::from_slice(&wire[4..HEADER_LEN]),
-                    Payload { msg: &wire[HEADER_LEN..], aad: &info }
+                    Payload { msg: &wire[HEADER_LEN..], aad: &info },
                 )
-                .map_err(|_| Error::InvalidToken)?
+                .map_err(|_| Error::InvalidToken)?,
         );
         serde_json::from_slice(&plaintext).map_err(|_| Error::InvalidToken)
     }
@@ -335,7 +366,7 @@ impl Validator<'_> {
     fn check(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         self.check_lapsed(principal, now)?;
         if now >= principal.claims.expires_at {
@@ -348,7 +379,7 @@ impl Validator<'_> {
     fn check_lapsed(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()> {
         let claims = &principal.claims;
         claims.check_shape().map_err(|_| Error::InvalidToken)?;
@@ -362,7 +393,11 @@ impl Validator<'_> {
         if now < claims.not_before || now < claims.issued_at {
             return Err(Error::NotYetValid);
         }
-        if !self.validation.required_capabilities.is_subset(&claims.capabilities) {
+        if !self
+            .validation
+            .required_capabilities
+            .is_subset(&claims.capabilities)
+        {
             return Err(Error::MissingCapability);
         }
         Ok(())
@@ -384,7 +419,7 @@ fn token_scope(
     issuer: &str,
     audience: &Audience,
     purpose: Purpose,
-    id: KeyId
+    id: KeyId,
 ) -> Vec<u8> {
     context(&[
         b"orbit-auth/v1/xchacha20poly1305",
@@ -392,6 +427,6 @@ fn token_scope(
         issuer.as_bytes(),
         audience.as_str().as_bytes(),
         purpose.as_bytes(),
-        &id.to_be_bytes()
+        &id.to_be_bytes(),
     ])
 }

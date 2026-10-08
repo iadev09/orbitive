@@ -31,7 +31,7 @@ impl ExchangeId {
 impl fmt::Display for ExchangeId {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -41,14 +41,14 @@ impl fmt::Display for ExchangeId {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Flow {
     AtoB,
-    BtoA
+    BtoA,
 }
 
 impl Flow {
     const fn wire(self) -> u8 {
         match self {
             Self::AtoB => FLOW_A_TO_B,
-            Self::BtoA => FLOW_B_TO_A
+            Self::BtoA => FLOW_B_TO_A,
         }
     }
 
@@ -56,7 +56,7 @@ impl Flow {
         match value {
             FLOW_A_TO_B => Some(Self::AtoB),
             FLOW_B_TO_A => Some(Self::BtoA),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -87,7 +87,7 @@ pub struct ChunkDescriptor {
     slot_count: u32,
     payload_len: u32,
     arena_kind: u8,
-    owner_node: u16
+    owner_node: u16,
 }
 
 impl ChunkDescriptor {
@@ -101,7 +101,7 @@ impl ChunkDescriptor {
         slot_count: u32,
         payload_len: u32,
         arena_kind: u8,
-        owner_node: u16
+        owner_node: u16,
     ) -> Self {
         Self {
             exchange,
@@ -112,7 +112,7 @@ impl ChunkDescriptor {
             slot_count,
             payload_len,
             arena_kind,
-            owner_node
+            owner_node,
         }
     }
 
@@ -157,10 +157,21 @@ impl ChunkDescriptor {
 /// the descriptor and never in this frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlEvent {
-    Start { exchange: ExchangeId, flow: Flow, metadata: Option<ChunkDescriptor> },
+    Start {
+        exchange: ExchangeId,
+        flow: Flow,
+        metadata: Option<ChunkDescriptor>,
+    },
     Data(ChunkDescriptor),
-    Fin { exchange: ExchangeId, flow: Flow },
-    Reset { exchange: ExchangeId, flow: Flow, code: ResetCode }
+    Fin {
+        exchange: ExchangeId,
+        flow: Flow,
+    },
+    Reset {
+        exchange: ExchangeId,
+        flow: Flow,
+        code: ResetCode,
+    },
 }
 
 impl ControlEvent {
@@ -169,14 +180,16 @@ impl ControlEvent {
             Self::Start { exchange, .. }
             | Self::Fin { exchange, .. }
             | Self::Reset { exchange, .. } => exchange,
-            Self::Data(descriptor) => descriptor.exchange()
+            Self::Data(descriptor) => descriptor.exchange(),
         }
     }
 
     pub const fn flow(self) -> Flow {
         match self {
-            Self::Start { flow, .. } | Self::Fin { flow, .. } | Self::Reset { flow, .. } => flow,
-            Self::Data(descriptor) => descriptor.flow()
+            Self::Start { flow, .. }
+            | Self::Fin { flow, .. }
+            | Self::Reset { flow, .. } => flow,
+            Self::Data(descriptor) => descriptor.flow(),
         }
     }
 
@@ -209,7 +222,9 @@ impl ControlEvent {
         frame
     }
 
-    pub(crate) fn decode(frame: &[u8; CONTROL_FRAME_BYTES]) -> Result<Self, &'static str> {
+    pub(crate) fn decode(
+        frame: &[u8; CONTROL_FRAME_BYTES]
+    ) -> Result<Self, &'static str> {
         if frame[..4] != MAGIC {
             return Err("wrong exchange control magic");
         }
@@ -218,30 +233,37 @@ impl ControlEvent {
         }
         let flow = Flow::from_wire(frame[6]).ok_or("unknown exchange flow")?;
         let exchange = ExchangeId::from_stream_id(StreamId::from_net_id(
-            orbit_core::NetId64::from_raw(get_u64(frame, 8))
+            orbit_core::NetId64::from_raw(get_u64(frame, 8)),
         ));
         let has_payload = frame[7] & HAS_PAYLOAD != 0;
         match frame[5] {
             EVENT_START => Ok(Self::Start {
                 exchange,
                 flow,
-                metadata: has_payload.then(|| decode_descriptor(frame, exchange, flow))
+                metadata: has_payload
+                    .then(|| decode_descriptor(frame, exchange, flow)),
             }),
-            EVENT_DATA if has_payload => Ok(Self::Data(decode_descriptor(frame, exchange, flow))),
+            EVENT_DATA if has_payload => {
+                Ok(Self::Data(decode_descriptor(frame, exchange, flow)))
+            }
             EVENT_DATA => Err("data event has no payload descriptor"),
             EVENT_FIN if !has_payload => Ok(Self::Fin { exchange, flow }),
-            EVENT_RESET if !has_payload => {
-                Ok(Self::Reset { exchange, flow, code: ResetCode::new(get_u32(frame, 50)) })
+            EVENT_RESET if !has_payload => Ok(Self::Reset {
+                exchange,
+                flow,
+                code: ResetCode::new(get_u32(frame, 50)),
+            }),
+            EVENT_FIN | EVENT_RESET => {
+                Err("terminal event carries a payload descriptor")
             }
-            EVENT_FIN | EVENT_RESET => Err("terminal event carries a payload descriptor"),
-            _ => Err("unknown exchange event")
+            _ => Err("unknown exchange event"),
         }
     }
 }
 
 fn encode_descriptor(
     frame: &mut [u8; CONTROL_FRAME_BYTES],
-    descriptor: ChunkDescriptor
+    descriptor: ChunkDescriptor,
 ) {
     put_u64(frame, 16, descriptor.chunk_id());
     put_u64(frame, 24, descriptor.allocation_generation());
@@ -255,7 +277,7 @@ fn encode_descriptor(
 fn decode_descriptor(
     frame: &[u8; CONTROL_FRAME_BYTES],
     exchange: ExchangeId,
-    flow: Flow
+    flow: Flow,
 ) -> ChunkDescriptor {
     ChunkDescriptor::new(
         exchange,
@@ -266,14 +288,14 @@ fn decode_descriptor(
         get_u32(frame, 36),
         get_u32(frame, 40),
         frame[44],
-        u16::from_le_bytes(frame[48..50].try_into().expect("two bytes"))
+        u16::from_le_bytes(frame[48..50].try_into().expect("two bytes")),
     )
 }
 
 fn put_u32(
     frame: &mut [u8; CONTROL_FRAME_BYTES],
     at: usize,
-    value: u32
+    value: u32,
 ) {
     frame[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -281,21 +303,21 @@ fn put_u32(
 fn put_u64(
     frame: &mut [u8; CONTROL_FRAME_BYTES],
     at: usize,
-    value: u64
+    value: u64,
 ) {
     frame[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 fn get_u32(
     frame: &[u8; CONTROL_FRAME_BYTES],
-    at: usize
+    at: usize,
 ) -> u32 {
     u32::from_le_bytes(frame[at..at + 4].try_into().expect("four bytes"))
 }
 
 fn get_u64(
     frame: &[u8; CONTROL_FRAME_BYTES],
-    at: usize
+    at: usize,
 ) -> u64 {
     u64::from_le_bytes(frame[at..at + 8].try_into().expect("eight bytes"))
 }
@@ -305,7 +327,9 @@ mod tests {
     use super::*;
 
     fn exchange() -> ExchangeId {
-        ExchangeId::from_stream_id(StreamId::from_net_id(orbit_core::NetId64::make(240, 3, 91)))
+        ExchangeId::from_stream_id(StreamId::from_net_id(
+            orbit_core::NetId64::make(240, 3, 91),
+        ))
     }
 
     fn descriptor(flow: Flow) -> ChunkDescriptor {
@@ -318,15 +342,15 @@ mod tests {
             ControlEvent::Start {
                 exchange: exchange(),
                 flow: Flow::AtoB,
-                metadata: Some(descriptor(Flow::AtoB))
+                metadata: Some(descriptor(Flow::AtoB)),
             },
             ControlEvent::Data(descriptor(Flow::BtoA)),
             ControlEvent::Fin { exchange: exchange(), flow: Flow::AtoB },
             ControlEvent::Reset {
                 exchange: exchange(),
                 flow: Flow::BtoA,
-                code: ResetCode::new(503)
-            }
+                code: ResetCode::new(503),
+            },
         ];
         for event in events {
             assert_eq!(ControlEvent::decode(&event.encode()), Ok(event));
@@ -337,8 +361,12 @@ mod tests {
     fn control_frames_refuse_unknown_or_incomplete_events() {
         let mut frame = ControlEvent::Data(descriptor(Flow::AtoB)).encode();
         frame[7] = 0;
-        assert_eq!(ControlEvent::decode(&frame), Err("data event has no payload descriptor"));
-        frame = ControlEvent::Fin { exchange: exchange(), flow: Flow::AtoB }.encode();
+        assert_eq!(
+            ControlEvent::decode(&frame),
+            Err("data event has no payload descriptor")
+        );
+        frame = ControlEvent::Fin { exchange: exchange(), flow: Flow::AtoB }
+            .encode();
         frame[6] = 99;
         assert_eq!(ControlEvent::decode(&frame), Err("unknown exchange flow"));
     }

@@ -8,21 +8,21 @@ impl StoresServerSessions for OrbitSessionStorage {
     fn put(
         &self,
         key: ServerSessionKey<'_>,
-        value: Vec<u8>
+        value: Vec<u8>,
     ) -> bool {
         self.put_bytes(key.as_ref(), &value)
     }
 
     fn get(
         &self,
-        key: ServerSessionKey<'_>
+        key: ServerSessionKey<'_>,
     ) -> Option<Vec<u8>> {
         self.get_bytes(key.as_ref())
     }
 
     fn take(
         &self,
-        key: ServerSessionKey<'_>
+        key: ServerSessionKey<'_>,
     ) -> Option<Vec<u8>> {
         self.take_bytes(key.as_ref())
     }

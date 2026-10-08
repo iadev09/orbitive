@@ -9,7 +9,9 @@
 #![cfg(unix)]
 
 use bytes::Bytes;
-use orbit_core::ring_shm::{ShmRing, segment_size_for_spec, segment_size_for_spec_and_fleet};
+use orbit_core::ring_shm::{
+    ShmRing, segment_size_for_spec, segment_size_for_spec_and_fleet,
+};
 use orbit_core::{NodeId, RingSpec};
 
 /// macOS limits POSIX SHM names to PSHMNAMLEN (31 chars). Keep
@@ -21,12 +23,12 @@ fn fresh_name() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let pid_short = std::process::id() & 0xFFFF;
+    let pid_short = std::process::id() & 0xffff;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .subsec_nanos();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFF;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xff;
     format!("t{pid_short:04x}{nonce:08x}{n:02x}")
 }
 
@@ -48,7 +50,9 @@ fn open_or_create_creates_first_then_attaches() {
 fn write_then_read_returns_same_frame() {
     let name = fresh_name();
     let ring = ShmRing::open_or_create(&name, 7, spec(16)).unwrap();
-    let id = ring.write(NodeId::new(3), 0, 42, Bytes::from_static(b"hello")).unwrap();
+    let id = ring
+        .write(NodeId::new(3), 0, 42, Bytes::from_static(b"hello"))
+        .unwrap();
     assert_eq!(id.kind(), 7);
     assert_eq!(id.node(), 3);
     assert_eq!(id.counter(), 0);
@@ -80,7 +84,9 @@ fn read_head_returns_latest() {
     assert!(ring.read_head().is_none());
 
     ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"first")).unwrap();
-    let last = ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"second")).unwrap();
+    let last = ring
+        .write(NodeId::new(0), 0, 0, Bytes::from_static(b"second"))
+        .unwrap();
 
     let frame = ring.read_head().unwrap();
     assert_eq!(frame.id, last);
@@ -94,7 +100,8 @@ fn wraparound_overwrites_old_slots() {
     let ring = ShmRing::open_or_create(&name, 5, spec(4)).unwrap();
     let mut ids = Vec::new();
     for i in 0..6 {
-        let id = ring.write(NodeId::new(0), 0, 0, Bytes::from(vec![i])).unwrap();
+        let id =
+            ring.write(NodeId::new(0), 0, 0, Bytes::from(vec![i])).unwrap();
         ids.push(id);
     }
     // First two slots overwritten by writes 4 and 5 (capacity = 4).
@@ -114,7 +121,9 @@ fn two_handles_same_segment_share_state() {
     assert!(writer.created());
     assert!(!reader.created());
 
-    let id = writer.write(NodeId::new(1), 0, 0, Bytes::from_static(b"shared")).unwrap();
+    let id = writer
+        .write(NodeId::new(1), 0, 0, Bytes::from_static(b"shared"))
+        .unwrap();
 
     // Reader sees what writer wrote — the whole point of SHM.
     let frame = reader.read(id).unwrap();
@@ -143,7 +152,8 @@ fn segment_size_uses_the_ring_payload_capacity() {
 
 #[test]
 fn per_node_segment_size_multiplies_the_lane_storage() {
-    let size = segment_size_for_spec_and_fleet(RingSpec::per_node(4, 16), 3).unwrap();
+    let size =
+        segment_size_for_spec_and_fleet(RingSpec::per_node(4, 16), 3).unwrap();
 
     assert_eq!(size, 64 + 3 * 64 + 3 * 4 * 64);
 }
@@ -156,7 +166,7 @@ fn same_kind_rejects_a_different_ring_spec() {
 
     let err = match ShmRing::open_or_create(&name, 14, RingSpec::new(16, 256)) {
         Ok(_) => panic!("same SHM path must reject a different slot layout"),
-        Err(err) => err
+        Err(err) => err,
     };
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 
@@ -166,9 +176,11 @@ fn same_kind_rejects_a_different_ring_spec() {
 #[test]
 fn zero_payload_ring_accepts_only_empty_frames() {
     let name = fresh_name();
-    let ring = ShmRing::open_or_create(&name, 15, RingSpec::new(16, 0)).unwrap();
+    let ring =
+        ShmRing::open_or_create(&name, 15, RingSpec::new(16, 0)).unwrap();
 
-    ring.write(NodeId::ZERO, 1, 0, Bytes::new()).expect("empty heartbeat-like frame");
+    ring.write(NodeId::ZERO, 1, 0, Bytes::new())
+        .expect("empty heartbeat-like frame");
     assert!(ring.write(NodeId::ZERO, 1, 0, Bytes::from_static(b"x")).is_err());
 
     let _ = ring.unlink();
@@ -180,20 +192,27 @@ fn shared_ordered_serializes_independent_writer_handles() {
 
     let name = fresh_name();
     let ring_spec = RingSpec::shared_ordered(2048, 0);
-    let first = Arc::new(ShmRing::open_or_create(&name, 16, ring_spec).unwrap());
-    let second = Arc::new(ShmRing::open_or_create(&name, 16, ring_spec).unwrap());
+    let first =
+        Arc::new(ShmRing::open_or_create(&name, 16, ring_spec).unwrap());
+    let second =
+        Arc::new(ShmRing::open_or_create(&name, 16, ring_spec).unwrap());
     first.reset();
     let barrier = Arc::new(Barrier::new(3));
 
-    let spawn_writer = |ring: Arc<ShmRing>, node_id: NodeId, barrier: Arc<Barrier>| {
+    let spawn_writer = |ring: Arc<ShmRing>,
+                        node_id: NodeId,
+                        barrier: Arc<Barrier>| {
         std::thread::spawn(move || {
             barrier.wait();
             (0..1000)
-                .map(|_| ring.write(node_id, 1, 0, Bytes::new()).unwrap().counter())
+                .map(|_| {
+                    ring.write(node_id, 1, 0, Bytes::new()).unwrap().counter()
+                })
                 .collect::<Vec<_>>()
         })
     };
-    let writer_one = spawn_writer(first.clone(), NodeId::new(1), barrier.clone());
+    let writer_one =
+        spawn_writer(first.clone(), NodeId::new(1), barrier.clone());
     let writer_two = spawn_writer(second, NodeId::new(2), barrier.clone());
     barrier.wait();
 
@@ -215,13 +234,18 @@ fn shared_ordered_serializes_independent_writer_handles() {
 fn per_node_batch_is_contiguous_and_addressable() {
     let name = fresh_name();
     let ring_spec = RingSpec::per_node(4, 8);
-    let ring = ShmRing::open_or_create_for_fleet(&name, 17, ring_spec, 2).unwrap();
+    let ring =
+        ShmRing::open_or_create_for_fleet(&name, 17, ring_spec, 2).unwrap();
     let ids = ring
         .write_batch(
             NodeId::new(1),
             3,
             99,
-            vec![Bytes::from_static(b"aa"), Bytes::from_static(b"bb"), Bytes::from_static(b"cc")]
+            vec![
+                Bytes::from_static(b"aa"),
+                Bytes::from_static(b"bb"),
+                Bytes::from_static(b"cc"),
+            ],
         )
         .unwrap();
 
@@ -239,8 +263,10 @@ fn per_node_batch_is_contiguous_and_addressable() {
 fn attached_handles_share_one_semantic_version_counter() {
     let name = fresh_name();
     let ring_spec = RingSpec::per_node(4, 8);
-    let first = ShmRing::open_or_create_for_fleet(&name, 18, ring_spec, 2).unwrap();
-    let second = ShmRing::open_or_create_for_fleet(&name, 18, ring_spec, 2).unwrap();
+    let first =
+        ShmRing::open_or_create_for_fleet(&name, 18, ring_spec, 2).unwrap();
+    let second =
+        ShmRing::open_or_create_for_fleet(&name, 18, ring_spec, 2).unwrap();
 
     assert_eq!(first.next_version(), 1);
     assert_eq!(second.next_version(), 2);
@@ -268,7 +294,9 @@ fn a_reader_and_a_writer_contend_for_one_slot() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let name = fresh_name();
-    let ring = Arc::new(ShmRing::open_or_create(&name, 9, RingSpec::new(2, 64)).unwrap());
+    let ring = Arc::new(
+        ShmRing::open_or_create(&name, 9, RingSpec::new(2, 64)).unwrap(),
+    );
     let stop = Arc::new(AtomicBool::new(false));
 
     let writer = {
@@ -278,7 +306,7 @@ fn a_reader_and_a_writer_contend_for_one_slot() {
             let mut tick = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 tick = tick.wrapping_add(1);
-                let payload = Bytes::from(vec![(tick & 0xFF) as u8; 64]);
+                let payload = Bytes::from(vec![(tick & 0xff) as u8; 64]);
                 ring.write(NodeId::new(1), 1, tick, payload).unwrap();
             }
         })
@@ -294,7 +322,7 @@ fn a_reader_and_a_writer_contend_for_one_slot() {
                 // One byte value for the whole payload, chosen by the tick the
                 // writer stamped: a frame assembled from two different writes
                 // would show two.
-                let expected = (frame.ver & 0xFF) as u8;
+                let expected = (frame.ver & 0xff) as u8;
                 assert!(
                     frame.payload.iter().all(|byte| *byte == expected),
                     "frame {} mixes two writes",

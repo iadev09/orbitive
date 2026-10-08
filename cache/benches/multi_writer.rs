@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use criterion::Throughput;
 use criterion::{Criterion, criterion_group, criterion_main};
 #[cfg(unix)]
-use orbit_cache::{Cache, CacheMutation, CacheRead, CacheTransport, DefaultCacheLayout};
+use orbit_cache::{
+    Cache, CacheMutation, CacheRead, CacheTransport, DefaultCacheLayout,
+};
 #[cfg(unix)]
 use orbit_core::{Fleet, NodeId};
 
@@ -24,7 +26,7 @@ const HOT_KEY: &[u8] = b"shared-hot-key";
 
 #[cfg(unix)]
 fn fresh_fleet_name() -> &'static str {
-    let pid = std::process::id() & 0xFFFF;
+    let pid = std::process::id() & 0xffff;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
@@ -38,8 +40,12 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
     let fleets = (0..WRITER_COUNT)
         .map(|node| {
             Arc::new(
-                Fleet::join_shm_as(fleet_name, WRITER_COUNT as u16, NodeId::new(node as u16))
-                    .expect("join benchmark fleet")
+                Fleet::join_shm_as(
+                    fleet_name,
+                    WRITER_COUNT as u16,
+                    NodeId::new(node as u16),
+                )
+                .expect("join benchmark fleet"),
             )
         })
         .collect::<Vec<_>>();
@@ -48,25 +54,33 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
         .expect("create reset transport");
     resetter.reset_rings().expect("reset benchmark rings");
 
-    let l1_capacity = NonZeroUsize::new(16).expect("benchmark L1 capacity is non-zero");
+    let l1_capacity =
+        NonZeroUsize::new(16).expect("benchmark L1 capacity is non-zero");
     let writers = fleets
         .iter()
         .map(|fleet| {
             let cache = Cache::<DefaultCacheLayout>::new(fleet.clone())
                 .expect("create writer cache connection");
-            Arc::new(cache.open_store(b"default", l1_capacity).expect("create writer store"))
+            Arc::new(
+                cache
+                    .open_store(b"default", l1_capacity)
+                    .expect("create writer store"),
+            )
         })
         .collect::<Vec<_>>();
-    let observer_cache =
-        Cache::<DefaultCacheLayout>::new(fleets[0].clone()).expect("create observer cache");
-    let observer =
-        observer_cache.open_store(b"default", l1_capacity).expect("create observer store");
+    let observer_cache = Cache::<DefaultCacheLayout>::new(fleets[0].clone())
+        .expect("create observer cache");
+    let observer = observer_cache
+        .open_store(b"default", l1_capacity)
+        .expect("create observer store");
     let mutation_observer =
-        CacheTransport::<DefaultCacheLayout>::new(fleets[0].clone()).expect("create observer");
+        CacheTransport::<DefaultCacheLayout>::new(fleets[0].clone())
+            .expect("create observer");
     let mut mutation_cursor = mutation_observer.cursor_at_head();
 
-    let values =
-        (0..WRITER_COUNT).map(|writer| vec![b'a' + writer as u8; VALUE_LEN]).collect::<Vec<_>>();
+    let values = (0..WRITER_COUNT)
+        .map(|writer| vec![b'a' + writer as u8; VALUE_LEN])
+        .collect::<Vec<_>>();
     let writes_per_batch = (WRITER_COUNT * WRITES_PER_WRITER) as u64;
 
     let mut group = criterion.benchmark_group("cache_shm");
@@ -80,13 +94,16 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
             for _ in 0..iterations {
                 let started = Instant::now();
                 std::thread::scope(|scope| {
-                    let handles = writers.iter().zip(&values).map(|(cache, value)| {
-                        scope.spawn(move || {
-                            for _ in 0..WRITES_PER_WRITER {
-                                cache.put(HOT_KEY, value, None).expect("publish benchmark value");
-                            }
-                        })
-                    });
+                    let handles =
+                        writers.iter().zip(&values).map(|(cache, value)| {
+                            scope.spawn(move || {
+                                for _ in 0..WRITES_PER_WRITER {
+                                    cache
+                                        .put(HOT_KEY, value, None)
+                                        .expect("publish benchmark value");
+                                }
+                            })
+                        });
 
                     for handle in handles {
                         handle.join().expect("benchmark writer panicked");
@@ -95,18 +112,24 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
                 measured += started.elapsed();
 
                 let mutations = mutation_observer.poll(&mut mutation_cursor);
-                assert_eq!(mutations.mutations.len(), WRITER_COUNT * WRITES_PER_WRITER);
+                assert_eq!(
+                    mutations.mutations.len(),
+                    WRITER_COUNT * WRITES_PER_WRITER
+                );
                 assert!(mutations.loss.is_empty());
                 assert_eq!(mutations.malformed, 0);
                 assert!(
-                    mutations
-                        .mutations
-                        .windows(2)
-                        .all(|pair| { pair[0].revision().sequence < pair[1].revision().sequence }),
+                    mutations.mutations.windows(2).all(|pair| {
+                        pair[0].revision().sequence
+                            < pair[1].revision().sequence
+                    }),
                     "fleet-wide cache sequences must be unique"
                 );
-                let CacheMutation::Put { revision: expected_revision, payload, .. } =
-                    mutations.mutations.last().expect("at least one mutation")
+                let CacheMutation::Put {
+                    revision: expected_revision,
+                    payload,
+                    ..
+                } = mutations.mutations.last().expect("at least one mutation")
                 else {
                     panic!("benchmark only publishes put mutations");
                 };

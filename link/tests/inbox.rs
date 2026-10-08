@@ -9,16 +9,18 @@ fn join(
     inbox: &Inbox,
     service: &str,
     role: &str,
-    incarnation: u64
+    incarnation: u64,
 ) -> Result<usize> {
-    inbox.join(service, role, incarnation, |_| Ok(Some(()))).map(|(lane, ())| lane)
+    inbox
+        .join(service, role, incarnation, |_| Ok(Some(())))
+        .map(|(lane, ())| lane)
 }
 
 /// A region that stands in for a mapped segment. Aligned to a cache line so
 /// the layout's `#[repr(align(64))]` headers land where they say they do.
 struct Region {
     ptr: *mut u8,
-    layout: std::alloc::Layout
+    layout: std::alloc::Layout,
 }
 
 // Same contract as the mapped segment: the only mutable state is atomics.
@@ -42,10 +44,12 @@ impl Drop for Region {
 
 fn table(
     fleet_capacity: usize,
-    geometry: InboxGeometry
+    geometry: InboxGeometry,
 ) -> (Region, Inbox) {
     let region = Region::new(geometry.segment_bytes(fleet_capacity));
-    let inbox = unsafe { Inbox::initialize(region.ptr, fleet_capacity, geometry).unwrap() };
+    let inbox = unsafe {
+        Inbox::initialize(region.ptr, fleet_capacity, geometry).unwrap()
+    };
     (region, inbox)
 }
 
@@ -150,7 +154,10 @@ fn lanes_do_not_leak_into_each_other() {
 
     let mut out = Vec::new();
     for node in [0, 1, 3] {
-        assert!(!inbox.read(node, &mut out).unwrap(), "node {node} saw another lane's frame");
+        assert!(
+            !inbox.read(node, &mut out).unwrap(),
+            "node {node} saw another lane's frame"
+        );
     }
     assert!(inbox.read(2, &mut out).unwrap());
     assert_eq!(out, b"for two");
@@ -205,7 +212,10 @@ fn attaching_checks_the_header() {
     assert_eq!(attached.incarnation(0).unwrap(), 5);
 
     let wider = InboxGeometry::new(SMALL.capacity * 2, SMALL.payload_capacity);
-    assert!(unsafe { Inbox::attach(region.ptr, 2, wider) }.is_err(), "geometry must match");
+    assert!(
+        unsafe { Inbox::attach(region.ptr, 2, wider) }.is_err(),
+        "geometry must match"
+    );
 }
 
 /// Writers finish out of order under contention. Nothing may be lost, nothing
@@ -217,7 +227,9 @@ fn many_writers_one_reader_lose_nothing() {
 
     let geometry = InboxGeometry::new(16, 64);
     let region = Region::new(geometry.segment_bytes(1));
-    let inbox = Arc::new(unsafe { Inbox::initialize(region.ptr, 1, geometry).unwrap() });
+    let inbox = Arc::new(unsafe {
+        Inbox::initialize(region.ptr, 1, geometry).unwrap()
+    });
     inbox.claim_lane(0, "app", "asgi", 1).unwrap();
 
     let writers: Vec<_> = (0..WRITERS)
@@ -228,7 +240,10 @@ fn many_writers_one_reader_lose_nothing() {
                     let frame = format!("{writer}:{n}");
                     // A full lane is a refusal, not a failure: retry until the
                     // reader has made room.
-                    while matches!(inbox.write(0, frame.as_bytes()), Err(Error::InboxFull)) {
+                    while matches!(
+                        inbox.write(0, frame.as_bytes()),
+                        Err(Error::InboxFull)
+                    ) {
                         std::thread::yield_now();
                     }
                 }
@@ -254,7 +269,11 @@ fn many_writers_one_reader_lose_nothing() {
     }
 
     for (writer, numbers) in seen.iter().enumerate() {
-        assert_eq!(numbers.len(), PER_WRITER, "writer {writer} lost or duplicated frames");
+        assert_eq!(
+            numbers.len(),
+            PER_WRITER,
+            "writer {writer} lost or duplicated frames"
+        );
         // One writer's frames keep their own order even though the lane
         // interleaves every writer's.
         assert!(
@@ -302,13 +321,20 @@ fn processes_that_do_not_know_each_other_take_different_lanes() {
     let joining: Vec<_> = (0..8)
         .map(|_| {
             let inbox = Arc::clone(&inbox);
-            std::thread::spawn(move || join(&inbox, "checkout", "asgi", 1).unwrap())
+            std::thread::spawn(move || {
+                join(&inbox, "checkout", "asgi", 1).unwrap()
+            })
         })
         .collect();
 
-    let mut lanes: Vec<usize> = joining.into_iter().map(|thread| thread.join().unwrap()).collect();
+    let mut lanes: Vec<usize> =
+        joining.into_iter().map(|thread| thread.join().unwrap()).collect();
     lanes.sort_unstable();
-    assert_eq!(lanes, (0..8).collect::<Vec<_>>(), "every lane taken exactly once");
+    assert_eq!(
+        lanes,
+        (0..8).collect::<Vec<_>>(),
+        "every lane taken exactly once"
+    );
     assert_eq!(inbox.targets("checkout").len(), 8);
 
     // And a full table says so rather than handing out a lane twice.
@@ -328,7 +354,11 @@ fn a_released_lane_is_reused_without_its_old_frames() {
     let reused = join(&inbox, "orders", "asgi", 2).unwrap();
     assert_eq!(reused, lane, "the free lane is the one that was given up");
     assert_eq!(inbox.service(lane).unwrap().as_deref(), Some("orders"));
-    assert_eq!(inbox.depth(lane).unwrap(), 0, "the last owner's mail is not delivered to this one");
+    assert_eq!(
+        inbox.depth(lane).unwrap(),
+        0,
+        "the last owner's mail is not delivered to this one"
+    );
 }
 
 /// Two roles under one name would share an inbox and split its requests;
@@ -340,14 +370,19 @@ fn a_name_served_by_another_role_is_refused() {
 
     let python = join(&inbox, "api", "asgi", 1).unwrap();
     assert_eq!(inbox.role(python).unwrap().as_deref(), Some("asgi"));
-    join(&inbox, "api", "asgi", 1).expect("another process of the same role scales the name");
+    join(&inbox, "api", "asgi", 1)
+        .expect("another process of the same role scales the name");
 
     match join(&inbox, "api", "php", 1) {
         Err(Error::RoleConflict { held_by, role, .. }) => {
             assert_eq!((held_by.as_str(), role.as_str()), ("asgi", "php"));
         }
-        other => panic!("expected a role conflict, got {other:?}")
+        other => panic!("expected a role conflict, got {other:?}"),
     }
-    assert_eq!(inbox.serving("api").len(), 2, "the refused join left no lane behind");
+    assert_eq!(
+        inbox.serving("api").len(),
+        2,
+        "the refused join left no lane behind"
+    );
     join(&inbox, "orders", "php", 1).expect("another name is another service");
 }

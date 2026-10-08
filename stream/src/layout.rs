@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use crate::StreamSpec;
 
-pub(crate) const MAGIC: u32 = 0x53_54_52_4D; // "STRM"
+pub(crate) const MAGIC: u32 = 0x53_54_52_4d; // "STRM"
 pub(crate) const VERSION: u16 = 2;
 
 pub(crate) const SLOT_EMPTY: u8 = 0;
@@ -43,7 +43,8 @@ pub(crate) const GENERATION_MASK: u32 = (1 << GENERATION_BITS) - 1;
 /// The last generation a slot may be installed in. Never wraps: a slot
 /// that reaches it is exhausted for the rest of the epoch. Unit tests
 /// shrink it so exhaustion is exercised instead of assumed.
-pub(crate) const GENERATION_LIMIT: u32 = if cfg!(test) { 4 } else { GENERATION_MASK };
+pub(crate) const GENERATION_LIMIT: u32 =
+    if cfg!(test) { 4 } else { GENERATION_MASK };
 
 #[repr(C, align(64))]
 pub(crate) struct Header {
@@ -59,14 +60,14 @@ pub(crate) struct Header {
     /// created, advanced by every quiescent reset, and carried in every
     /// ticket, so a ticket from before a reset never matches after it.
     pub(crate) epoch: AtomicU64,
-    _reserved2: [u8; 32]
+    _reserved2: [u8; 32],
 }
 
 impl Header {
     pub(crate) fn new(
         fleet_capacity: u16,
         geometry: &Geometry,
-        epoch: u64
+        epoch: u64,
     ) -> Self {
         Self {
             magic: MAGIC,
@@ -78,7 +79,7 @@ impl Header {
             fleet_capacity,
             _reserved: [0; 2],
             epoch: AtomicU64::new(epoch),
-            _reserved2: [0; 32]
+            _reserved2: [0; 32],
         }
     }
 
@@ -88,7 +89,7 @@ impl Header {
     pub(crate) fn compatible(
         &self,
         fleet_capacity: u16,
-        geometry: &Geometry
+        geometry: &Geometry,
     ) -> bool {
         self.magic == MAGIC
             && self.version == VERSION
@@ -109,7 +110,7 @@ pub(crate) struct Doorbell {
     /// Whose driver is listening, so a death report for that incarnation
     /// can stop writers from ringing a bell nobody answers.
     pub(crate) incarnation: AtomicU64,
-    _padding: [u8; 48]
+    _padding: [u8; 48],
 }
 
 /// One direction of a stream: a single-producer, single-consumer byte ring
@@ -167,7 +168,7 @@ pub(crate) struct Direction {
     /// waiter parks on. 32 bits because that is what the platform waits want.
     pub(crate) changes: AtomicU32,
     pub(crate) waiters: AtomicU32,
-    _wake_padding: [u8; 56]
+    _wake_padding: [u8; 56],
 }
 
 impl Direction {
@@ -200,13 +201,13 @@ pub(crate) struct Slot {
     pub(crate) incarnation: [AtomicU64; 2],
     _padding: [u8; 32],
     /// `directions[0]` carries A -> B, `directions[1]` carries B -> A.
-    pub(crate) directions: [Direction; 2]
+    pub(crate) directions: [Direction; 2],
 }
 
 impl Slot {
     pub(crate) fn is(
         &self,
-        generation: u32
+        generation: u32,
     ) -> bool {
         // `Acquire` on `state` publishes the generation written by `install`.
         self.state.load(Ordering::Acquire) == SLOT_LIVE
@@ -219,7 +220,7 @@ impl Slot {
     pub(crate) fn install(
         &self,
         creator: u16,
-        incarnation: u64
+        incarnation: u64,
     ) -> Option<u32> {
         let generation = self.generation.load(Ordering::Relaxed);
         if generation >= GENERATION_LIMIT {
@@ -261,21 +262,23 @@ pub(crate) struct Geometry {
     pub(crate) offers_offset: usize,
     pub(crate) slots_offset: usize,
     pub(crate) buffers_offset: usize,
-    pub(crate) segment_size: usize
+    pub(crate) segment_size: usize,
 }
 
 impl Geometry {
     pub(crate) fn new(
         fleet_capacity: u16,
-        spec: StreamSpec
+        spec: StreamSpec,
     ) -> Self {
         let StreamSpec { lane_capacity, buffer_bytes, .. } = spec;
         let fleet_capacity = usize::from(fleet_capacity);
         let total_slots = fleet_capacity * lane_capacity;
         let bitmap_words = total_slots.div_ceil(64);
-        let bitmap_bytes = fleet_capacity * bitmap_words * size_of::<AtomicU64>();
+        let bitmap_bytes =
+            fleet_capacity * bitmap_words * size_of::<AtomicU64>();
         let doorbells_offset = size_of::<Header>();
-        let pending_offset = doorbells_offset + fleet_capacity * size_of::<Doorbell>();
+        let pending_offset =
+            doorbells_offset + fleet_capacity * size_of::<Doorbell>();
         let offers_offset = pending_offset + bitmap_bytes;
         let slots_offset = (offers_offset + bitmap_bytes).next_multiple_of(64);
         let buffers_offset = slots_offset + total_slots * size_of::<Slot>();
@@ -291,14 +294,14 @@ impl Geometry {
             offers_offset,
             slots_offset,
             buffers_offset,
-            segment_size
+            segment_size,
         }
     }
 
     pub(crate) fn buffer_offset(
         &self,
         slot: usize,
-        direction: usize
+        direction: usize,
     ) -> usize {
         self.buffers_offset + (slot * 2 + direction) * self.buffer_bytes
     }

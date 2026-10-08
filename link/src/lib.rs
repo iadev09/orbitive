@@ -31,7 +31,9 @@ mod receiver;
 mod segment;
 
 pub use body::LinkBodies;
-pub use inbox::{Admission, Inbox, InboxGeometry, LANE_NAME_MAX, LANE_ROLE_MAX, Reclaimed};
+pub use inbox::{
+    Admission, Inbox, InboxGeometry, LANE_NAME_MAX, LANE_ROLE_MAX, Reclaimed,
+};
 #[cfg(all(unix, feature = "tokio"))]
 pub use receiver::InboxReceiver;
 #[cfg(unix)]
@@ -49,7 +51,7 @@ pub struct LinkSpec {
     pub fleet_capacity: u16,
     pub inbox_kind: u8,
     pub inbox: InboxGeometry,
-    pub streams: StreamSpec
+    pub streams: StreamSpec,
 }
 
 impl LinkSpec {
@@ -57,7 +59,7 @@ impl LinkSpec {
         fleet_capacity: u16,
         inbox_kind: u8,
         inbox: InboxGeometry,
-        streams: StreamSpec
+        streams: StreamSpec,
     ) -> Self {
         Self { fleet_capacity, inbox_kind, inbox, streams }
     }
@@ -68,10 +70,14 @@ impl LinkSpec {
 
     fn validate(self) -> Result<()> {
         if self.fleet_capacity == 0 {
-            return Err(Error::Malformed("link fleet capacity must not be zero"));
+            return Err(Error::Malformed(
+                "link fleet capacity must not be zero",
+            ));
         }
         if self.inbox_kind == self.streams.kind {
-            return Err(Error::Malformed("link inbox and stream table need distinct SHM kinds"));
+            return Err(Error::Malformed(
+                "link inbox and stream table need distinct SHM kinds",
+            ));
         }
         self.inbox.validate()
     }
@@ -85,22 +91,37 @@ pub enum Error {
     NoLane,
     FrameTooLarge,
     Malformed(&'static str),
-    InvalidName { name: String, reason: String },
-    RoleConflict { name: String, role: String, held_by: String, lane: usize, pid: u32 },
+    InvalidName {
+        name: String,
+        reason: String,
+    },
+    RoleConflict {
+        name: String,
+        role: String,
+        held_by: String,
+        lane: usize,
+        pid: u32,
+    },
     Io(std::io::Error),
     Core(orbit_core::Error),
-    Stream(orbit_stream::Error)
+    Stream(orbit_stream::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(
         &self,
-        formatter: &mut fmt::Formatter<'_>
+        formatter: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         match self {
-            Self::InboxFull => formatter.write_str("the target inbox lane is full or unowned"),
-            Self::NoLane => formatter.write_str("every lane in the named fleet is held"),
-            Self::FrameTooLarge => formatter.write_str("the frame does not fit in one inbox slot"),
+            Self::InboxFull => {
+                formatter.write_str("the target inbox lane is full or unowned")
+            }
+            Self::NoLane => {
+                formatter.write_str("every lane in the named fleet is held")
+            }
+            Self::FrameTooLarge => {
+                formatter.write_str("the frame does not fit in one inbox slot")
+            }
             Self::Malformed(message) => formatter.write_str(message),
             Self::InvalidName { name, reason } => {
                 write!(formatter, "{name:?} cannot name a link fleet: {reason}")
@@ -109,9 +130,15 @@ impl fmt::Display for Error {
                 formatter,
                 "{name:?} is already served by {held_by} on lane {lane} (pid {pid}); role {role:?} cannot join under the same name"
             ),
-            Self::Io(error) => write!(formatter, "Orbit link IO error: {error}"),
-            Self::Core(error) => write!(formatter, "Orbit link core error: {error}"),
-            Self::Stream(error) => write!(formatter, "Orbit link stream error: {error}")
+            Self::Io(error) => {
+                write!(formatter, "Orbit link IO error: {error}")
+            }
+            Self::Core(error) => {
+                write!(formatter, "Orbit link core error: {error}")
+            }
+            Self::Stream(error) => {
+                write!(formatter, "Orbit link stream error: {error}")
+            }
         }
     }
 }
@@ -122,7 +149,7 @@ impl std::error::Error for Error {
             Self::Io(error) => Some(error),
             Self::Core(error) => Some(error),
             Self::Stream(error) => Some(error),
-            _ => None
+            _ => None,
         }
     }
 }

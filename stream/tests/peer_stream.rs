@@ -34,7 +34,8 @@ fn stream_peer() {
     };
     let name = Box::leak(name.into_boxed_str());
     let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(1)).unwrap());
-    let streams = Streams::new(fleet, Incarnation::new(PEER_INCARNATION)).unwrap();
+    let streams =
+        Streams::new(fleet, Incarnation::new(PEER_INCARNATION)).unwrap();
     report("ready");
     for line in std::io::stdin().lock().lines() {
         match line.unwrap().as_str() {
@@ -66,7 +67,7 @@ fn stream_peer() {
                 drop(endpoint);
             }
             "drop" => break,
-            command => panic!("unknown command {command}")
+            command => panic!("unknown command {command}"),
         }
     }
     report("dropped");
@@ -74,7 +75,7 @@ fn stream_peer() {
 
 struct Peer {
     child: Child,
-    lines: Receiver<String>
+    lines: Receiver<String>,
 }
 
 impl Peer {
@@ -103,13 +104,15 @@ impl Peer {
 
     fn expect(
         &self,
-        message: &str
+        message: &str,
     ) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let line = self
                 .lines
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .recv_timeout(
+                    deadline.saturating_duration_since(Instant::now()),
+                )
                 .expect("peer failed or hung");
             if let Some(rest) = line.strip_prefix("ORBIT:")
                 && rest.starts_with(message)
@@ -121,7 +124,7 @@ impl Peer {
 
     fn send(
         &mut self,
-        command: &str
+        command: &str,
     ) {
         writeln!(self.child.stdin.as_mut().unwrap(), "{command}").unwrap();
         self.child.stdin.as_mut().unwrap().flush().unwrap();
@@ -157,14 +160,16 @@ impl Drop for Peer {
 
 struct Owner {
     streams: Streams,
-    name: &'static str
+    name: &'static str,
 }
 
 impl Owner {
     fn new(tag: &str) -> Self {
-        let name: &'static str =
-            Box::leak(format!("sp{tag}{:x}", std::process::id()).into_boxed_str());
-        let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).unwrap());
+        let name: &'static str = Box::leak(
+            format!("sp{tag}{:x}", std::process::id()).into_boxed_str(),
+        );
+        let fleet =
+            Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).unwrap());
         let streams = Streams::new(fleet, Incarnation::new(10)).unwrap();
         streams.reset_all();
         Self { streams, name }
@@ -209,7 +214,10 @@ fn bytes_cross_between_two_processes_and_the_writer_waits_on_a_full_ring() {
     assert_eq!(peer.expect("echoed"), format!("echoed {}", expected.len()));
 
     // The peer released its side when the echo finished; ours is the last.
-    assert!(matches!(owner.streams.open(ticket), Err(Error::AlreadyClaimed(_))));
+    assert!(matches!(
+        owner.streams.open(ticket),
+        Err(Error::AlreadyClaimed(_))
+    ));
     drop(a_read);
     assert!(!owner.streams.is_live(ticket.id));
     peer.finish();
@@ -241,7 +249,10 @@ fn a_killed_peer_is_reported_dead_and_the_survivor_ends_cleanly() {
     let (a, outcome) = reader.join().unwrap();
     assert!(matches!(outcome, Err(Error::Reset)), "{outcome:?}");
     assert!(matches!(a.try_write(b"x"), Err(Error::PeerGone)));
-    assert!(matches!(owner.streams.open(ticket), Err(Error::AlreadyClaimed(_))));
+    assert!(matches!(
+        owner.streams.open(ticket),
+        Err(Error::AlreadyClaimed(_))
+    ));
     assert!(owner.streams.is_live(ticket.id));
     drop(a);
     assert!(!owner.streams.is_live(ticket.id));
@@ -269,7 +280,7 @@ fn the_successor_on_a_node_ends_what_its_earlier_life_held() {
 
     let successor = Streams::new(
         Arc::new(Fleet::join_shm_as(owner.name, 2, NodeId::new(1)).unwrap()),
-        Incarnation::new(PEER_INCARNATION + 1)
+        Incarnation::new(PEER_INCARNATION + 1),
     )
     .unwrap();
     successor.supersede();
@@ -310,10 +321,13 @@ async fn tokio_halves_cross_between_two_processes() {
         a_write.shutdown().await.unwrap();
     });
     let mut echoed = Vec::new();
-    tokio::time::timeout(Duration::from_secs(20), a_read.read_to_end(&mut echoed))
-        .await
-        .expect("echo did not complete")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        a_read.read_to_end(&mut echoed),
+    )
+    .await
+    .expect("echo did not complete")
+    .unwrap();
     writer.await.unwrap();
     assert_eq!(echoed, expected);
     peer.expect("echoed");

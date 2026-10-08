@@ -8,11 +8,15 @@ mod pair;
 mod protocol;
 
 pub use arena::{
-    PayloadArena, PayloadArenaSpec, PayloadChunk, segment_size_for as payload_segment_size_for
+    PayloadArena, PayloadArenaSpec, PayloadChunk,
+    segment_size_for as payload_segment_size_for,
 };
 pub use chunk::{ChunkGeometry, ChunkPlan, DEFAULT_CHUNK_BYTES};
 pub use pair::{
-    DispatchError, ExchangeEndpoint, ExchangePayloadSpec, ExchangeSpec, ExchangeTicket, Exchanges,
-    FlowEvent, FlowHandler, PendingData, PendingStart, Receiver, Sender
+    DispatchError, ExchangeEndpoint, ExchangePayloadSpec, ExchangeSpec,
+    ExchangeTicket, Exchanges, FlowEvent, FlowHandler, PendingData,
+    PendingStart, Receiver, Sender,
 };
-pub use protocol::{ChunkDescriptor, ControlEvent, ExchangeId, Flow, ResetCode};
+pub use protocol::{
+    ChunkDescriptor, ControlEvent, ExchangeId, Flow, ResetCode,
+};

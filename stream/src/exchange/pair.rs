@@ -9,10 +9,13 @@ use orbit_core::{Fleet, NodeId};
 use super::arena::Publication;
 use super::protocol::CONTROL_FRAME_BYTES;
 use super::{
-    ChunkDescriptor, ChunkGeometry, ChunkPlan, ControlEvent, ExchangeId, Flow, PayloadArena,
-    PayloadArenaSpec, PayloadChunk, ResetCode
+    ChunkDescriptor, ChunkGeometry, ChunkPlan, ControlEvent, ExchangeId, Flow,
+    PayloadArena, PayloadArenaSpec, PayloadChunk, ResetCode,
 };
-use crate::{Error, Incarnation, ReadHalf, Result, Side, StreamSpec, Streams, Ticket, WriteHalf};
+use crate::{
+    Error, Incarnation, ReadHalf, Result, Side, StreamSpec, Streams, Ticket,
+    WriteHalf,
+};
 
 /// How an exchange budgets payload memory for its two directions.
 ///
@@ -23,19 +26,19 @@ use crate::{Error, Incarnation, ReadHalf, Result, Side, StreamSpec, Streams, Tic
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ExchangePayloadSpec {
     Shared(PayloadArenaSpec),
-    Directional { a_to_b: PayloadArenaSpec, b_to_a: PayloadArenaSpec }
+    Directional { a_to_b: PayloadArenaSpec, b_to_a: PayloadArenaSpec },
 }
 
 impl ExchangePayloadSpec {
     /// Physical payload arena used by one byte-flow direction.
     pub const fn for_flow(
         self,
-        flow: Flow
+        flow: Flow,
     ) -> PayloadArenaSpec {
         match (self, flow) {
             (Self::Shared(payload), _) => payload,
             (Self::Directional { a_to_b, .. }, Flow::AtoB) => a_to_b,
-            (Self::Directional { b_to_a, .. }, Flow::BtoA) => b_to_a
+            (Self::Directional { b_to_a, .. }, Flow::BtoA) => b_to_a,
         }
     }
 }
@@ -48,13 +51,13 @@ pub struct ExchangeSpec {
     pub control: StreamSpec,
     /// Payload memory may be shared by both directions or split into two
     /// independently bounded arenas.
-    pub payload: ExchangePayloadSpec
+    pub payload: ExchangePayloadSpec,
 }
 
 impl ExchangeSpec {
     pub const fn new(
         control: StreamSpec,
-        payload: PayloadArenaSpec
+        payload: PayloadArenaSpec,
     ) -> Self {
         Self { control, payload: ExchangePayloadSpec::Shared(payload) }
     }
@@ -62,15 +65,18 @@ impl ExchangeSpec {
     pub const fn directional(
         control: StreamSpec,
         a_to_b: PayloadArenaSpec,
-        b_to_a: PayloadArenaSpec
+        b_to_a: PayloadArenaSpec,
     ) -> Self {
-        Self { control, payload: ExchangePayloadSpec::Directional { a_to_b, b_to_a } }
+        Self {
+            control,
+            payload: ExchangePayloadSpec::Directional { a_to_b, b_to_a },
+        }
     }
 
     /// Physical payload arena used by one byte-flow direction.
     pub const fn payload_for(
         self,
-        flow: Flow
+        flow: Flow,
     ) -> PayloadArenaSpec {
         self.payload.for_flow(flow)
     }
@@ -78,7 +84,7 @@ impl ExchangeSpec {
     /// Physical chunk geometry used by one byte-flow direction.
     pub const fn chunk_geometry(
         self,
-        flow: Flow
+        flow: Flow,
     ) -> Option<ChunkGeometry> {
         self.payload_for(flow).chunk_geometry()
     }
@@ -91,9 +97,12 @@ impl ExchangeSpec {
             )));
         }
         match self.payload {
-            ExchangePayloadSpec::Shared(payload) if self.control.kind == payload.kind => {
+            ExchangePayloadSpec::Shared(payload)
+                if self.control.kind == payload.kind =>
+            {
                 return Err(Error::Malformed(
-                    "exchange control and payload need distinct SHM kinds".to_owned()
+                    "exchange control and payload need distinct SHM kinds"
+                        .to_owned(),
                 ));
             }
             ExchangePayloadSpec::Directional { a_to_b, b_to_a }
@@ -134,7 +143,7 @@ impl ExchangeTicket {
 impl fmt::Display for ExchangeTicket {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -151,25 +160,25 @@ impl FromStr for ExchangeTicket {
 #[derive(Clone)]
 enum PayloadArenas {
     Shared(PayloadArena),
-    Directional { a_to_b: PayloadArena, b_to_a: PayloadArena }
+    Directional { a_to_b: PayloadArena, b_to_a: PayloadArena },
 }
 
 impl PayloadArenas {
     fn for_flow(
         &self,
-        flow: Flow
+        flow: Flow,
     ) -> PayloadArena {
         match (self, flow) {
             (Self::Shared(arena), _) => arena.clone(),
             (Self::Directional { a_to_b, .. }, Flow::AtoB) => a_to_b.clone(),
-            (Self::Directional { b_to_a, .. }, Flow::BtoA) => b_to_a.clone()
+            (Self::Directional { b_to_a, .. }, Flow::BtoA) => b_to_a.clone(),
         }
     }
 
     fn node_dead(
         &self,
         node: NodeId,
-        incarnation: Incarnation
+        incarnation: Incarnation,
     ) {
         match self {
             Self::Shared(arena) => arena.node_dead(node, incarnation),
@@ -207,24 +216,31 @@ impl PayloadArenas {
 #[derive(Clone)]
 pub struct Exchanges {
     control: Streams,
-    payload: PayloadArenas
+    payload: PayloadArenas,
 }
 
 impl Exchanges {
     pub fn open(
         fleet: Arc<Fleet>,
         incarnation: Incarnation,
-        spec: ExchangeSpec
+        spec: ExchangeSpec,
     ) -> Result<Self> {
         spec.validate()?;
-        let control = Streams::with_spec(Arc::clone(&fleet), incarnation, spec.control)?;
+        let control =
+            Streams::with_spec(Arc::clone(&fleet), incarnation, spec.control)?;
         let payload = match spec.payload {
-            ExchangePayloadSpec::Shared(payload) => {
-                PayloadArenas::Shared(PayloadArena::open(fleet, incarnation, payload)?)
-            }
-            ExchangePayloadSpec::Directional { a_to_b, b_to_a } => PayloadArenas::Directional {
-                a_to_b: PayloadArena::open(Arc::clone(&fleet), incarnation, a_to_b)?,
-                b_to_a: PayloadArena::open(fleet, incarnation, b_to_a)?
+            ExchangePayloadSpec::Shared(payload) => PayloadArenas::Shared(
+                PayloadArena::open(fleet, incarnation, payload)?,
+            ),
+            ExchangePayloadSpec::Directional { a_to_b, b_to_a } => {
+                PayloadArenas::Directional {
+                    a_to_b: PayloadArena::open(
+                        Arc::clone(&fleet),
+                        incarnation,
+                        a_to_b,
+                    )?,
+                    b_to_a: PayloadArena::open(fleet, incarnation, b_to_a)?,
+                }
             }
         };
         Ok(Self { control, payload })
@@ -242,7 +258,7 @@ impl Exchanges {
     /// payload backpressure does not become an abandoned resource lease.
     pub fn create_payload_available(
         &self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<bool> {
         self.payload.for_flow(Flow::AtoB).is_available(payload_len)
     }
@@ -251,7 +267,7 @@ impl Exchanges {
     pub fn poll_create_payload_available(
         &self,
         payload_len: usize,
-        cx: &mut std::task::Context<'_>
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
         self.payload.for_flow(Flow::AtoB).poll_available(payload_len, cx)
     }
@@ -260,7 +276,7 @@ impl Exchanges {
     /// Both directions have independent lifecycle and may start in either order.
     pub fn open_peer(
         &self,
-        ticket: ExchangeTicket
+        ticket: ExchangeTicket,
     ) -> Result<ExchangeEndpoint> {
         let endpoint = self.control.open(ticket.0)?;
         Ok(self.endpoint(endpoint))
@@ -268,29 +284,34 @@ impl Exchanges {
 
     fn endpoint(
         &self,
-        endpoint: crate::Endpoint
+        endpoint: crate::Endpoint,
     ) -> ExchangeEndpoint {
         let id = ExchangeId::from_stream_id(endpoint.id());
         let (send_flow, receive_flow) = match endpoint.side() {
             Side::A => (Flow::AtoB, Flow::BtoA),
-            Side::B => (Flow::BtoA, Flow::AtoB)
+            Side::B => (Flow::BtoA, Flow::AtoB),
         };
         let (read, write) = endpoint.split();
         ExchangeEndpoint {
-            sender: Sender(Producer::new(id, send_flow, self.payload.for_flow(send_flow), write)),
+            sender: Sender(Producer::new(
+                id,
+                send_flow,
+                self.payload.for_flow(send_flow),
+                write,
+            )),
             receiver: Receiver(Consumer::new(
                 id,
                 receive_flow,
                 self.payload.for_flow(receive_flow),
-                read
-            ))
+                read,
+            )),
         }
     }
 
     pub fn offer(
         &self,
         ticket: ExchangeTicket,
-        to: NodeId
+        to: NodeId,
     ) -> Result<()> {
         self.control.offer(ticket.0, to)
     }
@@ -305,22 +326,30 @@ impl Exchanges {
     }
 
     /// Wait at most `timeout` for an offered exchange.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     pub fn take_offer_timeout(
         &self,
-        timeout: Duration
+        timeout: Duration,
     ) -> Result<Option<ExchangeTicket>> {
-        self.control.take_offer_timeout(timeout).map(|ticket| ticket.map(ExchangeTicket))
+        self.control
+            .take_offer_timeout(timeout)
+            .map(|ticket| ticket.map(ExchangeTicket))
     }
 
     /// Task readiness for the next offered exchange.
     pub fn poll_take_offer(
         &self,
-        cx: &mut std::task::Context<'_>
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<ExchangeTicket>> {
         match self.control.poll_take_offer(cx) {
-            std::task::Poll::Ready(result) => std::task::Poll::Ready(result.map(ExchangeTicket)),
-            std::task::Poll::Pending => std::task::Poll::Pending
+            std::task::Poll::Ready(result) => {
+                std::task::Poll::Ready(result.map(ExchangeTicket))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 
@@ -333,7 +362,7 @@ impl Exchanges {
     pub fn node_dead(
         &self,
         node: NodeId,
-        incarnation: Incarnation
+        incarnation: Incarnation,
     ) {
         self.control.node_dead(node, incarnation);
         self.payload.node_dead(node, incarnation);
@@ -359,7 +388,7 @@ impl Exchanges {
 /// exchanges at once; sender and receiver are capabilities, not worker roles.
 pub struct ExchangeEndpoint {
     sender: Sender,
-    receiver: Receiver
+    receiver: Receiver,
 }
 
 impl ExchangeEndpoint {
@@ -384,7 +413,7 @@ impl ExchangeEndpoint {
 enum ProducerState {
     New,
     Open,
-    Terminal
+    Terminal,
 }
 
 struct Producer {
@@ -393,7 +422,7 @@ struct Producer {
     arena: PayloadArena,
     control: WriteHalf,
     next_chunk: u64,
-    state: ProducerState
+    state: ProducerState,
 }
 
 impl Producer {
@@ -401,9 +430,16 @@ impl Producer {
         exchange: ExchangeId,
         flow: Flow,
         arena: PayloadArena,
-        control: WriteHalf
+        control: WriteHalf,
     ) -> Self {
-        Self { exchange, flow, arena, control, next_chunk: 1, state: ProducerState::New }
+        Self {
+            exchange,
+            flow,
+            arena,
+            control,
+            next_chunk: 1,
+            state: ProducerState::New,
+        }
     }
 
     fn id(&self) -> ExchangeId {
@@ -412,10 +448,12 @@ impl Producer {
 
     fn start(
         &mut self,
-        metadata: Option<&[u8]>
+        metadata: Option<&[u8]>,
     ) -> Result<()> {
         if self.state != ProducerState::New {
-            return Err(Error::Malformed("flow start was already sent".to_owned()));
+            return Err(Error::Malformed(
+                "flow start was already sent".to_owned(),
+            ));
         }
         if let Some(bytes) = metadata.filter(|bytes| !bytes.is_empty()) {
             let mut pending = self.reserve_start(bytes.len())?;
@@ -425,7 +463,7 @@ impl Producer {
             self.send(ControlEvent::Start {
                 exchange: self.exchange,
                 flow: self.flow,
-                metadata: None
+                metadata: None,
             })?;
             self.state = ProducerState::Open;
         }
@@ -434,7 +472,7 @@ impl Producer {
 
     fn data(
         &mut self,
-        payload: &[u8]
+        payload: &[u8],
     ) -> Result<ChunkDescriptor> {
         let mut pending = self.reserve_data(payload.len())?;
         pending.copy_from_slice(payload);
@@ -443,10 +481,12 @@ impl Producer {
 
     fn reserve_start(
         &mut self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<PendingStart<'_>> {
         if self.state != ProducerState::New {
-            return Err(Error::Malformed("flow start was already sent".to_owned()));
+            return Err(Error::Malformed(
+                "flow start was already sent".to_owned(),
+            ));
         }
         let publication = self.arena.reserve(payload_len)?;
         Ok(PendingStart { producer: self, publication })
@@ -454,10 +494,12 @@ impl Producer {
 
     fn reserve_data(
         &mut self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<PendingData<'_>> {
         if self.state != ProducerState::Open {
-            return Err(Error::Malformed("flow data requires an open flow".to_owned()));
+            return Err(Error::Malformed(
+                "flow data requires an open flow".to_owned(),
+            ));
         }
         let publication = self.arena.reserve(payload_len)?;
         Ok(PendingData { producer: self, publication })
@@ -465,14 +507,14 @@ impl Producer {
 
     fn commit_start(
         &mut self,
-        publication: Publication
+        publication: Publication,
     ) -> Result<ChunkDescriptor> {
         let descriptor = self.descriptor(&publication);
         publication.make_live();
         self.send(ControlEvent::Start {
             exchange: self.exchange,
             flow: self.flow,
-            metadata: Some(descriptor)
+            metadata: Some(descriptor),
         })?;
         publication.mark_published();
         self.next_chunk += 1;
@@ -482,7 +524,7 @@ impl Producer {
 
     fn commit_data(
         &mut self,
-        publication: Publication
+        publication: Publication,
     ) -> Result<ChunkDescriptor> {
         let descriptor = self.descriptor(&publication);
         publication.make_live();
@@ -494,9 +536,14 @@ impl Producer {
 
     fn finish(&mut self) -> Result<()> {
         if self.state != ProducerState::Open {
-            return Err(Error::Malformed("flow FIN requires an open flow".to_owned()));
+            return Err(Error::Malformed(
+                "flow FIN requires an open flow".to_owned(),
+            ));
         }
-        self.send(ControlEvent::Fin { exchange: self.exchange, flow: self.flow })?;
+        self.send(ControlEvent::Fin {
+            exchange: self.exchange,
+            flow: self.flow,
+        })?;
         self.control.finish()?;
         self.state = ProducerState::Terminal;
         Ok(())
@@ -504,12 +551,16 @@ impl Producer {
 
     fn reset(
         &mut self,
-        code: ResetCode
+        code: ResetCode,
     ) -> Result<()> {
         if self.state == ProducerState::Terminal {
             return Err(Error::Closed);
         }
-        self.send(ControlEvent::Reset { exchange: self.exchange, flow: self.flow, code })?;
+        self.send(ControlEvent::Reset {
+            exchange: self.exchange,
+            flow: self.flow,
+            code,
+        })?;
         self.control.finish()?;
         self.state = ProducerState::Terminal;
         Ok(())
@@ -517,17 +568,23 @@ impl Producer {
 
     fn send(
         &self,
-        event: ControlEvent
+        event: ControlEvent,
     ) -> Result<()> {
         self.control.try_write_exact(&event.encode())
     }
 
     fn descriptor(
         &self,
-        publication: &Publication
+        publication: &Publication,
     ) -> ChunkDescriptor {
-        let (generation, first_slot, slot_count, payload_len, arena_kind, owner_node) =
-            publication.coordinates();
+        let (
+            generation,
+            first_slot,
+            slot_count,
+            payload_len,
+            arena_kind,
+            owner_node,
+        ) = publication.coordinates();
         ChunkDescriptor::new(
             self.exchange,
             self.flow,
@@ -537,7 +594,7 @@ impl Producer {
             slot_count,
             payload_len,
             arena_kind,
-            owner_node
+            owner_node,
         )
     }
 }
@@ -547,7 +604,7 @@ impl Producer {
 /// event. Dropping this value returns the reserved slots.
 pub struct PendingStart<'a> {
     producer: &'a mut Producer,
-    publication: Publication
+    publication: Publication,
 }
 
 impl PendingStart<'_> {
@@ -563,7 +620,7 @@ impl PendingStart<'_> {
     /// trailing slots that prefix does not need return to the arena first.
     pub fn commit_len(
         mut self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<ChunkDescriptor> {
         self.publication.truncate(payload_len)?;
         self.producer.commit_start(self.publication)
@@ -588,7 +645,7 @@ impl DerefMut for PendingStart<'_> {
 /// the complete variable-sized chunk and one descriptor.
 pub struct PendingData<'a> {
     producer: &'a mut Producer,
-    publication: Publication
+    publication: Publication,
 }
 
 impl PendingData<'_> {
@@ -604,7 +661,7 @@ impl PendingData<'_> {
     /// the direct-read path for producers that learn the byte count from IO.
     pub fn commit_len(
         mut self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<ChunkDescriptor> {
         self.publication.truncate(payload_len)?;
         self.producer.commit_data(self.publication)
@@ -629,7 +686,7 @@ impl DerefMut for PendingData<'_> {
 enum ConsumerState {
     New,
     Open,
-    Terminal
+    Terminal,
 }
 
 struct Consumer {
@@ -638,7 +695,7 @@ struct Consumer {
     arena: PayloadArena,
     control: ReadHalf,
     next_chunk: u64,
-    state: ConsumerState
+    state: ConsumerState,
 }
 
 impl Consumer {
@@ -646,9 +703,16 @@ impl Consumer {
         exchange: ExchangeId,
         flow: Flow,
         arena: PayloadArena,
-        control: ReadHalf
+        control: ReadHalf,
     ) -> Self {
-        Self { exchange, flow, arena, control, next_chunk: 1, state: ConsumerState::New }
+        Self {
+            exchange,
+            flow,
+            arena,
+            control,
+            next_chunk: 1,
+            state: ConsumerState::New,
+        }
     }
 
     fn id(&self) -> ExchangeId {
@@ -661,21 +725,26 @@ impl Consumer {
         }
         let mut frame = [0_u8; CONTROL_FRAME_BYTES];
         self.control.try_read_exact(&mut frame)?;
-        let event =
-            ControlEvent::decode(&frame).map_err(|reason| Error::Malformed(reason.to_owned()))?;
+        let event = ControlEvent::decode(&frame)
+            .map_err(|reason| Error::Malformed(reason.to_owned()))?;
         if event.exchange() != self.exchange || event.flow() != self.flow {
             return Err(Error::Malformed(
-                "control event belongs to another exchange flow".to_owned()
+                "control event belongs to another exchange flow".to_owned(),
             ));
         }
         match event {
-            ControlEvent::Start { metadata, .. } if self.state == ConsumerState::New => {
-                let metadata =
-                    metadata.map(|descriptor| self.take_chunk(descriptor)).transpose()?;
+            ControlEvent::Start { metadata, .. }
+                if self.state == ConsumerState::New =>
+            {
+                let metadata = metadata
+                    .map(|descriptor| self.take_chunk(descriptor))
+                    .transpose()?;
                 self.state = ConsumerState::Open;
                 Ok(FlowEvent::Start { metadata })
             }
-            ControlEvent::Data(descriptor) if self.state == ConsumerState::Open => {
+            ControlEvent::Data(descriptor)
+                if self.state == ConsumerState::Open =>
+            {
                 let chunk = self.take_chunk(descriptor)?;
                 Ok(FlowEvent::Data(chunk))
             }
@@ -687,13 +756,15 @@ impl Consumer {
                 self.state = ConsumerState::Terminal;
                 Ok(FlowEvent::Reset(code))
             }
-            _ => Err(Error::Malformed("control event violates the flow lifecycle".to_owned()))
+            _ => Err(Error::Malformed(
+                "control event violates the flow lifecycle".to_owned(),
+            )),
         }
     }
 
     fn take_chunk(
         &mut self,
-        descriptor: ChunkDescriptor
+        descriptor: ChunkDescriptor,
     ) -> Result<PayloadChunk> {
         if descriptor.chunk_id() != self.next_chunk {
             return Err(Error::Malformed(format!(
@@ -713,7 +784,7 @@ pub enum FlowEvent {
     Start { metadata: Option<PayloadChunk> },
     Data(PayloadChunk),
     Fin,
-    Reset(ResetCode)
+    Reset(ResetCode),
 }
 
 /// Typed callbacks for one flow. A handler decides what its events mean; the
@@ -723,23 +794,23 @@ pub trait FlowHandler {
 
     fn on_start(
         &mut self,
-        metadata: Option<PayloadChunk>
+        metadata: Option<PayloadChunk>,
     ) -> std::result::Result<(), Self::Error>;
     fn on_data(
         &mut self,
-        chunk: PayloadChunk
+        chunk: PayloadChunk,
     ) -> std::result::Result<(), Self::Error>;
     fn on_fin(&mut self) -> std::result::Result<(), Self::Error>;
     fn on_reset(
         &mut self,
-        code: ResetCode
+        code: ResetCode,
     ) -> std::result::Result<(), Self::Error>;
 }
 
 #[derive(Debug)]
 pub enum DispatchError<E> {
     Transport(Error),
-    Handler(E)
+    Handler(E),
 }
 
 impl<E> From<Error> for DispatchError<E> {
@@ -750,13 +821,13 @@ impl<E> From<Error> for DispatchError<E> {
 
 fn dispatch<H: FlowHandler>(
     consumer: &mut Consumer,
-    handler: &mut H
+    handler: &mut H,
 ) -> std::result::Result<(), DispatchError<H::Error>> {
     match consumer.next()? {
         FlowEvent::Start { metadata } => handler.on_start(metadata),
         FlowEvent::Data(chunk) => handler.on_data(chunk),
         FlowEvent::Fin => handler.on_fin(),
-        FlowEvent::Reset(code) => handler.on_reset(code)
+        FlowEvent::Reset(code) => handler.on_reset(code),
     }
     .map_err(DispatchError::Handler)
 }
@@ -781,7 +852,7 @@ impl Sender {
     /// Plan a known payload for this direction's actual arena geometry.
     pub fn plan_chunks(
         &self,
-        data_bytes: usize
+        data_bytes: usize,
     ) -> Result<ChunkPlan> {
         self.0.arena.plan_chunks(data_bytes)
     }
@@ -790,13 +861,13 @@ impl Sender {
     pub fn plan_chunks_with(
         &self,
         data_bytes: usize,
-        slots_per_chunk: usize
+        slots_per_chunk: usize,
     ) -> Result<ChunkPlan> {
         self.0.arena.plan_chunks_with(data_bytes, slots_per_chunk)
     }
     pub fn start(
         &mut self,
-        metadata: Option<&[u8]>
+        metadata: Option<&[u8]>,
     ) -> Result<()> {
         self.0.start(metadata)
     }
@@ -805,14 +876,14 @@ impl Sender {
     /// event is visible until the returned guard is committed.
     pub fn reserve_start(
         &mut self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<PendingStart<'_>> {
         self.0.reserve_start(payload_len)
     }
 
     pub fn data(
         &mut self,
-        payload: &[u8]
+        payload: &[u8],
     ) -> Result<ChunkDescriptor> {
         self.0.data(payload)
     }
@@ -821,7 +892,7 @@ impl Sender {
     /// One commit emits one data descriptor.
     pub fn reserve_data(
         &mut self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<PendingData<'_>> {
         self.0.reserve_data(payload_len)
     }
@@ -832,7 +903,7 @@ impl Sender {
 
     pub fn reset(
         &mut self,
-        code: ResetCode
+        code: ResetCode,
     ) -> Result<()> {
         self.0.reset(code)
     }
@@ -843,7 +914,7 @@ impl Sender {
 
     pub fn poll_writable(
         &self,
-        cx: &mut std::task::Context<'_>
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
         self.0.control.poll_writable_exact(CONTROL_FRAME_BYTES, cx)
     }
@@ -852,7 +923,7 @@ impl Sender {
     /// next publication. Use zero for FIN, RESET, or a start without metadata.
     pub fn wait_ready(
         &self,
-        payload_len: usize
+        payload_len: usize,
     ) -> Result<()> {
         self.0.control.wait_writable_exact(CONTROL_FRAME_BYTES)?;
         if payload_len != 0 {
@@ -866,22 +937,25 @@ impl Sender {
     pub fn poll_ready(
         &self,
         payload_len: usize,
-        cx: &mut std::task::Context<'_>
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
-        let control = self.0.control.poll_writable_exact(CONTROL_FRAME_BYTES, cx);
+        let control =
+            self.0.control.poll_writable_exact(CONTROL_FRAME_BYTES, cx);
         let payload = if payload_len == 0 {
             std::task::Poll::Ready(Ok(()))
         } else {
             self.0.arena.poll_available(payload_len, cx)
         };
         match (control, payload) {
-            (std::task::Poll::Ready(Err(error)), _) | (_, std::task::Poll::Ready(Err(error))) => {
+            (std::task::Poll::Ready(Err(error)), _)
+            | (_, std::task::Poll::Ready(Err(error))) => {
                 std::task::Poll::Ready(Err(error))
             }
-            (std::task::Poll::Ready(Ok(())), std::task::Poll::Ready(Ok(()))) => {
-                std::task::Poll::Ready(Ok(()))
-            }
-            _ => std::task::Poll::Pending
+            (
+                std::task::Poll::Ready(Ok(())),
+                std::task::Poll::Ready(Ok(())),
+            ) => std::task::Poll::Ready(Ok(())),
+            _ => std::task::Poll::Pending,
         }
     }
 }
@@ -904,7 +978,7 @@ impl Receiver {
 
     pub fn dispatch<H: FlowHandler>(
         &mut self,
-        handler: &mut H
+        handler: &mut H,
     ) -> std::result::Result<(), DispatchError<H::Error>> {
         dispatch(&mut self.0, handler)
     }
@@ -915,7 +989,7 @@ impl Receiver {
 
     pub fn poll_readable(
         &self,
-        cx: &mut std::task::Context<'_>
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
         self.0.control.poll_readable(cx)
     }
@@ -929,7 +1003,10 @@ mod tests {
         Exchanges::open(
             Arc::new(Fleet::join("exchange-pair-test", 2).expect("fleet")),
             Incarnation::new(1),
-            ExchangeSpec::new(StreamSpec::new(230, 8, 512), PayloadArenaSpec::new(231, 8, 64))
+            ExchangeSpec::new(
+                StreamSpec::new(230, 8, 512),
+                PayloadArenaSpec::new(231, 8, 64),
+            ),
         )
         .expect("exchanges")
     }
@@ -943,29 +1020,36 @@ mod tests {
         let (mut response_out, mut request_in) = client.split();
 
         request_out.start(Some(b"request-head")).expect("request start");
-        let request_descriptor = request_out.data(&[7_u8; 192]).expect("request data");
-        let request_metadata = match request_in.try_next().expect("request start event") {
-            FlowEvent::Start { metadata: Some(metadata) } => metadata,
-            _ => panic!("expected request start")
-        };
+        let request_descriptor =
+            request_out.data(&[7_u8; 192]).expect("request data");
+        let request_metadata =
+            match request_in.try_next().expect("request start event") {
+                FlowEvent::Start { metadata: Some(metadata) } => metadata,
+                _ => panic!("expected request start"),
+            };
         assert_eq!(&*request_metadata, b"request-head");
-        let request_chunk = match request_in.try_next().expect("request data event") {
-            FlowEvent::Data(chunk) => chunk,
-            _ => panic!("expected request data")
-        };
+        let request_chunk =
+            match request_in.try_next().expect("request data event") {
+                FlowEvent::Data(chunk) => chunk,
+                _ => panic!("expected request data"),
+            };
         assert_eq!(request_descriptor.arena_kind(), 231);
         assert_eq!(request_descriptor.slot_count(), 3);
 
         // Both directions share one arena, but their flow lifecycles are
         // independent, so the peer can start before the first flow finishes.
-        response_out.start(Some(b"response-head")).expect("early response start");
-        let response_descriptor = response_out.data(b"response").expect("response data");
+        response_out
+            .start(Some(b"response-head"))
+            .expect("early response start");
+        let response_descriptor =
+            response_out.data(b"response").expect("response data");
         assert_eq!(response_descriptor.arena_kind(), 231);
         assert!(matches!(response_in.try_next(), Ok(FlowEvent::Start { .. })));
-        let response_chunk = match response_in.try_next().expect("response data event") {
-            FlowEvent::Data(chunk) => chunk,
-            _ => panic!("expected response data")
-        };
+        let response_chunk =
+            match response_in.try_next().expect("response data event") {
+                FlowEvent::Data(chunk) => chunk,
+                _ => panic!("expected response data"),
+            };
         assert_eq!(&*response_chunk, b"response");
 
         drop(request_chunk);
@@ -978,13 +1062,15 @@ mod tests {
     #[test]
     fn directional_payloads_keep_each_flows_credit_and_kind_separate() {
         let exchanges = Exchanges::open(
-            Arc::new(Fleet::join("exchange-directional-test", 2).expect("fleet")),
+            Arc::new(
+                Fleet::join("exchange-directional-test", 2).expect("fleet"),
+            ),
             Incarnation::new(1),
             ExchangeSpec::directional(
                 StreamSpec::new(220, 8, 512),
                 PayloadArenaSpec::new(221, 1, 64),
-                PayloadArenaSpec::new(222, 1, 128)
-            )
+                PayloadArenaSpec::new(222, 1, 128),
+            ),
         )
         .expect("directional exchanges");
         let (mut side_a, ticket) = exchanges.create().expect("side A");
@@ -998,22 +1084,30 @@ mod tests {
         assert_eq!(response_geometry.chunk_bytes(1), Some(128));
 
         side_a.sender().start(None).expect("A-to-B start");
-        assert!(matches!(side_b.receiver().try_next(), Ok(FlowEvent::Start { .. })));
+        assert!(matches!(
+            side_b.receiver().try_next(),
+            Ok(FlowEvent::Start { .. })
+        ));
         side_b.sender().start(None).expect("B-to-A start");
-        assert!(matches!(side_a.receiver().try_next(), Ok(FlowEvent::Start { .. })));
+        assert!(matches!(
+            side_a.receiver().try_next(),
+            Ok(FlowEvent::Start { .. })
+        ));
 
         let a = side_a.sender().data(&[1; 64]).expect("A-to-B payload");
         let b = side_b.sender().data(&[2; 128]).expect("B-to-A payload");
         assert_eq!(a.arena_kind(), 221);
         assert_eq!(b.arena_kind(), 222);
 
-        let a_payload = match side_b.receiver().try_next().expect("A-to-B data") {
+        let a_payload = match side_b.receiver().try_next().expect("A-to-B data")
+        {
             FlowEvent::Data(chunk) => chunk,
-            _ => panic!("expected A-to-B data")
+            _ => panic!("expected A-to-B data"),
         };
-        let b_payload = match side_a.receiver().try_next().expect("B-to-A data") {
+        let b_payload = match side_a.receiver().try_next().expect("B-to-A data")
+        {
             FlowEvent::Data(chunk) => chunk,
-            _ => panic!("expected B-to-A data")
+            _ => panic!("expected B-to-A data"),
         };
         assert_eq!(&*a_payload, &[1; 64]);
         assert_eq!(&*b_payload, &[2; 128]);
@@ -1022,17 +1116,24 @@ mod tests {
     #[test]
     fn a_reserved_chunk_is_one_descriptor_over_many_slots() {
         let exchanges = Exchanges::open(
-            Arc::new(Fleet::join("exchange-reservation-test", 2).expect("fleet")),
+            Arc::new(
+                Fleet::join("exchange-reservation-test", 2).expect("fleet"),
+            ),
             Incarnation::new(1),
-            ExchangeSpec::new(StreamSpec::new(233, 8, 512), PayloadArenaSpec::new(234, 8, 256))
+            ExchangeSpec::new(
+                StreamSpec::new(233, 8, 512),
+                PayloadArenaSpec::new(234, 8, 256),
+            ),
         )
         .expect("exchanges");
         let (mut server, ticket) = exchanges.create().expect("server");
         let mut client = exchanges.open_peer(ticket).expect("client");
 
-        let expected: Vec<u8> = (0..777).map(|index| (index % 251) as u8).collect();
+        let expected: Vec<u8> =
+            (0..777).map(|index| (index % 251) as u8).collect();
         let descriptor = {
-            let mut pending = server.sender().reserve_start(expected.len()).expect("reserve");
+            let mut pending =
+                server.sender().reserve_start(expected.len()).expect("reserve");
             pending.copy_from_slice(&expected);
             pending.commit().expect("commit")
         };
@@ -1040,7 +1141,7 @@ mod tests {
         assert_eq!(descriptor.slot_count(), 4);
         let received = match client.receiver().try_next().expect("start") {
             FlowEvent::Start { metadata: Some(metadata) } => metadata,
-            _ => panic!("expected start metadata")
+            _ => panic!("expected start metadata"),
         };
         assert_eq!(&*received, expected);
     }
@@ -1051,9 +1152,13 @@ mod tests {
         let (mut server, ticket) = exchanges.create().expect("server");
         let mut client = exchanges.open_peer(ticket).expect("client");
         server.sender().start(None).expect("start");
-        assert!(matches!(client.receiver().try_next(), Ok(FlowEvent::Start { metadata: None })));
+        assert!(matches!(
+            client.receiver().try_next(),
+            Ok(FlowEvent::Start { metadata: None })
+        ));
 
-        let pending = server.sender().reserve_data(256).expect("reserve all slots");
+        let pending =
+            server.sender().reserve_data(256).expect("reserve all slots");
         drop(pending);
         assert!(matches!(client.receiver().try_next(), Err(Error::WouldBlock)));
         assert!(server.sender().reserve_data(256).is_ok());
@@ -1062,29 +1167,40 @@ mod tests {
     #[test]
     fn a_failed_control_commit_returns_its_payload_credit() {
         let exchanges = Exchanges::open(
-            Arc::new(Fleet::join("exchange-failed-commit-test", 2).expect("fleet")),
+            Arc::new(
+                Fleet::join("exchange-failed-commit-test", 2).expect("fleet"),
+            ),
             Incarnation::new(1),
             ExchangeSpec::new(
                 StreamSpec::new(236, 8, CONTROL_FRAME_BYTES),
-                PayloadArenaSpec::new(237, 1, 64)
-            )
+                PayloadArenaSpec::new(237, 1, 64),
+            ),
         )
         .expect("exchanges");
         let (mut server, ticket) = exchanges.create().expect("server");
         let mut client = exchanges.open_peer(ticket).expect("client");
 
         server.sender().start(None).expect("start fills control ring");
-        let mut pending = server.sender().reserve_data(64).expect("reserve only payload slot");
+        let mut pending = server
+            .sender()
+            .reserve_data(64)
+            .expect("reserve only payload slot");
         pending.fill(7);
         assert!(matches!(pending.commit(), Err(Error::WouldBlock)));
 
-        assert!(matches!(client.receiver().try_next(), Ok(FlowEvent::Start { metadata: None })));
-        let mut retry = server.sender().reserve_data(64).expect("failed commit returned credit");
+        assert!(matches!(
+            client.receiver().try_next(),
+            Ok(FlowEvent::Start { metadata: None })
+        ));
+        let mut retry = server
+            .sender()
+            .reserve_data(64)
+            .expect("failed commit returned credit");
         retry.fill(9);
         retry.commit().expect("retry commit");
         let received = match client.receiver().try_next().expect("retry data") {
             FlowEvent::Data(chunk) => chunk,
-            _ => panic!("expected retry data")
+            _ => panic!("expected retry data"),
         };
         assert_eq!(&*received, &[9; 64]);
     }
@@ -1095,27 +1211,33 @@ mod tests {
         let (mut server, ticket) = exchanges.create().expect("server");
         let mut client = exchanges.open_peer(ticket).expect("client");
         server.sender().start(None).expect("start");
-        assert!(matches!(client.receiver().try_next(), Ok(FlowEvent::Start { metadata: None })));
+        assert!(matches!(
+            client.receiver().try_next(),
+            Ok(FlowEvent::Start { metadata: None })
+        ));
 
         let descriptor = {
-            let mut pending = server.sender().reserve_data(256).expect("reserve IO capacity");
+            let mut pending =
+                server.sender().reserve_data(256).expect("reserve IO capacity");
             pending[..37].fill(5);
             pending.commit_len(37).expect("commit bytes read")
         };
         assert_eq!(descriptor.payload_len(), 37);
         assert_eq!(descriptor.slot_count(), 1);
 
-        let mut following = server.sender().reserve_data(192).expect("trailing slots returned");
+        let mut following =
+            server.sender().reserve_data(192).expect("trailing slots returned");
         following.fill(9);
         following.commit().expect("commit following chunk");
         let first = match client.receiver().try_next().expect("short data") {
             FlowEvent::Data(chunk) => chunk,
-            _ => panic!("expected short data")
+            _ => panic!("expected short data"),
         };
         assert_eq!(&*first, &[5; 37]);
-        let second = match client.receiver().try_next().expect("following data") {
+        let second = match client.receiver().try_next().expect("following data")
+        {
             FlowEvent::Data(chunk) => chunk,
-            _ => panic!("expected following data")
+            _ => panic!("expected following data"),
         };
         assert_eq!(&*second, &[9; 192]);
     }
@@ -1135,6 +1257,9 @@ mod tests {
         ));
 
         response_out.start(None).expect("response remains independent");
-        assert!(matches!(response_in.try_next(), Ok(FlowEvent::Start { metadata: None })));
+        assert!(matches!(
+            response_in.try_next(),
+            Ok(FlowEvent::Start { metadata: None })
+        ));
     }
 }

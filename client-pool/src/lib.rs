@@ -14,11 +14,14 @@ mod pool;
 pub use error::{AcquireError, OptionsError};
 #[cfg(feature = "fleet")]
 pub use fleet::{
-    FleetAcquireError, FleetClient, FleetClientLease, FleetClientPool, FleetRemoteClient,
-    IncomingClientSession
+    FleetAcquireError, FleetClient, FleetClientLease, FleetClientPool,
+    FleetRemoteClient, IncomingClientSession,
 };
 #[cfg(feature = "fleet")]
 pub use options::FleetPoolOptions;
 pub use options::PoolOptions;
 pub use policy::{ClientPolicy, PoolDirective};
-pub use pool::{ActiveRequestPolicy, ClientLease, ClientManager, ClientPool, PoolState, PoolStats};
+pub use pool::{
+    ActiveRequestPolicy, ClientLease, ClientManager, ClientPool, PoolState,
+    PoolStats,
+};

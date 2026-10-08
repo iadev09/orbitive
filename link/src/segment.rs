@@ -17,7 +17,7 @@ pub struct LinkSegment {
     name: String,
     spec: LinkSpec,
     #[cfg(feature = "tokio")]
-    receivers: Mutex<HashSet<usize>>
+    receivers: Mutex<HashSet<usize>>,
 }
 
 /// A lane this process holds.
@@ -32,24 +32,37 @@ pub struct LinkSegment {
 pub struct Joined {
     pub lane: usize,
     pub hold: LaneHold,
-    pub reclaimed: Vec<Reclaimed>
+    pub reclaimed: Vec<Reclaimed>,
 }
 
 impl LinkSegment {
     /// Open or create one named link inbox.
     pub fn open(
         name: &str,
-        spec: LinkSpec
+        spec: LinkSpec,
     ) -> Result<Self> {
         spec.validate()?;
         check_name(name, spec)?;
         let segment_name = ring_segment_name(name, spec.inbox_kind);
         let bytes = spec.inbox_segment_bytes();
-        let (region, lock) = ShmRegion::open_or_create_locked(&segment_name, bytes)?;
+        let (region, lock) =
+            ShmRegion::open_or_create_locked(&segment_name, bytes)?;
         let mut inbox = if region.created() {
-            unsafe { Inbox::initialize(region.as_ptr(), spec.fleet_capacity as usize, spec.inbox)? }
+            unsafe {
+                Inbox::initialize(
+                    region.as_ptr(),
+                    spec.fleet_capacity as usize,
+                    spec.inbox,
+                )?
+            }
         } else {
-            unsafe { Inbox::attach(region.as_ptr(), spec.fleet_capacity as usize, spec.inbox)? }
+            unsafe {
+                Inbox::attach(
+                    region.as_ptr(),
+                    spec.fleet_capacity as usize,
+                    spec.inbox,
+                )?
+            }
         };
         inbox.install_bell(&segment_name)?;
         drop(lock);
@@ -59,7 +72,7 @@ impl LinkSegment {
             name: segment_name,
             spec,
             #[cfg(feature = "tokio")]
-            receivers: Mutex::new(HashSet::new())
+            receivers: Mutex::new(HashSet::new()),
         })
     }
 
@@ -69,7 +82,7 @@ impl LinkSegment {
         &self,
         service: &str,
         role: &str,
-        incarnation: u64
+        incarnation: u64,
     ) -> Result<Joined> {
         let mut reclaimed = Vec::new();
         for lane in 0..self.inbox.lanes() {
@@ -82,13 +95,15 @@ impl LinkSegment {
                 reclaimed.push(lane);
             }
         }
-        let (lane, hold) = self.inbox.join(service, role, incarnation, |lane| self.hold(lane))?;
+        let (lane, hold) =
+            self.inbox
+                .join(service, role, incarnation, |lane| self.hold(lane))?;
         Ok(Joined { lane, hold, reclaimed })
     }
 
     fn hold(
         &self,
-        lane: usize
+        lane: usize,
     ) -> Result<Option<LaneHold>> {
         try_hold_lane(&self.name, lane).map_err(Error::Io)
     }
@@ -106,14 +121,18 @@ impl LinkSegment {
     #[cfg(feature = "tokio")]
     pub fn receiver(
         self: &Arc<Self>,
-        lane: usize
+        lane: usize,
     ) -> Result<crate::InboxReceiver> {
         self.inbox.wait_word(lane)?;
         let mut held = self.receivers.lock().map_err(|_| {
-            Error::Malformed("the process-local inbox receiver registry is poisoned")
+            Error::Malformed(
+                "the process-local inbox receiver registry is poisoned",
+            )
         })?;
         if !held.insert(lane) {
-            return Err(Error::Malformed("this process already receives the inbox lane"));
+            return Err(Error::Malformed(
+                "this process already receives the inbox lane",
+            ));
         }
         drop(held);
         match crate::InboxReceiver::bind(Arc::clone(self), lane) {
@@ -128,7 +147,7 @@ impl LinkSegment {
     #[cfg(feature = "tokio")]
     pub(crate) fn release_receiver(
         &self,
-        lane: usize
+        lane: usize,
     ) {
         if let Ok(mut held) = self.receivers.lock() {
             held.remove(&lane);
@@ -174,16 +193,21 @@ const SHM_NAME_MAX: usize = 255;
 /// Validate the fleet name before opening either physical resource.
 pub fn check_name(
     name: &str,
-    spec: LinkSpec
+    spec: LinkSpec,
 ) -> Result<()> {
-    let invalid = |reason: String| Err(Error::InvalidName { name: name.to_owned(), reason });
+    let invalid = |reason: String| {
+        Err(Error::InvalidName { name: name.to_owned(), reason })
+    };
     if name.is_empty() {
         return invalid("it is empty".into());
     }
     if let Some(bad) = name.chars().find(|character| {
-        !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        !(character.is_ascii_alphanumeric()
+            || matches!(character, '-' | '_' | '.'))
     }) {
-        return invalid(format!("'{bad}' is not a letter, a digit, '-', '_' or '.'"));
+        return invalid(format!(
+            "'{bad}' is not a letter, a digit, '-', '_' or '.'"
+        ));
     }
     let longest = ring_segment_name(name, spec.inbox_kind)
         .len()

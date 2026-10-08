@@ -22,7 +22,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 use orbit_core::RingEventFd;
 use orbit_core::fleet::FleetLaneCursor;
 use orbit_core::{Fleet, NetId64, NodeId, OrbitEpoch, OrbitTyped, RingSpec};
@@ -32,13 +36,20 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// Ring kind reserved for Orbit invocations.
 pub const INVOCATION_RING_KIND: u8 = 241;
 /// Number of retained invocation frames in each fleet-node lane.
-pub const INVOCATION_RING_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_INVOKE_RING_CAPACITY"), 256);
+pub const INVOCATION_RING_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_INVOKE_RING_CAPACITY"),
+    256,
+);
 /// Maximum bytes available to one invocation envelope.
 pub const INVOCATION_RING_PAYLOAD_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_INVOKE_RING_PAYLOAD_CAPACITY"), 8_192);
-pub const INVOCATION_RING_SPEC: RingSpec =
-    RingSpec::per_node(INVOCATION_RING_CAPACITY, INVOCATION_RING_PAYLOAD_CAPACITY);
+    orbit_core::compile::usize_from_env(
+        option_env!("ORBIT_INVOKE_RING_PAYLOAD_CAPACITY"),
+        8_192,
+    );
+pub const INVOCATION_RING_SPEC: RingSpec = RingSpec::per_node(
+    INVOCATION_RING_CAPACITY,
+    INVOCATION_RING_PAYLOAD_CAPACITY,
+);
 pub const INVOCATION_PAYLOAD_MAX: usize = INVOCATION_RING_SPEC.payload_capacity;
 
 const FRAME_KIND_INVOCATION: u8 = 1;
@@ -82,7 +93,7 @@ impl InvocationId {
 impl std::fmt::Display for InvocationId {
     fn fmt(
         &self,
-        formatter: &mut std::fmt::Formatter<'_>
+        formatter: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         self.0.fmt(formatter)
     }
@@ -95,7 +106,7 @@ pub struct Invocation {
     pub operation: String,
     pub payload: Vec<u8>,
     /// Publication time carried by the Orbit frame version.
-    pub submitted_at: OrbitEpoch
+    pub submitted_at: OrbitEpoch,
 }
 
 /// A runtime-owned typed payload codec.
@@ -115,7 +126,7 @@ impl Invocation {
         if self.operation != C::OPERATION {
             return Err(Error::OperationMismatch {
                 expected: C::OPERATION,
-                actual: self.operation.clone()
+                actual: self.operation.clone(),
             });
         }
         C::decode_invocation(&self.payload).map_err(Error::Codec)
@@ -127,7 +138,7 @@ impl Invocation {
 pub struct InvocationPoll {
     pub invocations: Vec<Invocation>,
     /// Frames no longer available or invalid for this invocation ring.
-    pub lagged: u64
+    pub lagged: u64,
 }
 
 impl InvocationPoll {
@@ -139,13 +150,13 @@ impl InvocationPoll {
 /// Caller-owned positions for every fleet-node lane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvocationCursor {
-    inner: FleetLaneCursor
+    inner: FleetLaneCursor,
 }
 
 /// Cheap fleet-local handle for publishing and polling invocations.
 #[derive(Clone)]
 pub struct InvocationBus {
-    fleet: Arc<Fleet>
+    fleet: Arc<Fleet>,
 }
 
 impl InvocationBus {
@@ -158,11 +169,15 @@ impl InvocationBus {
     }
 
     pub fn cursor_at_head(&self) -> InvocationCursor {
-        InvocationCursor { inner: self.fleet.lane_cursor_at_head::<InvocationRecord>() }
+        InvocationCursor {
+            inner: self.fleet.lane_cursor_at_head::<InvocationRecord>(),
+        }
     }
 
     pub fn cursor_from_start(&self) -> InvocationCursor {
-        InvocationCursor { inner: self.fleet.lane_cursor_from_start::<InvocationRecord>() }
+        InvocationCursor {
+            inner: self.fleet.lane_cursor_from_start::<InvocationRecord>(),
+        }
     }
 
     /// Subscribe to future invocations for one operation.
@@ -172,19 +187,27 @@ impl InvocationBus {
     #[cfg(feature = "tokio")]
     pub fn subscribe(
         self: &Arc<Self>,
-        operation: impl Into<String>
+        operation: impl Into<String>,
     ) -> Result<InvocationSubscription> {
         let operation = operation.into();
         validate_operation(&operation)?;
-        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "macos"
+        ))]
         let event_fd = self.subscription_event_fd()?;
         Ok(InvocationSubscription {
             cursor: self.cursor_at_head(),
             bus: Arc::clone(self),
             operation,
             pending: VecDeque::new(),
-            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-            event_fd
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "macos"
+            ))]
+            event_fd,
         })
     }
 
@@ -194,7 +217,11 @@ impl InvocationBus {
     }
 
     /// Create this process' readiness fd for the invocation ring.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
         self.fleet.ring_event_fd::<InvocationRecord>().map_err(Error::Io)
     }
@@ -203,15 +230,23 @@ impl InvocationBus {
         feature = "tokio",
         any(target_os = "linux", target_os = "freebsd", target_os = "macos")
     ))]
-    fn subscription_event_fd(&self) -> Result<Option<tokio::io::unix::AsyncFd<RingEventFd>>> {
+    fn subscription_event_fd(
+        &self
+    ) -> Result<Option<tokio::io::unix::AsyncFd<RingEventFd>>> {
         if !self.fleet.is_shm() {
             return Ok(None);
         }
         match self.event_fd() {
-            Ok(event_fd) => Ok(Some(tokio::io::unix::AsyncFd::new(event_fd).map_err(Error::Io)?)),
+            Ok(event_fd) => Ok(Some(
+                tokio::io::unix::AsyncFd::new(event_fd).map_err(Error::Io)?,
+            )),
             #[cfg(target_os = "macos")]
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => Ok(None),
-            Err(error) => Err(error)
+            Err(Error::Io(error))
+                if error.kind() == std::io::ErrorKind::Unsupported =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -219,32 +254,40 @@ impl InvocationBus {
     pub fn submit(
         &self,
         operation: &str,
-        payload: &[u8]
+        payload: &[u8],
     ) -> Result<InvocationId> {
         validate_operation(operation)?;
         let submitted_at = OrbitEpoch::now();
         let frame = encode_frame(operation.as_bytes(), payload)?;
-        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "macos"
+        ))]
         let id = self
             .fleet
             .publish_notified::<InvocationRecord>(
                 FRAME_KIND_INVOCATION,
                 submitted_at.as_unix_ms(),
-                frame
+                frame,
             )
             .map_err(Error::Io)?;
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "macos"
+        )))]
         let id = self.fleet.publish::<InvocationRecord>(
             FRAME_KIND_INVOCATION,
             submitted_at.as_unix_ms(),
-            frame
+            frame,
         );
         Ok(InvocationId(id))
     }
 
     pub fn submit_typed<C: InvocationCodec>(
         &self,
-        invocation: &C
+        invocation: &C,
     ) -> Result<InvocationId> {
         let payload = invocation.encode_invocation().map_err(Error::Codec)?;
         self.submit(C::OPERATION, &payload)
@@ -253,7 +296,7 @@ impl InvocationBus {
     /// Advance every node lane once. Ordering is lane-local, not fleet-global.
     pub fn poll(
         &self,
-        cursor: &mut InvocationCursor
+        cursor: &mut InvocationCursor,
     ) -> InvocationPoll {
         let poll = self.fleet.poll_lanes::<InvocationRecord>(&mut cursor.inner);
         let mut lagged = poll.loss.total();
@@ -275,7 +318,7 @@ impl InvocationBus {
                 id: InvocationId(frame.id),
                 operation: operation.to_owned(),
                 payload: decoded.payload.to_vec(),
-                submitted_at: OrbitEpoch::from_unix_ms(frame.ver)
+                submitted_at: OrbitEpoch::from_unix_ms(frame.ver),
             });
         }
         InvocationPoll { invocations, lagged }
@@ -285,7 +328,7 @@ impl InvocationBus {
     pub fn poll_operation(
         &self,
         cursor: &mut InvocationCursor,
-        operation: &str
+        operation: &str,
     ) -> InvocationPoll {
         let mut poll = self.poll(cursor);
         poll.invocations.retain(|invocation| invocation.operation == operation);
@@ -300,8 +343,12 @@ pub struct InvocationSubscription {
     operation: String,
     cursor: InvocationCursor,
     pending: VecDeque<Invocation>,
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-    event_fd: Option<tokio::io::unix::AsyncFd<RingEventFd>>
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
+    event_fd: Option<tokio::io::unix::AsyncFd<RingEventFd>>,
 }
 
 #[cfg(feature = "tokio")]
@@ -317,7 +364,8 @@ impl InvocationSubscription {
                 return Ok(invocation);
             }
 
-            let poll = self.bus.poll_operation(&mut self.cursor, &self.operation);
+            let poll =
+                self.bus.poll_operation(&mut self.cursor, &self.operation);
             self.pending.extend(poll.invocations);
             if poll.lagged > 0 {
                 return Err(Error::Lagged(poll.lagged));
@@ -326,7 +374,11 @@ impl InvocationSubscription {
                 return Ok(invocation);
             }
 
-            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "macos"
+            ))]
             if let Some(event_fd) = &self.event_fd {
                 let mut ready = event_fd.readable().await.map_err(Error::Io)?;
                 event_fd.get_ref().drain().map_err(Error::Io)?;
@@ -347,18 +399,23 @@ pub enum Error {
     OperationMismatch { expected: &'static str, actual: String },
     Lagged(u64),
     Codec(String),
-    Io(std::io::Error)
+    Io(std::io::Error),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(
         &self,
-        formatter: &mut std::fmt::Formatter<'_>
+        formatter: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         match self {
-            Self::EmptyOperation => formatter.write_str("invocation operation cannot be empty"),
+            Self::EmptyOperation => {
+                formatter.write_str("invocation operation cannot be empty")
+            }
             Self::OperationTooLong(len) => {
-                write!(formatter, "invocation operation is too long: len={len} max=65535")
+                write!(
+                    formatter,
+                    "invocation operation is too long: len={len} max=65535"
+                )
             }
             Self::FrameTooLarge { operation_len, payload_len, max } => write!(
                 formatter,
@@ -369,10 +426,17 @@ impl std::fmt::Display for Error {
                 "invocation operation mismatch: expected {expected}, got {actual}"
             ),
             Self::Lagged(count) => {
-                write!(formatter, "invocation subscription lagged by {count} frame(s)")
+                write!(
+                    formatter,
+                    "invocation subscription lagged by {count} frame(s)"
+                )
             }
-            Self::Codec(error) => write!(formatter, "invocation codec failed: {error}"),
-            Self::Io(error) => write!(formatter, "invocation ring io error: {error}")
+            Self::Codec(error) => {
+                write!(formatter, "invocation codec failed: {error}")
+            }
+            Self::Io(error) => {
+                write!(formatter, "invocation ring io error: {error}")
+            }
         }
     }
 }
@@ -381,14 +445,14 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            _ => None
+            _ => None,
         }
     }
 }
 
 struct DecodedFrame<'a> {
     operation: &'a [u8],
-    payload: &'a [u8]
+    payload: &'a [u8],
 }
 
 fn validate_operation(operation: &str) -> Result<()> {
@@ -403,7 +467,7 @@ fn validate_operation(operation: &str) -> Result<()> {
 
 fn encode_frame(
     operation: &[u8],
-    payload: &[u8]
+    payload: &[u8],
 ) -> Result<Bytes> {
     let total = HEADER_LEN
         .checked_add(operation.len())
@@ -411,7 +475,7 @@ fn encode_frame(
         .ok_or(Error::FrameTooLarge {
             operation_len: operation.len(),
             payload_len: payload.len(),
-            max: INVOCATION_PAYLOAD_MAX
+            max: INVOCATION_PAYLOAD_MAX,
         })?;
     if operation.len() > usize::from(u16::MAX)
         || payload.len() > u32::MAX as usize
@@ -420,7 +484,7 @@ fn encode_frame(
         return Err(Error::FrameTooLarge {
             operation_len: operation.len(),
             payload_len: payload.len(),
-            max: INVOCATION_PAYLOAD_MAX
+            max: INVOCATION_PAYLOAD_MAX,
         });
     }
     let mut frame = BytesMut::with_capacity(total);
@@ -435,7 +499,8 @@ fn decode_frame(frame: &Bytes) -> Option<DecodedFrame<'_>> {
     if frame.len() < HEADER_LEN {
         return None;
     }
-    let operation_len = u16::from_le_bytes(frame[0..2].try_into().ok()?) as usize;
+    let operation_len =
+        u16::from_le_bytes(frame[0..2].try_into().ok()?) as usize;
     let payload_len = u32::from_le_bytes(frame[2..6].try_into().ok()?) as usize;
     let operation_end = HEADER_LEN.checked_add(operation_len)?;
     let payload_end = operation_end.checked_add(payload_len)?;
@@ -444,6 +509,6 @@ fn decode_frame(frame: &Bytes) -> Option<DecodedFrame<'_>> {
     }
     Some(DecodedFrame {
         operation: &frame[HEADER_LEN..operation_end],
-        payload: &frame[operation_end..payload_end]
+        payload: &frame[operation_end..payload_end],
     })
 }

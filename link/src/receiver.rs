@@ -13,13 +13,13 @@ use crate::{LinkSegment, Result};
 pub struct InboxReceiver {
     segment: Arc<LinkSegment>,
     lane: usize,
-    socket: tokio::net::UnixDatagram
+    socket: tokio::net::UnixDatagram,
 }
 
 impl InboxReceiver {
     pub(crate) fn bind(
         segment: Arc<LinkSegment>,
-        lane: usize
+        lane: usize,
     ) -> Result<Self> {
         let socket = segment.inbox().bind_receiver(lane)?;
         Ok(Self { segment, lane, socket })
@@ -32,7 +32,7 @@ impl InboxReceiver {
     /// already consumed the coalescing descriptor wake.
     pub async fn recv(
         &mut self,
-        out: &mut Vec<u8>
+        out: &mut Vec<u8>,
     ) -> Result<()> {
         let inbox = self.segment.inbox();
         loop {

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use crate::PoolSpec;
 
-pub(crate) const MAGIC: u32 = 0x50_4F_4F_4C; // "POOL"
+pub(crate) const MAGIC: u32 = 0x50_4f_4f_4c; // "POOL"
 pub(crate) const VERSION: u16 = 1;
 
 pub(crate) const KEY_EMPTY: u8 = 0;
@@ -31,7 +31,8 @@ pub(crate) const SLOT_BITS: u32 = 16;
 pub(crate) const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 pub(crate) const GENERATION_BITS: u32 = 40 - SLOT_BITS;
 pub(crate) const GENERATION_MASK: u32 = (1 << GENERATION_BITS) - 1;
-pub(crate) const GENERATION_LIMIT: u32 = if cfg!(test) { 4 } else { GENERATION_MASK };
+pub(crate) const GENERATION_LIMIT: u32 =
+    if cfg!(test) { 4 } else { GENERATION_MASK };
 
 #[repr(C, align(64))]
 pub(crate) struct Header {
@@ -46,14 +47,14 @@ pub(crate) struct Header {
     pub(crate) flags: u8,
     _reserved: [u8; 5],
     pub(crate) epoch: AtomicU64,
-    _reserved2: [u8; 24]
+    _reserved2: [u8; 24],
 }
 
 impl Header {
     pub(crate) fn new(
         fleet_capacity: u16,
         geometry: &Geometry,
-        epoch: u64
+        epoch: u64,
     ) -> Self {
         Self {
             magic: MAGIC,
@@ -64,11 +65,13 @@ impl Header {
             key_stride: geometry.key_stride as u32,
             resource_size: size_of::<ResourceSlot>() as u32,
             fleet_capacity,
-            flags: (u8::from(geometry.fleet_availability) * FLAG_FLEET_AVAILABILITY)
-                | (u8::from(geometry.fleet_concurrency) * FLAG_FLEET_CONCURRENCY),
+            flags: (u8::from(geometry.fleet_availability)
+                * FLAG_FLEET_AVAILABILITY)
+                | (u8::from(geometry.fleet_concurrency)
+                    * FLAG_FLEET_CONCURRENCY),
             _reserved: [0; 5],
             epoch: AtomicU64::new(epoch),
-            _reserved2: [0; 24]
+            _reserved2: [0; 24],
         }
     }
 
@@ -78,7 +81,7 @@ impl Header {
     pub(crate) fn compatible(
         &self,
         fleet_capacity: u16,
-        geometry: &Geometry
+        geometry: &Geometry,
     ) -> bool {
         self.magic == MAGIC
             && self.version == VERSION
@@ -89,8 +92,10 @@ impl Header {
             && self.resource_size as usize == size_of::<ResourceSlot>()
             && self.fleet_capacity == fleet_capacity
             && self.flags
-                == (u8::from(geometry.fleet_availability) * FLAG_FLEET_AVAILABILITY)
-                    | (u8::from(geometry.fleet_concurrency) * FLAG_FLEET_CONCURRENCY)
+                == (u8::from(geometry.fleet_availability)
+                    * FLAG_FLEET_AVAILABILITY)
+                    | (u8::from(geometry.fleet_concurrency)
+                        * FLAG_FLEET_CONCURRENCY)
     }
 }
 
@@ -99,7 +104,7 @@ pub(crate) struct Doorbell {
     pub(crate) generation: AtomicU32,
     pub(crate) listening: AtomicU32,
     pub(crate) incarnation: AtomicU64,
-    _padding: [u8; 48]
+    _padding: [u8; 48],
 }
 
 /// One key: what resources are usable for, and the fleet-wide creation
@@ -126,14 +131,14 @@ pub(crate) struct KeySlot {
     /// Requests admitted under this key across the fleet. Used only by specs
     /// that opt into fleet concurrency.
     pub(crate) admitted: AtomicU32,
-    _padding: [u8; 16]
+    _padding: [u8; 16],
 }
 
 impl KeySlot {
     pub(crate) fn holds(
         &self,
         lo: u64,
-        hi: u64
+        hi: u64,
     ) -> bool {
         self.state.load(Ordering::Acquire) == KEY_LIVE
             && self.key_lo.load(Ordering::Relaxed) == lo
@@ -148,7 +153,7 @@ pub(crate) const fn unpack_counts(counts: u64) -> (u32, u32) {
 
 pub(crate) const fn pack_counts(
     live: u32,
-    creating: u32
+    creating: u32,
 ) -> u64 {
     ((live as u64) << 32) | creating as u64
 }
@@ -183,7 +188,7 @@ pub(crate) struct ResourceSlot {
     /// accept, or one arriving after the owner aged the entry out, is
     /// refused. Bounded: a resource with this many unaccepted
     /// reservations refuses further ones until the owner catches up.
-    pub(crate) pending: [Reservation; PENDING_RESERVATIONS]
+    pub(crate) pending: [Reservation; PENDING_RESERVATIONS],
 }
 
 /// One reservation the owner has not seen yet. `since_ms` is written
@@ -192,7 +197,7 @@ pub(crate) struct ResourceSlot {
 #[repr(C)]
 pub(crate) struct Reservation {
     pub(crate) fence: AtomicU64,
-    pub(crate) since_ms: AtomicU64
+    pub(crate) since_ms: AtomicU64,
 }
 
 /// Unaccepted reservations one resource can hold at once. Part of the
@@ -203,7 +208,7 @@ pub const PENDING_RESERVATIONS: usize = 16;
 impl ResourceSlot {
     pub(crate) fn is(
         &self,
-        generation: u32
+        generation: u32,
     ) -> bool {
         let state = self.state.load(Ordering::Acquire);
         (state == RESOURCE_LIVE || state == RESOURCE_DRAINING)
@@ -218,7 +223,7 @@ impl ResourceSlot {
         key: (u64, u64),
         key_index: u32,
         capacity: u32,
-        now_ms: u64
+        now_ms: u64,
     ) -> Option<u32> {
         let generation = self.generation.load(Ordering::Relaxed);
         if generation >= GENERATION_LIMIT {
@@ -248,7 +253,8 @@ impl ResourceSlot {
 const _: () = assert!(size_of::<Header>() == 64);
 const _: () = assert!(size_of::<Doorbell>() == 64);
 const _: () = assert!(size_of::<KeySlot>() == 64);
-const _: () = assert!(size_of::<ResourceSlot>() == 128 + 16 * PENDING_RESERVATIONS);
+const _: () =
+    assert!(size_of::<ResourceSlot>() == 128 + 16 * PENDING_RESERVATIONS);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Geometry {
@@ -271,34 +277,48 @@ pub(crate) struct Geometry {
     pub(crate) admissions_offset: usize,
     pub(crate) keys_offset: usize,
     pub(crate) resources_offset: usize,
-    pub(crate) segment_size: usize
+    pub(crate) segment_size: usize,
 }
 
 impl Geometry {
     pub(crate) fn new(
         fleet_capacity: u16,
-        spec: PoolSpec
+        spec: PoolSpec,
     ) -> Self {
-        let PoolSpec { key_capacity, lane_capacity, fleet_availability, fleet_concurrency, .. } =
-            spec;
+        let PoolSpec {
+            key_capacity,
+            lane_capacity,
+            fleet_availability,
+            fleet_concurrency,
+            ..
+        } = spec;
         let fleet_capacity = usize::from(fleet_capacity);
         let total_resources = fleet_capacity * lane_capacity;
         let member_words = total_resources.div_ceil(64);
         let key_words = key_capacity.div_ceil(64);
-        let key_stride =
-            (size_of::<KeySlot>() + member_words * size_of::<AtomicU64>()).next_multiple_of(64);
-        let key_bitmap_bytes = fleet_capacity * key_words * size_of::<AtomicU64>();
+        let key_stride = (size_of::<KeySlot>()
+            + member_words * size_of::<AtomicU64>())
+        .next_multiple_of(64);
+        let key_bitmap_bytes =
+            fleet_capacity * key_words * size_of::<AtomicU64>();
         let doorbells_offset = size_of::<Header>();
-        let pending_offset = doorbells_offset + fleet_capacity * size_of::<Doorbell>();
+        let pending_offset =
+            doorbells_offset + fleet_capacity * size_of::<Doorbell>();
         let interest_offset = pending_offset + key_bitmap_bytes;
-        let claims_offset = (interest_offset + key_bitmap_bytes).next_multiple_of(64);
-        let claims_bytes = fleet_capacity * key_capacity * size_of::<AtomicU32>();
+        let claims_offset =
+            (interest_offset + key_bitmap_bytes).next_multiple_of(64);
+        let claims_bytes =
+            fleet_capacity * key_capacity * size_of::<AtomicU32>();
         let admissions_offset = claims_offset + claims_bytes;
-        let admissions_bytes =
-            usize::from(fleet_concurrency) * fleet_capacity * key_capacity * size_of::<AtomicU32>();
-        let keys_offset = (admissions_offset + admissions_bytes).next_multiple_of(64);
+        let admissions_bytes = usize::from(fleet_concurrency)
+            * fleet_capacity
+            * key_capacity
+            * size_of::<AtomicU32>();
+        let keys_offset =
+            (admissions_offset + admissions_bytes).next_multiple_of(64);
         let resources_offset = keys_offset + key_capacity * key_stride;
-        let segment_size = resources_offset + total_resources * size_of::<ResourceSlot>();
+        let segment_size =
+            resources_offset + total_resources * size_of::<ResourceSlot>();
         Self {
             key_capacity,
             lane_capacity,
@@ -316,7 +336,7 @@ impl Geometry {
             admissions_offset,
             keys_offset,
             resources_offset,
-            segment_size
+            segment_size,
         }
     }
 }

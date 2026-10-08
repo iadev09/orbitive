@@ -15,13 +15,13 @@ pub const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ChunkGeometry {
     slot_payload_bytes: usize,
-    slots_per_lane: usize
+    slots_per_lane: usize,
 }
 
 impl ChunkGeometry {
     pub const fn new(
         slot_payload_bytes: usize,
-        slots_per_lane: usize
+        slots_per_lane: usize,
     ) -> Option<Self> {
         if slot_payload_bytes == 0 || slots_per_lane == 0 {
             None
@@ -44,7 +44,7 @@ impl ChunkGeometry {
     /// Exact publication capacity for a runtime-selected slot count.
     pub const fn chunk_bytes(
         self,
-        slots: usize
+        slots: usize,
     ) -> Option<usize> {
         if slots == 0 || slots > self.slots_per_lane {
             None
@@ -58,25 +58,29 @@ impl ChunkGeometry {
     /// the node lane.
     pub const fn slots_for_target(
         self,
-        target_bytes: usize
+        target_bytes: usize,
     ) -> Option<usize> {
         if target_bytes == 0 {
             return None;
         }
         let slots = target_bytes / self.slot_payload_bytes;
         let slots = if slots == 0 { 1 } else { slots };
-        Some(if slots > self.slots_per_lane { self.slots_per_lane } else { slots })
+        Some(if slots > self.slots_per_lane {
+            self.slots_per_lane
+        } else {
+            slots
+        })
     }
 
     /// Effective chunk capacity for a runtime byte target. This is always
     /// `n * slot_payload_bytes` for a valid lane-bounded `n`.
     pub const fn chunk_bytes_for_target(
         self,
-        target_bytes: usize
+        target_bytes: usize,
     ) -> Option<usize> {
         let slots = match self.slots_for_target(target_bytes) {
             Some(slots) => slots,
-            None => return None
+            None => return None,
         };
         self.chunk_bytes(slots)
     }
@@ -85,11 +89,11 @@ impl ChunkGeometry {
     pub const fn plan(
         self,
         data_bytes: usize,
-        slots_per_chunk: usize
+        slots_per_chunk: usize,
     ) -> Option<ChunkPlan> {
         let chunk_bytes = match self.chunk_bytes(slots_per_chunk) {
             Some(bytes) => bytes,
-            None => return None
+            None => return None,
         };
         ChunkPlan::for_limit(data_bytes, self.slot_payload_bytes, chunk_bytes)
     }
@@ -99,11 +103,11 @@ impl ChunkGeometry {
     pub const fn plan_for_target(
         self,
         data_bytes: usize,
-        target_bytes: usize
+        target_bytes: usize,
     ) -> Option<ChunkPlan> {
         let slots = match self.slots_for_target(target_bytes) {
             Some(slots) => slots,
-            None => return None
+            None => return None,
         };
         self.plan(data_bytes, slots)
     }
@@ -117,14 +121,14 @@ pub struct ChunkPlan {
     chunk_count: usize,
     slots_per_chunk: usize,
     tail_bytes: usize,
-    tail_slots: usize
+    tail_slots: usize,
 }
 
 impl ChunkPlan {
     /// Plan with the benchmark-backed 64 KiB target.
     pub const fn new(
         data_bytes: usize,
-        slot_bytes: usize
+        slot_bytes: usize,
     ) -> Option<Self> {
         Self::for_limit(data_bytes, slot_bytes, DEFAULT_CHUNK_BYTES)
     }
@@ -133,24 +137,26 @@ impl ChunkPlan {
     pub const fn for_slots(
         data_bytes: usize,
         slot_payload_bytes: usize,
-        slots_per_chunk: usize
+        slots_per_chunk: usize,
     ) -> Option<Self> {
-        let geometry = match ChunkGeometry::new(slot_payload_bytes, slots_per_chunk) {
-            Some(geometry) => geometry,
-            None => return None
-        };
+        let geometry =
+            match ChunkGeometry::new(slot_payload_bytes, slots_per_chunk) {
+                Some(geometry) => geometry,
+                None => return None,
+            };
         geometry.plan(data_bytes, slots_per_chunk)
     }
 
     pub(crate) const fn for_limit(
         data_bytes: usize,
         slot_bytes: usize,
-        limit_bytes: usize
+        limit_bytes: usize,
     ) -> Option<Self> {
         if slot_bytes == 0 || limit_bytes == 0 {
             return None;
         }
-        let target = if limit_bytes < slot_bytes { slot_bytes } else { limit_bytes };
+        let target =
+            if limit_bytes < slot_bytes { slot_bytes } else { limit_bytes };
         let chunk_bytes = (target / slot_bytes) * slot_bytes;
         if data_bytes == 0 {
             return Some(Self {
@@ -159,7 +165,7 @@ impl ChunkPlan {
                 chunk_count: 0,
                 slots_per_chunk: chunk_bytes / slot_bytes,
                 tail_bytes: 0,
-                tail_slots: 0
+                tail_slots: 0,
             });
         }
         let chunk_count = data_bytes.div_ceil(chunk_bytes);
@@ -171,7 +177,7 @@ impl ChunkPlan {
             chunk_count,
             slots_per_chunk: chunk_bytes / slot_bytes,
             tail_bytes,
-            tail_slots: tail_bytes.div_ceil(slot_bytes)
+            tail_slots: tail_bytes.div_ceil(slot_bytes),
         })
     }
 
@@ -204,7 +210,7 @@ impl ChunkPlan {
     /// Exact length of chunk `index`, if it exists.
     pub const fn chunk_len(
         self,
-        index: usize
+        index: usize,
     ) -> Option<usize> {
         if index >= self.chunk_count {
             None

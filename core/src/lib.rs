@@ -44,11 +44,17 @@ pub use error::{Error, Result};
 pub use fleet::FleetObserver;
 pub use fleet::{Fleet, FleetName, InvalidFleetName, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
-pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};
+pub use ring::cursor::{
+    RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring,
+};
 #[cfg(unix)]
 pub use ring::shm::{ShmRingLaneView, ShmRingMetadata, ShmRingView};
 pub use ring::{Frame, Ring, RingSpec, RingTopology};
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 pub use ring::{ParkedRingEventFd, RingEventFd};
 
 /// Marker for a type that has a stable wire identity across the fleet.

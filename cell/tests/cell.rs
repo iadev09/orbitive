@@ -4,7 +4,8 @@ use orbit_cell::{CellId, Cells, Error};
 use orbit_core::Fleet;
 
 fn cells() -> Cells {
-    Cells::new(Arc::new(Fleet::join("cell-test", 1).expect("fleet"))).expect("cells")
+    Cells::new(Arc::new(Fleet::join("cell-test", 1).expect("fleet")))
+        .expect("cells")
 }
 
 #[test]
@@ -42,7 +43,10 @@ fn the_type_is_stamped_on_the_cell() {
     let cells = cells();
     let counter = cells.allocate(7_i64).expect("allocate");
     let wrong = cells.open::<f64>(counter.id());
-    assert!(matches!(wrong, Err(Error::TypeMismatch { expected: "float", found: "int", .. })));
+    assert!(matches!(
+        wrong,
+        Err(Error::TypeMismatch { expected: "float", found: "int", .. })
+    ));
 }
 
 #[test]
@@ -77,8 +81,9 @@ fn a_released_cell_goes_stale_and_its_slot_is_reused_under_a_new_generation() {
 #[test]
 fn a_full_table_says_so() {
     let cells = cells();
-    let held: Vec<_> =
-        (0..orbit_cell::CELL_CAPACITY).map(|_| cells.allocate(0_i64).expect("allocate")).collect();
+    let held: Vec<_> = (0..orbit_cell::CELL_CAPACITY)
+        .map(|_| cells.allocate(0_i64).expect("allocate"))
+        .collect();
     assert!(matches!(cells.allocate(0_i64), Err(Error::Full { .. })));
     held.into_iter().next().expect("one").release().expect("release");
     assert!(cells.allocate(0_i64).is_ok());
@@ -95,7 +100,11 @@ fn ids_round_trip_through_text_and_bits() {
     assert_eq!(CellId::from_bits(id.to_bits()), id);
     assert!(matches!("cell:x".parse::<CellId>(), Err(Error::Malformed(_))));
     assert_eq!(
-        cells.open::<i64>(text.parse().expect("parse")).expect("open").load().expect("load"),
+        cells
+            .open::<i64>(text.parse().expect("parse"))
+            .expect("open")
+            .load()
+            .expect("load"),
         3
     );
 }
@@ -112,7 +121,11 @@ fn text_cells_append_atomically_and_refuse_what_does_not_fit() {
 
     let big = "y".repeat(orbit_cell::CELL_TEXT_MAX);
     assert!(matches!(same.append(&big), Err(Error::TooLong { .. })));
-    assert_eq!(text.load().expect("load"), "x", "a refused append writes nothing");
+    assert_eq!(
+        text.load().expect("load"),
+        "x",
+        "a refused append writes nothing"
+    );
     assert!(cells.allocate_text(&format!("{big}z")).is_err());
 
     let id = text.id();
@@ -131,13 +144,18 @@ fn text_readers_never_see_a_torn_write() {
     let thread = std::thread::spawn(move || {
         let mut flip = false;
         while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-            writer.store(if flip { "bbbbbbbb" } else { "aaaaaaaa" }).expect("store");
+            writer
+                .store(if flip { "bbbbbbbb" } else { "aaaaaaaa" })
+                .expect("store");
             flip = !flip;
         }
     });
     for _ in 0..5_000 {
         let seen = text.load().expect("load");
-        assert!(seen == "aaaaaaaa" || seen == "bbbbbbbb", "torn read: {seen:?}");
+        assert!(
+            seen == "aaaaaaaa" || seen == "bbbbbbbb",
+            "torn read: {seen:?}"
+        );
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     thread.join().expect("writer");
@@ -154,7 +172,8 @@ fn racing_callers_divide_a_limit_without_ever_passing_it() {
     const THREADS: usize = 8;
 
     let cells = Arc::new(
-        Cells::new(Arc::new(Fleet::join("cell-claim", 1).expect("fleet"))).expect("cells")
+        Cells::new(Arc::new(Fleet::join("cell-claim", 1).expect("fleet")))
+            .expect("cells"),
     );
     let counter = Arc::new(cells.allocate(0_i64).expect("allocate"));
 
@@ -169,8 +188,14 @@ fn racing_callers_divide_a_limit_without_ever_passing_it() {
                 while let Ok(orbit_cell::Claim::Took { taken, after }) =
                     counter.add_until(chunk, LIMIT)
                 {
-                    assert!(after <= LIMIT, "the cell passed the limit: {after}");
-                    assert!(taken > 0 && taken <= chunk, "took {taken} of {chunk}");
+                    assert!(
+                        after <= LIMIT,
+                        "the cell passed the limit: {after}"
+                    );
+                    assert!(
+                        taken > 0 && taken <= chunk,
+                        "took {taken} of {chunk}"
+                    );
                     mine += taken;
                 }
                 mine
@@ -178,10 +203,19 @@ fn racing_callers_divide_a_limit_without_ever_passing_it() {
         })
         .collect();
 
-    let shares: Vec<i64> = takers.into_iter().map(|t| t.join().expect("join")).collect();
+    let shares: Vec<i64> =
+        takers.into_iter().map(|t| t.join().expect("join")).collect();
 
-    assert_eq!(shares.iter().sum::<i64>(), LIMIT, "the shares must add up to the limit");
-    assert_eq!(counter.load().expect("load"), LIMIT, "the cell must hold exactly the limit");
+    assert_eq!(
+        shares.iter().sum::<i64>(),
+        LIMIT,
+        "the shares must add up to the limit"
+    );
+    assert_eq!(
+        counter.load().expect("load"),
+        LIMIT,
+        "the cell must hold exactly the limit"
+    );
     assert_eq!(
         counter.add_until(1, LIMIT).expect("claim"),
         orbit_cell::Claim::Exhausted,
@@ -217,7 +251,11 @@ fn a_waiter_ends_on_an_interrupt_without_a_write() {
     }
 
     assert_eq!(parked.join().expect("join").expect("wait"), None);
-    assert_eq!(cell.version().expect("version"), since, "no write was involved");
+    assert_eq!(
+        cell.version().expect("version"),
+        since,
+        "no write was involved"
+    );
 }
 
 /// The same call with nothing interrupting it is the ordinary wait: it ends
@@ -238,7 +276,11 @@ fn an_uninterrupted_waiter_ends_on_the_write() {
     };
 
     cell.swap(7).expect("write");
-    let changed = parked.join().expect("join").expect("wait").expect("a write ends the wait");
+    let changed = parked
+        .join()
+        .expect("join")
+        .expect("wait")
+        .expect("a write ends the wait");
     assert_ne!(changed, since);
     assert_eq!(cell.load().expect("load"), 7);
 }

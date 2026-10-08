@@ -40,7 +40,7 @@ impl OrbitEpoch {
 
     pub fn age_at(
         self,
-        now: Self
+        now: Self,
     ) -> Duration {
         Duration::from_millis(now.0.saturating_sub(self.0))
     }
@@ -48,7 +48,7 @@ impl OrbitEpoch {
     pub fn is_fresh_at(
         self,
         now: Self,
-        max_age: Duration
+        max_age: Duration,
     ) -> bool {
         self.age_at(now) <= max_age
     }
@@ -69,7 +69,7 @@ impl From<OrbitEpoch> for u64 {
 impl std::fmt::Display for OrbitEpoch {
     fn fmt(
         &self,
-        f: &mut std::fmt::Formatter<'_>
+        f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }

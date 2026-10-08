@@ -30,7 +30,7 @@ pub enum Error {
     #[error("authentication table has an incompatible layout")]
     IncompatibleLayout,
     #[error("authentication table uses a different state protection policy")]
-    IncompatibleProtection
+    IncompatibleProtection,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -2,24 +2,26 @@ use std::marker::PhantomData;
 
 use crate::OrbitTyped;
 use crate::fleet::{Fleet, NodeId};
-use crate::ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};
+use crate::ring::cursor::{
+    RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring,
+};
 use crate::ring::{Frame, RingTopology};
 
 struct FleetRingSource<'a, T: OrbitTyped> {
     fleet: &'a Fleet,
-    _t: PhantomData<T>
+    _t: PhantomData<T>,
 }
 
 struct FleetLaneSource<'a, T: OrbitTyped> {
     fleet: &'a Fleet,
     node_id: NodeId,
-    _t: PhantomData<T>
+    _t: PhantomData<T>,
 }
 
 impl<'a, T: OrbitTyped> FleetLaneSource<'a, T> {
     fn new(
         fleet: &'a Fleet,
-        node_id: NodeId
+        node_id: NodeId,
     ) -> Self {
         Self { fleet, node_id, _t: PhantomData }
     }
@@ -40,14 +42,14 @@ impl<T: OrbitTyped> RingFrameSource for FleetLaneSource<'_, T> {
 
     fn read_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         self.fleet.read_lane_at::<T>(self.node_id, counter)
     }
 
     fn read_state_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> RingRead {
         self.fleet.read_lane_state_at::<T>(self.node_id, counter)
     }
@@ -57,7 +59,7 @@ impl<T: OrbitTyped> RingFrameSource for FleetLaneSource<'_, T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FleetLaneCursor {
     lanes: Vec<RingCursor>,
-    initial_counter: u64
+    initial_counter: u64,
 }
 
 impl FleetLaneCursor {
@@ -66,7 +68,11 @@ impl FleetLaneCursor {
     }
 
     pub fn minimum_next_counter(&self) -> u64 {
-        self.lanes.iter().map(|cursor| cursor.next_counter()).min().unwrap_or(self.initial_counter)
+        self.lanes
+            .iter()
+            .map(|cursor| cursor.next_counter())
+            .min()
+            .unwrap_or(self.initial_counter)
     }
 }
 
@@ -74,7 +80,7 @@ impl FleetLaneCursor {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FleetLanePoll {
     pub frames: Vec<Frame>,
-    pub loss: RingLoss
+    pub loss: RingLoss,
 }
 
 impl<'a, T: OrbitTyped> FleetRingSource<'a, T> {
@@ -98,14 +104,14 @@ impl<T: OrbitTyped> RingFrameSource for FleetRingSource<'_, T> {
 
     fn read_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> Option<Frame> {
         self.fleet.read_at::<T>(counter)
     }
 
     fn read_state_at(
         &self,
-        counter: u64
+        counter: u64,
     ) -> RingRead {
         self.fleet.read_state_at::<T>(counter)
     }
@@ -130,7 +136,7 @@ impl Fleet {
     /// [`crate::ring::cursor::RingLoss`].
     pub fn poll_ring<T: OrbitTyped>(
         &self,
-        cursor: &mut RingCursor
+        cursor: &mut RingCursor,
     ) -> RingPoll {
         poll_ring(&FleetRingSource::<T>::new(self), cursor)
     }
@@ -140,7 +146,9 @@ impl Fleet {
     pub fn lane_cursor_at_head<T: OrbitTyped>(&self) -> FleetLaneCursor {
         self.assert_per_node::<T>();
         let lanes = (0..self.fleet_capacity())
-            .map(|node| RingCursor::from_counter(self.lane_head::<T>(NodeId::new(node))))
+            .map(|node| {
+                RingCursor::from_counter(self.lane_head::<T>(NodeId::new(node)))
+            })
             .collect();
         FleetLaneCursor { lanes, initial_counter: 0 }
     }
@@ -150,8 +158,11 @@ impl Fleet {
     pub fn lane_cursor_from_start<T: OrbitTyped>(&self) -> FleetLaneCursor {
         self.assert_per_node::<T>();
         FleetLaneCursor {
-            lanes: vec![RingCursor::from_start(); usize::from(self.fleet_capacity())],
-            initial_counter: 0
+            lanes: vec![
+                RingCursor::from_start();
+                usize::from(self.fleet_capacity())
+            ],
+            initial_counter: 0,
         }
     }
 
@@ -160,7 +171,7 @@ impl Fleet {
     /// callers that need semantic ordering across lanes must provide it.
     pub fn poll_lanes<T: OrbitTyped>(
         &self,
-        cursor: &mut FleetLaneCursor
+        cursor: &mut FleetLaneCursor,
     ) -> FleetLanePoll {
         self.assert_per_node::<T>();
         if cursor.lanes.is_empty() {
@@ -177,7 +188,8 @@ impl Fleet {
 
         let mut combined = FleetLanePoll::default();
         for (node, lane_cursor) in cursor.lanes.iter_mut().enumerate() {
-            let source = FleetLaneSource::<T>::new(self, NodeId::new(node as u16));
+            let source =
+                FleetLaneSource::<T>::new(self, NodeId::new(node as u16));
             let poll = poll_ring(&source, lane_cursor);
             combined.frames.extend(poll.frames);
             combined.loss.overwritten =

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ops::Deref;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Same-host fleet namespace, distinct from a process or application name.
 ///
@@ -16,8 +16,13 @@ pub struct FleetName {
 pub struct InvalidFleetName;
 
 impl fmt::Display for InvalidFleetName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("fleet name must contain 1–8 ASCII letters, digits, '-' or '_'")
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        f.write_str(
+            "fleet name must contain 1–8 ASCII letters, digits, '-' or '_'",
+        )
     }
 }
 
@@ -33,8 +38,12 @@ impl FleetName {
 
     pub fn try_new(name: impl AsRef<str>) -> Result<Self, InvalidFleetName> {
         let name = name.as_ref();
-        if name.is_empty() || name.len() > Self::MAX_LEN
-            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        if name.is_empty()
+            || name.len() > Self::MAX_LEN
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
             return Err(InvalidFleetName);
         }
         let mut bytes = [0; 8];
@@ -101,7 +110,10 @@ impl Deref for FleetName {
 }
 
 impl fmt::Display for FleetName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }

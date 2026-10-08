@@ -4,7 +4,8 @@ use orbit_core::Fleet;
 use orbit_counter::{Counter, Error};
 
 fn counter() -> Counter {
-    Counter::new(Arc::new(Fleet::join("counter-test", 1).expect("fleet"))).expect("counter")
+    Counter::new(Arc::new(Fleet::join("counter-test", 1).expect("fleet")))
+        .expect("counter")
 }
 
 #[test]
@@ -51,6 +52,9 @@ fn overflow_keeps_previous_value() {
 fn negative_amount_is_rejected() {
     let counter = counter();
 
-    assert!(matches!(counter.increment("bad", -1), Err(Error::NegativeAmount(-1))));
+    assert!(matches!(
+        counter.increment("bad", -1),
+        Err(Error::NegativeAmount(-1))
+    ));
     assert_eq!(counter.get("bad").expect("get"), None);
 }

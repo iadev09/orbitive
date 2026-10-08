@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use orbit_core::{
-    Fleet, Frame, NetId64, NodeId, OrbitTyped, Ring, RingCursor, RingFrameSource, RingRead,
-    RingSpec, poll_ring
+    Fleet, Frame, NetId64, NodeId, OrbitTyped, Ring, RingCursor,
+    RingFrameSource, RingRead, RingSpec, poll_ring,
 };
 
 #[derive(Clone, Debug)]
@@ -82,7 +82,7 @@ fn lagged_cursor_reports_overwritten_window() {
 #[test]
 fn missing_or_unexpected_slots_report_unavailable() {
     struct SparseSource {
-        frames: Vec<Option<Frame>>
+        frames: Vec<Option<Frame>>,
     }
 
     impl RingFrameSource for SparseSource {
@@ -100,7 +100,7 @@ fn missing_or_unexpected_slots_report_unavailable() {
 
         fn read_at(
             &self,
-            counter: u64
+            counter: u64,
         ) -> Option<Frame> {
             self.frames.get(counter as usize).cloned().flatten()
         }
@@ -112,16 +112,16 @@ fn missing_or_unexpected_slots_report_unavailable() {
                 id: NetId64::make(CursorRecord::KIND, 0, 0),
                 kind: 0,
                 ver: 0,
-                payload: Bytes::from_static(b"ok")
+                payload: Bytes::from_static(b"ok"),
             }),
             None,
             Some(Frame {
                 id: NetId64::make(CursorRecord::KIND, 0, 99),
                 kind: 0,
                 ver: 0,
-                payload: Bytes::from_static(b"wrapped")
+                payload: Bytes::from_static(b"wrapped"),
             }),
-        ]
+        ],
     };
     let mut cursor = RingCursor::from_start();
 
@@ -139,7 +139,7 @@ fn pending_counter_does_not_advance_cursor() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct DeferredSource {
-        committed: AtomicBool
+        committed: AtomicBool,
     }
 
     impl RingFrameSource for DeferredSource {
@@ -157,19 +157,19 @@ fn pending_counter_does_not_advance_cursor() {
 
         fn read_at(
             &self,
-            counter: u64
+            counter: u64,
         ) -> Option<Frame> {
             self.committed.load(Ordering::Acquire).then(|| Frame {
                 id: NetId64::make(CursorRecord::KIND, 0, counter),
                 kind: 0,
                 ver: 0,
-                payload: Bytes::from_static(b"committed")
+                payload: Bytes::from_static(b"committed"),
             })
         }
 
         fn read_state_at(
             &self,
-            counter: u64
+            counter: u64,
         ) -> RingRead {
             if !self.committed.load(Ordering::Acquire) {
                 return RingRead::Pending;
@@ -202,7 +202,7 @@ fn batch_publish_reserves_consecutive_ids_in_one_lane() {
             bytes::Bytes::from_static(b"one"),
             bytes::Bytes::from_static(b"two"),
             bytes::Bytes::from_static(b"three"),
-        ]
+        ],
     );
 
     assert_eq!(ids.len(), 3);
@@ -216,7 +216,8 @@ fn batch_publish_reserves_consecutive_ids_in_one_lane() {
 
 #[test]
 fn per_node_ring_versions_share_one_semantic_sequence() {
-    let fleet = Fleet::join_as("cursor_versions", 2, NodeId::new(1)).expect("fleet");
+    let fleet =
+        Fleet::join_as("cursor_versions", 2, NodeId::new(1)).expect("fleet");
 
     assert_eq!(fleet.next_ring_version::<BatchRecord>(), 1);
     assert_eq!(fleet.next_ring_version::<BatchRecord>(), 2);

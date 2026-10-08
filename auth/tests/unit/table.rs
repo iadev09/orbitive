@@ -6,7 +6,7 @@ fn mac() -> RecordProtection<Blake3State> {
 
 fn record(
     key: u64,
-    generation: u64
+    generation: u64,
 ) -> Record {
     Record {
         key: StoreKey([key; 4]),
@@ -14,7 +14,7 @@ fn record(
         created_at: generation,
         expires_at: generation + 100,
         generation,
-        status: SESSION
+        status: SESSION,
     }
 }
 fn value(slot: &Slot) -> (u64, Record) {
@@ -23,7 +23,7 @@ fn value(slot: &Slot) -> (u64, Record) {
             let record = mac().decode(0, revision, &wire).unwrap();
             (revision, record)
         }
-        _ => panic!("expected committed value")
+        _ => panic!("expected committed value"),
     }
 }
 
@@ -38,21 +38,37 @@ fn interrupted_write_preserves_previous_commit_and_revision_never_aba() {
     assert_eq!(value(&slot), (1, first));
     slot.store(record(1, 2), 0, &mac()).unwrap();
     slot.store(record(1, 3), 0, &mac()).unwrap();
-    assert_eq!(value(&slot).0, 3, "returning to the same bank never reuses revision 1");
+    assert_eq!(
+        value(&slot).0,
+        3,
+        "returning to the same bank never reuses revision 1"
+    );
     slot.revision.store(u64::MAX, Ordering::SeqCst);
-    assert_eq!(slot.store(record(1, 4), 0, &mac()), Err(Error::PolicyUnavailable));
+    assert_eq!(
+        slot.store(record(1, 4), 0, &mac()),
+        Err(Error::PolicyUnavailable)
+    );
 }
 
 #[test]
 fn malformed_metadata_is_rejected_and_full_tables_keep_live_state() {
     let slots = [Slot::empty()];
     insert(&slots, record(1, 10), 10, &mac()).unwrap();
-    assert_eq!(insert(&slots, record(2, 20), 109, &mac()), Err(Error::StateFull));
-    assert_eq!(find(&slots, StoreKey([1; 4]), &mac()).unwrap().unwrap().record, record(1, 10));
+    assert_eq!(
+        insert(&slots, record(2, 20), 109, &mac()),
+        Err(Error::StateFull)
+    );
+    assert_eq!(
+        find(&slots, StoreKey([1; 4]), &mac()).unwrap().unwrap().record,
+        record(1, 10)
+    );
     insert(&slots, record(2, 20), 110, &mac()).unwrap();
     assert!(find(&slots, StoreKey([1; 4]), &mac()).unwrap().is_none());
     slots[0].banks[0][11].store(99, Ordering::SeqCst);
-    assert!(matches!(find(&slots, StoreKey([2; 4]), &mac()), Err(Error::PolicyUnavailable)));
+    assert!(matches!(
+        find(&slots, StoreKey([2; 4]), &mac()),
+        Err(Error::PolicyUnavailable)
+    ));
 }
 
 #[test]
@@ -117,7 +133,10 @@ fn writer_exits_with_lock_held() {
 #[cfg(unix)]
 #[test]
 fn peer_recovers_from_dead_writer_and_refuses_old_geometry() {
-    let name = ring_segment_name(&format!("oc{:x}", std::process::id()), AUTH_STATE_KIND);
+    let name = ring_segment_name(
+        &format!("oc{:x}", std::process::id()),
+        AUTH_STATE_KIND,
+    );
     let table = Table::shm(&name, Blake3State::ID).unwrap();
     table.write(|slots| slots[0].store(record(0, 1), 0, &mac())).unwrap();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -126,7 +145,10 @@ fn peer_recovers_from_dead_writer_and_refuses_old_geometry() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(37));
-    assert_eq!(table.lookup(StoreKey([0; 4]), &mac()).unwrap().unwrap().record, record(0, 1));
+    assert_eq!(
+        table.lookup(StoreKey([0; 4]), &mac()).unwrap().unwrap().record,
+        record(0, 1)
+    );
     table.write(|slots| slots[0].store(record(0, 2), 0, &mac())).unwrap();
     let Table::Shm(region) = &table else { unreachable!() };
     {
@@ -136,13 +158,20 @@ fn peer_recovers_from_dead_writer_and_refuses_old_geometry() {
             region.as_ptr().add(7).write(b'1');
         }
     }
-    assert!(matches!(Table::shm(&name, Blake3State::ID), Err(Error::IncompatibleLayout)));
-    assert_eq!(table.lookup(StoreKey([0; 4]), &mac()).unwrap().unwrap().record, record(0, 2));
+    assert!(matches!(
+        Table::shm(&name, Blake3State::ID),
+        Err(Error::IncompatibleLayout)
+    ));
+    assert_eq!(
+        table.lookup(StoreKey([0; 4]), &mac()).unwrap().unwrap().record,
+        record(0, 2)
+    );
     region.unlink().unwrap();
 }
 
 #[test]
-fn every_record_field_and_tag_is_authenticated_even_without_a_revision_change() {
+fn every_record_field_and_tag_is_authenticated_even_without_a_revision_change()
+{
     let slots = [Slot::empty()];
     let first = record(1, 10);
     slots[0].store(first, 0, &mac()).unwrap();
@@ -151,21 +180,32 @@ fn every_record_field_and_tag_is_authenticated_even_without_a_revision_change() 
     for i in 0..BANK_WORDS {
         slots[0].banks[1][i].store(original[i] ^ 1, Ordering::SeqCst);
         assert!(
-            matches!(find(&slots, first.key, &mac()), Err(Error::PolicyUnavailable)),
+            matches!(
+                find(&slots, first.key, &mac()),
+                Err(Error::PolicyUnavailable)
+            ),
             "word {i}"
         );
         slots[0].banks[1][i].store(original[i], Ordering::SeqCst);
     }
     // Same bank, forged commit revision: the tag must cover the revision too.
     slots[0].revision.store(3, Ordering::SeqCst);
-    assert!(matches!(find(&slots, first.key, &mac()), Err(Error::PolicyUnavailable)));
+    assert!(matches!(
+        find(&slots, first.key, &mac()),
+        Err(Error::PolicyUnavailable)
+    ));
     slots[0].revision.store(1, Ordering::SeqCst);
-    let other_key = RecordProtection::<Blake3State>::new(Zeroizing::new([8; 32]));
-    assert!(matches!(find(&slots, first.key, &other_key), Err(Error::PolicyUnavailable)));
+    let other_key =
+        RecordProtection::<Blake3State>::new(Zeroizing::new([8; 32]));
+    assert!(matches!(
+        find(&slots, first.key, &other_key),
+        Err(Error::PolicyUnavailable)
+    ));
 }
 
 #[test]
-fn authenticated_records_cannot_be_moved_to_another_slot_or_forged_for_reclamation() {
+fn authenticated_records_cannot_be_moved_to_another_slot_or_forged_for_reclamation()
+ {
     let slots = [Slot::empty(), Slot::empty()];
     let first = record(0, 10);
     slots[0].store(first, 0, &mac()).unwrap();
@@ -173,14 +213,21 @@ fn authenticated_records_cannot_be_moved_to_another_slot_or_forged_for_reclamati
         dst.store(src.load(Ordering::SeqCst), Ordering::SeqCst);
     }
     slots[1].revision.store(1, Ordering::SeqCst);
-    assert!(matches!(find(&slots, StoreKey([1; 4]), &mac()), Err(Error::PolicyUnavailable)));
+    assert!(matches!(
+        find(&slots, StoreKey([1; 4]), &mac()),
+        Err(Error::PolicyUnavailable)
+    ));
     // A valid-looking earlier expiry is not permission to overwrite live state.
     slots[0].banks[1][9].store(11, Ordering::SeqCst);
-    assert_eq!(insert(&slots, record(2, 20), 20, &mac()), Err(Error::PolicyUnavailable));
+    assert_eq!(
+        insert(&slots, record(2, 20), 20, &mac()),
+        Err(Error::PolicyUnavailable)
+    );
 }
 
 #[test]
-fn warm_snapshot_comparison_checks_all_bytes_and_rollback_is_not_freshness_proof() {
+fn warm_snapshot_comparison_checks_all_bytes_and_rollback_is_not_freshness_proof()
+ {
     let fleet = Arc::new(Fleet::join("auth-mac-snapshot", 1).unwrap());
     let table = Table::new(fleet, Blake3State::ID).unwrap();
     let first = record(0, 10);
@@ -192,7 +239,10 @@ fn warm_snapshot_comparison_checks_all_bytes_and_rollback_is_not_freshness_proof
         std::array::from_fn(|i| slot.banks[1][i].load(Ordering::SeqCst));
     for i in 0..BANK_WORDS {
         slot.banks[1][i].store(original[i] ^ 1, Ordering::SeqCst);
-        assert!(!table.unchanged::<Blake3State>(&snapshot).unwrap_or(false), "word {i}");
+        assert!(
+            !table.unchanged::<Blake3State>(&snapshot).unwrap_or(false),
+            "word {i}"
+        );
         slot.banks[1][i].store(original[i], Ordering::SeqCst);
     }
     let mut revoked = first;
@@ -213,10 +263,16 @@ fn protected_wire<P: StateProtection>() {
     for i in 0..BANK_WORDS {
         let mut tampered = wire;
         tampered[i] ^= 1;
-        assert_eq!(protection.decode(3, 9, &tampered), Err(Error::PolicyUnavailable));
+        assert_eq!(
+            protection.decode(3, 9, &tampered),
+            Err(Error::PolicyUnavailable)
+        );
     }
     for (index, revision) in [(4, 9), (3, 11)] {
-        assert_eq!(protection.decode(index, revision, &wire), Err(Error::PolicyUnavailable));
+        assert_eq!(
+            protection.decode(index, revision, &wire),
+            Err(Error::PolicyUnavailable)
+        );
     }
     let wrong = RecordProtection::<P>::new(Zeroizing::new([8; 32]));
     assert_eq!(wrong.decode(3, 9, &wire), Err(Error::PolicyUnavailable));
@@ -225,18 +281,24 @@ fn protected_wire<P: StateProtection>() {
 fn blake3_and_encrypted_records_authenticate_every_word_and_context() {
     protected_wire::<Blake3State>();
     protected_wire::<EncryptedState>();
-    let encrypted = RecordProtection::<EncryptedState>::new(Zeroizing::new([7; 32]));
+    let encrypted =
+        RecordProtection::<EncryptedState>::new(Zeroizing::new([7; 32]));
     let first = record(0, 10);
     let a = encrypted.encode(3, 9, first).unwrap();
     let b = encrypted.encode(3, 9, first).unwrap();
     assert_ne!(a, b, "each store uses a fresh random nonce");
-    assert_ne!(&a[3..15], &first.words(), "encrypted metadata is not plaintext");
+    assert_ne!(
+        &a[3..15],
+        &first.words(),
+        "encrypted metadata is not plaintext"
+    );
     let blake = RecordProtection::<Blake3State>::new(Zeroizing::new([7; 32]));
     assert_eq!(blake.decode(3, 9, &a), Err(Error::PolicyUnavailable));
 }
 #[test]
 fn unprotected_mode_explicitly_accepts_well_formed_keyless_state_changes() {
-    let protection = RecordProtection::<UnprotectedState>::new(Zeroizing::new([7; 32]));
+    let protection =
+        RecordProtection::<UnprotectedState>::new(Zeroizing::new([7; 32]));
     let mut original = record(0, 10);
     let mut wire = protection.encode(3, 9, original).unwrap();
     original.status = REVOKED;
@@ -246,10 +308,12 @@ fn unprotected_mode_explicitly_accepts_well_formed_keyless_state_changes() {
     assert_eq!(protection.decode(3, 9, &wire), Err(Error::PolicyUnavailable));
 }
 #[test]
-fn encrypted_snapshot_checks_all_ciphertext_bytes_and_preserves_rollback_boundary() {
+fn encrypted_snapshot_checks_all_ciphertext_bytes_and_preserves_rollback_boundary()
+ {
     let fleet = Arc::new(Fleet::join("auth-encrypted-snapshot", 1).unwrap());
     let table = Table::new(fleet, EncryptedState::ID).unwrap();
-    let protection = RecordProtection::<EncryptedState>::new(Zeroizing::new([7; 32]));
+    let protection =
+        RecordProtection::<EncryptedState>::new(Zeroizing::new([7; 32]));
     let first = record(0, 10);
     table.write(|slots| slots[0].store(first, 0, &protection)).unwrap();
     let snapshot = table.lookup(first.key, &protection).unwrap().unwrap();
@@ -257,7 +321,10 @@ fn encrypted_snapshot_checks_all_ciphertext_bytes_and_preserves_rollback_boundar
     for word in &slot.banks[1] {
         word.fetch_xor(1, Ordering::SeqCst);
         assert!(!table.unchanged::<EncryptedState>(&snapshot).unwrap());
-        assert!(matches!(table.lookup(first.key, &protection), Err(Error::PolicyUnavailable)));
+        assert!(matches!(
+            table.lookup(first.key, &protection),
+            Err(Error::PolicyUnavailable)
+        ));
         word.fetch_xor(1, Ordering::SeqCst);
     }
     let mut revoked = first;
@@ -270,25 +337,39 @@ fn encrypted_snapshot_checks_all_ciphertext_bytes_and_preserves_rollback_boundar
 #[cfg(unix)]
 #[test]
 fn reopening_with_different_protection_refuses_without_changing_state() {
-    let name = ring_segment_name(&format!("op{:x}", std::process::id()), AUTH_STATE_KIND);
+    let name = ring_segment_name(
+        &format!("op{:x}", std::process::id()),
+        AUTH_STATE_KIND,
+    );
     let table = Table::shm(&name, EncryptedState::ID).unwrap();
-    let protection = RecordProtection::<EncryptedState>::new(Zeroizing::new([7; 32]));
+    let protection =
+        RecordProtection::<EncryptedState>::new(Zeroizing::new([7; 32]));
     let first = record(0, 10);
     table.write(|slots| slots[0].store(first, 0, &protection)).unwrap();
     for mode in [Blake3State::ID, UnprotectedState::ID] {
-        assert!(matches!(Table::shm(&name, mode), Err(Error::IncompatibleProtection)));
+        assert!(matches!(
+            Table::shm(&name, mode),
+            Err(Error::IncompatibleProtection)
+        ));
     }
-    assert_eq!(table.lookup(first.key, &protection).unwrap().unwrap().record, first);
+    assert_eq!(
+        table.lookup(first.key, &protection).unwrap().unwrap().record,
+        first
+    );
     let Table::Shm(region) = &table else { unreachable!() };
     region.unlink().unwrap();
 }
 
 #[test]
-fn unprotected_warm_views_trust_writer_revisions_but_observe_committed_changes() {
-    let table =
-        Table::new(Arc::new(Fleet::join("unprotected-warm", 1).unwrap()), UnprotectedState::ID)
-            .unwrap();
-    let protection = RecordProtection::<UnprotectedState>::new(Zeroizing::new([7; 32]));
+fn unprotected_warm_views_trust_writer_revisions_but_observe_committed_changes()
+{
+    let table = Table::new(
+        Arc::new(Fleet::join("unprotected-warm", 1).unwrap()),
+        UnprotectedState::ID,
+    )
+    .unwrap();
+    let protection =
+        RecordProtection::<UnprotectedState>::new(Zeroizing::new([7; 32]));
     let first = record(0, 10);
     table.write(|slots| slots[0].store(first, 0, &protection)).unwrap();
     let snapshot = table.lookup(first.key, &protection).unwrap().unwrap();

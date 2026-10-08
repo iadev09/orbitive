@@ -18,9 +18,14 @@ pub use fence::{Fence, FenceToken};
 use layout::LockEventRecord;
 pub use layout::{
     DefaultLockLayout, LOCK_EVENT_RING_CAPACITY, LOCK_EVENT_RING_KIND,
-    LOCK_EVENT_RING_PAYLOAD_CAPACITY, LOCK_EVENT_RING_SPEC, LOCK_STATE_KIND, LockLayout
+    LOCK_EVENT_RING_PAYLOAD_CAPACITY, LOCK_EVENT_RING_SPEC, LOCK_STATE_KIND,
+    LockLayout,
 };
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 pub use orbit_core::RingEventFd;
 use orbit_core::fleet::FleetLaneCursor;
 use orbit_core::{Fleet, NetId64, RingLoss};
@@ -36,18 +41,21 @@ pub trait LockType {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LockKey {
     namespace: Bytes,
-    label: Bytes
+    label: Bytes,
 }
 
 impl LockKey {
     pub fn new<T: LockType>(label: impl Into<Bytes>) -> Self {
-        Self { namespace: Bytes::from_static(T::NAMESPACE.as_bytes()), label: label.into() }
+        Self {
+            namespace: Bytes::from_static(T::NAMESPACE.as_bytes()),
+            label: label.into(),
+        }
     }
 
     /// Construct a dynamically namespaced key.
     pub fn from_parts(
         namespace: impl Into<Bytes>,
-        label: impl Into<Bytes>
+        label: impl Into<Bytes>,
     ) -> Self {
         Self { namespace: namespace.into(), label: label.into() }
     }
@@ -103,7 +111,7 @@ pub struct LockLease {
     pub acquired_at_ms: u64,
     /// Host-monotonic expiry deadline.
     pub expires_at_ms: u64,
-    pub state_revision: u64
+    pub state_revision: u64,
 }
 
 impl LockLease {
@@ -114,7 +122,7 @@ impl LockLease {
 
     pub fn is_expired_at(
         &self,
-        now_ms: u64
+        now_ms: u64,
     ) -> bool {
         self.expires_at_ms <= now_ms
     }
@@ -124,20 +132,20 @@ impl LockLease {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LockAcquire {
     Acquired(LockLease),
-    Occupied(LockLease)
+    Occupied(LockLease),
 }
 
 impl LockAcquire {
     pub fn acquired(self) -> Option<LockLease> {
         match self {
             Self::Acquired(lease) => Some(lease),
-            Self::Occupied(_) => None
+            Self::Occupied(_) => None,
         }
     }
 
     pub fn holder(&self) -> &LockLease {
         match self {
-            Self::Acquired(lease) | Self::Occupied(lease) => lease
+            Self::Acquired(lease) | Self::Occupied(lease) => lease,
         }
     }
 }
@@ -147,35 +155,42 @@ impl LockAcquire {
 pub enum LockTransition {
     Acquired(LockLease),
     Renewed(LockLease),
-    Released { lock_id: NetId64, key: LockKey, owner: LockOwner, state_revision: u64 }
+    Released {
+        lock_id: NetId64,
+        key: LockKey,
+        owner: LockOwner,
+        state_revision: u64,
+    },
 }
 
 impl LockTransition {
     pub fn lock_id(&self) -> NetId64 {
         match self {
             Self::Acquired(lease) | Self::Renewed(lease) => lease.lock_id,
-            Self::Released { lock_id, .. } => *lock_id
+            Self::Released { lock_id, .. } => *lock_id,
         }
     }
 
     pub fn key(&self) -> &LockKey {
         match self {
             Self::Acquired(lease) | Self::Renewed(lease) => &lease.key,
-            Self::Released { key, .. } => key
+            Self::Released { key, .. } => key,
         }
     }
 
     pub fn owner(&self) -> &LockOwner {
         match self {
             Self::Acquired(lease) | Self::Renewed(lease) => &lease.owner,
-            Self::Released { owner, .. } => owner
+            Self::Released { owner, .. } => owner,
         }
     }
 
     pub fn state_revision(&self) -> u64 {
         match self {
-            Self::Acquired(lease) | Self::Renewed(lease) => lease.state_revision,
-            Self::Released { state_revision, .. } => *state_revision
+            Self::Acquired(lease) | Self::Renewed(lease) => {
+                lease.state_revision
+            }
+            Self::Released { state_revision, .. } => *state_revision,
         }
     }
 }
@@ -184,12 +199,12 @@ impl LockTransition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockEvent {
     pub event_id: NetId64,
-    pub transition: LockTransition
+    pub transition: LockTransition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockCursor {
-    inner: FleetLaneCursor
+    inner: FleetLaneCursor,
 }
 
 /// Result of advancing one lock-event cursor.
@@ -197,7 +212,7 @@ pub struct LockCursor {
 pub struct LockPoll {
     pub events: Vec<LockEvent>,
     pub loss: RingLoss,
-    pub malformed: u64
+    pub malformed: u64,
 }
 
 impl LockPoll {
@@ -211,7 +226,7 @@ impl LockPoll {
 pub struct Lock<L: LockLayout = DefaultLockLayout> {
     fleet: Arc<Fleet>,
     state: LockStateStore<L>,
-    cursor: Arc<Mutex<LockCursor>>
+    cursor: Arc<Mutex<LockCursor>>,
 }
 
 impl Lock<DefaultLockLayout> {
@@ -240,7 +255,7 @@ impl<L: LockLayout> Lock<L> {
 
     fn open(
         fleet: Arc<Fleet>,
-        replay_retained: bool
+        replay_retained: bool,
     ) -> Result<Self> {
         layout::validate::<L>()?;
         let state = LockStateStore::new(&fleet);
@@ -249,7 +264,7 @@ impl<L: LockLayout> Lock<L> {
                 fleet.lane_cursor_from_start::<LockEventRecord<L>>()
             } else {
                 fleet.lane_cursor_at_head::<LockEventRecord<L>>()
-            }
+            },
         };
         Ok(Self { fleet, state, cursor: Arc::new(Mutex::new(cursor)) })
     }
@@ -258,7 +273,7 @@ impl<L: LockLayout> Lock<L> {
         &self,
         key: &LockKey,
         owner: &LockOwner,
-        ttl: Duration
+        ttl: Duration,
     ) -> Result<LockAcquire> {
         let now_ms = monotonic_ms()?;
         let expires_at_ms = deadline(now_ms, ttl)?;
@@ -271,7 +286,7 @@ impl<L: LockLayout> Lock<L> {
     pub fn renew(
         &self,
         lease: &LockLease,
-        ttl: Duration
+        ttl: Duration,
     ) -> Result<Option<LockLease>> {
         let now_ms = monotonic_ms()?;
         let expires_at_ms = deadline(now_ms, ttl)?;
@@ -285,33 +300,40 @@ impl<L: LockLayout> Lock<L> {
         &self,
         key: &LockKey,
         owner: &LockOwner,
-        ttl: Duration
+        ttl: Duration,
     ) -> Result<Option<LockLease>> {
         let now_ms = monotonic_ms()?;
         let expires_at_ms = deadline(now_ms, ttl)?;
-        self.state.renew_owner(key, owner, now_ms, expires_at_ms, |transition| {
-            self.publish(transition).map(|_| ())
-        })
+        self.state.renew_owner(
+            key,
+            owner,
+            now_ms,
+            expires_at_ms,
+            |transition| self.publish(transition).map(|_| ()),
+        )
     }
 
     /// Release only if this exact tenure is still current.
     pub fn release(
         &self,
-        lease: &LockLease
+        lease: &LockLease,
     ) -> Result<bool> {
         let now_ms = monotonic_ms()?;
-        self.state.release_id(lease, now_ms, |transition| self.publish(transition).map(|_| ()))
+        self.state.release_id(lease, now_ms, |transition| {
+            self.publish(transition).map(|_| ())
+        })
     }
 
     /// Release only when the current owner bytes match.
     pub fn release_owned(
         &self,
         key: &LockKey,
-        owner: &LockOwner
+        owner: &LockOwner,
     ) -> Result<bool> {
         let now_ms = monotonic_ms()?;
-        self.state
-            .release_owner(key, owner, now_ms, |transition| self.publish(transition).map(|_| ()))
+        self.state.release_owner(key, owner, now_ms, |transition| {
+            self.publish(transition).map(|_| ())
+        })
     }
 
     /// Release the current tenure without checking its owner.
@@ -321,16 +343,18 @@ impl<L: LockLayout> Lock<L> {
     /// [`Self::release`] or [`Self::release_owned`].
     pub fn force_release(
         &self,
-        key: &LockKey
+        key: &LockKey,
     ) -> Result<bool> {
         let now_ms = monotonic_ms()?;
-        self.state.force_release(key, now_ms, |transition| self.publish(transition).map(|_| ()))
+        self.state.force_release(key, now_ms, |transition| {
+            self.publish(transition).map(|_| ())
+        })
     }
 
     /// Read authoritative current state for one key.
     pub fn current(
         &self,
-        key: &LockKey
+        key: &LockKey,
     ) -> Result<Option<LockLease>> {
         self.state.current(key, monotonic_ms()?)
     }
@@ -339,15 +363,18 @@ impl<L: LockLayout> Lock<L> {
     pub fn restore(
         &self,
         key: &LockKey,
-        owner: &LockOwner
+        owner: &LockOwner,
     ) -> Result<Option<LockLease>> {
-        Ok(self.current(key)?.filter(|lease| lease.owner.as_bytes() == owner.as_bytes()))
+        Ok(self
+            .current(key)?
+            .filter(|lease| lease.owner.as_bytes() == owner.as_bytes()))
     }
 
     /// Drain every currently visible transition from all writer lanes.
     pub fn poll(&self) -> LockPoll {
         let raw = {
-            let mut cursor = self.cursor.lock().unwrap_or_else(|error| error.into_inner());
+            let mut cursor =
+                self.cursor.lock().unwrap_or_else(|error| error.into_inner());
             self.fleet.poll_lanes::<LockEventRecord<L>>(&mut cursor.inner)
         };
         let mut events = Vec::with_capacity(raw.frames.len());
@@ -355,7 +382,7 @@ impl<L: LockLayout> Lock<L> {
         for frame in raw.frames {
             match protocol::decode(&frame) {
                 Some(event) => events.push(event),
-                None => malformed += 1
+                None => malformed += 1,
             }
         }
         events.sort_by_key(|event| event.transition.state_revision());
@@ -364,7 +391,8 @@ impl<L: LockLayout> Lock<L> {
 
     /// Clear lock state and transition history during quiescent owner boot.
     pub fn reset_transport(&self) -> Result<()> {
-        let mut cursor = self.cursor.lock().unwrap_or_else(|error| error.into_inner());
+        let mut cursor =
+            self.cursor.lock().unwrap_or_else(|error| error.into_inner());
         self.state.reset()?;
         self.fleet.reset_ring::<LockEventRecord<L>>()?;
         cursor.inner = self.fleet.lane_cursor_at_head::<LockEventRecord<L>>();
@@ -382,28 +410,44 @@ impl<L: LockLayout> Lock<L> {
     }
 
     /// Create this process' readiness fd for lock transitions.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     pub fn event_fd(&self) -> Result<RingEventFd> {
         self.fleet.ring_event_fd::<LockEventRecord<L>>().map_err(Error::Io)
     }
 
     fn publish(
         &self,
-        transition: &LockTransition
+        transition: &LockTransition,
     ) -> Result<LockEvent> {
         let (kind, payload) = protocol::encode::<L>(transition)?;
         let event_id = {
-            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "macos"
+            ))]
             {
                 self.fleet.publish_notified::<LockEventRecord<L>>(
                     kind,
                     transition.state_revision(),
-                    payload
+                    payload,
                 )?
             }
-            #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "macos"
+            )))]
             {
-                self.fleet.publish::<LockEventRecord<L>>(kind, transition.state_revision(), payload)
+                self.fleet.publish::<LockEventRecord<L>>(
+                    kind,
+                    transition.state_revision(),
+                    payload,
+                )
             }
         };
         Ok(LockEvent { event_id, transition: transition.clone() })
@@ -412,24 +456,28 @@ impl<L: LockLayout> Lock<L> {
 
 fn deadline(
     now_ms: u64,
-    ttl: Duration
+    ttl: Duration,
 ) -> Result<u64> {
     if ttl.is_zero() {
         return Err(Error::TtlZero);
     }
-    let ttl_ms = u64::try_from(ttl.as_millis().max(1)).map_err(|_| Error::TtlOverflow)?;
+    let ttl_ms = u64::try_from(ttl.as_millis().max(1))
+        .map_err(|_| Error::TtlOverflow)?;
     now_ms.checked_add(ttl_ms).ok_or(Error::TtlOverflow)
 }
 
 #[cfg(unix)]
 fn monotonic_ms() -> Result<u64> {
     let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
-    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, value.as_mut_ptr()) };
+    let result = unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, value.as_mut_ptr())
+    };
     if result != 0 {
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
     let value = unsafe { value.assume_init() };
-    let seconds = u64::try_from(value.tv_sec).map_err(|_| Error::TtlOverflow)?;
+    let seconds =
+        u64::try_from(value.tv_sec).map_err(|_| Error::TtlOverflow)?;
     let nanos = u64::try_from(value.tv_nsec).map_err(|_| Error::TtlOverflow)?;
     Ok(seconds.saturating_mul(1_000).saturating_add(nanos / 1_000_000))
 }

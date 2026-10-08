@@ -25,7 +25,9 @@ use orbit_core::shm::{ShmRegion, ring_segment_name};
 
 mod text;
 
-pub use text::{CELL_TEXT_CAPACITY, CELL_TEXT_KIND, CELL_TEXT_MAX, Text, TextId};
+pub use text::{
+    CELL_TEXT_CAPACITY, CELL_TEXT_KIND, CELL_TEXT_MAX, Text, TextId,
+};
 
 /// Reserved Orbit SHM kind for the cell table.
 pub const CELL_STATE_KIND: u8 = 233;
@@ -34,8 +36,10 @@ pub const CELL_STATE_KIND: u8 = 233;
 /// Compile-time geometry: `ORBIT_CELL_CAPACITY` in the application's
 /// `.cargo/config.toml` overrides the default. Must be a power of two. Peers
 /// built with a different value are refused when they open the table.
-pub const CELL_CAPACITY: usize =
-    orbit_core::compile::usize_from_env(option_env!("ORBIT_CELL_CAPACITY"), 4_096);
+pub const CELL_CAPACITY: usize = orbit_core::compile::usize_from_env(
+    option_env!("ORBIT_CELL_CAPACITY"),
+    4_096,
+);
 
 pub(crate) const SLOT_EMPTY: u8 = 0;
 pub(crate) const SLOT_OCCUPIED: u8 = 1;
@@ -48,7 +52,11 @@ pub(crate) fn waits_supported() -> bool {
     orbit_core::sync::supported()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+)))]
 pub(crate) fn waits_supported() -> bool {
     false
 }
@@ -59,32 +67,44 @@ pub(crate) fn waits_supported() -> bool {
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 pub(crate) fn wait_on(
     word: &AtomicU32,
-    expected: u32
+    expected: u32,
 ) -> Result<()> {
     orbit_core::sync::wait_word(word, expected).map_err(Error::Io)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+)))]
 pub(crate) fn wait_on(
     _word: &AtomicU32,
-    _expected: u32
+    _expected: u32,
 ) -> Result<()> {
     Err(Error::Io(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "orbit-cell needs a platform that can wait on a shared word"
+        "orbit-cell needs a platform that can wait on a shared word",
     )))
 }
 
 /// Wake everyone parked on `word`; nothing to do where nobody can park.
 pub(crate) fn wake_on(word: &AtomicU32) {
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     let _ = orbit_core::sync::wake_word(word);
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    )))]
     let _ = word;
 }
 
 #[cfg(unix)]
-const STATE_MAGIC: u32 = 0x43_45_4C_4C; // "CELL"
+const STATE_MAGIC: u32 = 0x43_45_4c_4c; // "CELL"
 #[cfg(unix)]
 const STATE_VERSION: u16 = 2;
 
@@ -104,7 +124,7 @@ pub enum Error {
     /// The text would not fit the cell; nothing was written.
     TooLong {
         len: usize,
-        max: usize
+        max: usize,
     },
     /// A text cell held bytes that are not UTF-8: something wrote past the
     /// contract.
@@ -113,38 +133,46 @@ pub enum Error {
     TypeMismatch {
         id: CellId,
         expected: &'static str,
-        found: &'static str
+        found: &'static str,
     },
     /// The update would leave the integer range.
     Overflow,
     /// Every slot is occupied.
     Full {
-        capacity: usize
+        capacity: usize,
     },
     /// The text is not a cell id.
     Malformed(String),
-    Io(std::io::Error)
+    Io(std::io::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         match self {
             Self::Stale(id) => write!(f, "cell {id} has been released"),
-            Self::StaleText(id) => write!(f, "text cell {id} has been released"),
+            Self::StaleText(id) => {
+                write!(f, "text cell {id} has been released")
+            }
             Self::TooLong { len, max } => {
                 write!(f, "text does not fit the cell: len={len} max={max}")
             }
-            Self::Corrupt(id) => write!(f, "text cell {id} holds bytes that are not UTF-8"),
+            Self::Corrupt(id) => {
+                write!(f, "text cell {id} holds bytes that are not UTF-8")
+            }
             Self::TypeMismatch { id, expected, found } => {
                 write!(f, "cell {id} holds {found}, not {expected}")
             }
-            Self::Overflow => f.write_str("cell value is outside the integer range"),
-            Self::Full { capacity } => write!(f, "cell table is full: capacity={capacity}"),
+            Self::Overflow => {
+                f.write_str("cell value is outside the integer range")
+            }
+            Self::Full { capacity } => {
+                write!(f, "cell table is full: capacity={capacity}")
+            }
             Self::Malformed(text) => write!(f, "not a cell id: {text:?}"),
-            Self::Io(error) => write!(f, "Orbit cell io error: {error}")
+            Self::Io(error) => write!(f, "Orbit cell io error: {error}"),
         }
     }
 }
@@ -153,7 +181,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -171,7 +199,7 @@ impl From<std::io::Error> for Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CellId {
     index: u32,
-    generation: u32
+    generation: u32,
 }
 
 impl CellId {
@@ -196,7 +224,7 @@ impl CellId {
 impl fmt::Display for CellId {
     fn fmt(
         &self,
-        f: &mut fmt::Formatter<'_>
+        f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         write!(f, "cell:{}:{}", self.index, self.generation)
     }
@@ -211,7 +239,7 @@ impl FromStr for CellId {
         let (index, generation) = rest.split_once(':').ok_or_else(malformed)?;
         Ok(Self {
             index: index.parse().map_err(|_| malformed())?,
-            generation: generation.parse().map_err(|_| malformed())?
+            generation: generation.parse().map_err(|_| malformed())?,
         })
     }
 }
@@ -284,7 +312,7 @@ fn type_name(tag: u8) -> &'static str {
         2 => u64::NAME,
         3 => f64::NAME,
         4 => bool::NAME,
-        _ => "unknown"
+        _ => "unknown",
     }
 }
 
@@ -292,14 +320,14 @@ fn type_name(tag: u8) -> &'static str {
 #[derive(Clone)]
 pub struct Cells {
     backend: CellBackend,
-    text: text::TextBackend
+    text: text::TextBackend,
 }
 
 #[derive(Clone)]
 enum CellBackend {
     InMemory(Arc<MemoryCellTable>),
     #[cfg(unix)]
-    Shm(Arc<ShmCellTable>)
+    Shm(Arc<ShmCellTable>),
 }
 
 impl Cells {
@@ -307,16 +335,15 @@ impl Cells {
         if !crate::waits_supported() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "orbit-cell needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later"
+                "orbit-cell needs a platform that can wait on a shared word: Linux, FreeBSD, or macOS 14.4 or later",
             )));
         }
         let backend = if fleet.is_shm() {
             #[cfg(unix)]
             {
-                CellBackend::Shm(Arc::new(ShmCellTable::open_or_create(&ring_segment_name(
-                    fleet.name(),
-                    CELL_STATE_KIND
-                ))?))
+                CellBackend::Shm(Arc::new(ShmCellTable::open_or_create(
+                    &ring_segment_name(fleet.name(), CELL_STATE_KIND),
+                )?))
             }
             #[cfg(not(unix))]
             unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -330,7 +357,7 @@ impl Cells {
     /// Take a text cell holding `initial`; up to [`CELL_TEXT_MAX`] bytes.
     pub fn allocate_text(
         &self,
-        initial: &str
+        initial: &str,
     ) -> Result<Text> {
         self.text.allocate(initial)
     }
@@ -338,21 +365,21 @@ impl Cells {
     /// A handle to a live text cell.
     pub fn open_text(
         &self,
-        id: TextId
+        id: TextId,
     ) -> Result<Text> {
         self.text.open(id)
     }
 
     pub fn release_text(
         &self,
-        id: TextId
+        id: TextId,
     ) -> Result<()> {
         self.text.release(id)
     }
 
     pub fn is_text_live(
         &self,
-        id: TextId
+        id: TextId,
     ) -> bool {
         self.text.is_live(id)
     }
@@ -361,7 +388,7 @@ impl Cells {
     /// handle. The id inside it is what other processes open.
     pub fn allocate<T: CellType>(
         &self,
-        initial: T
+        initial: T,
     ) -> Result<Orbital<T>> {
         let id = self.with_structure(|slots, hint| {
             let capacity = slots.len();
@@ -371,7 +398,10 @@ impl Cells {
                 let slot = &slots[index];
                 if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
                     let generation = slot.install(T::TAG, initial.to_bits());
-                    hint.store(((index + 1) & (capacity - 1)) as u32, Ordering::Relaxed);
+                    hint.store(
+                        ((index + 1) & (capacity - 1)) as u32,
+                        Ordering::Relaxed,
+                    );
                     return Ok(CellId { index: index as u32, generation });
                 }
             }
@@ -383,12 +413,16 @@ impl Cells {
     /// A handle to a live cell of type `T`.
     pub fn open<T: CellType>(
         &self,
-        id: CellId
+        id: CellId,
     ) -> Result<Orbital<T>> {
         let slot = self.slot(id)?;
         let found = slot.tag.load(Ordering::Relaxed);
         if found != T::TAG {
-            return Err(Error::TypeMismatch { id, expected: T::NAME, found: type_name(found) });
+            return Err(Error::TypeMismatch {
+                id,
+                expected: T::NAME,
+                found: type_name(found),
+            });
         }
         Ok(Orbital { cells: self.clone(), id, _type: PhantomData })
     }
@@ -396,11 +430,13 @@ impl Cells {
     /// Give the slot back. Every handle to this generation goes stale.
     pub fn release(
         &self,
-        id: CellId
+        id: CellId,
     ) -> Result<()> {
         self.with_structure(|slots, _| {
-            let slot =
-                slots.get(id.index as usize).filter(|slot| slot.is(id)).ok_or(Error::Stale(id))?;
+            let slot = slots
+                .get(id.index as usize)
+                .filter(|slot| slot.is(id))
+                .ok_or(Error::Stale(id))?;
             slot.state.store(SLOT_EMPTY, Ordering::Release);
             // Whoever is parked on it finds the slot gone and answers Stale.
             slot.changed();
@@ -411,7 +447,7 @@ impl Cells {
     /// Whether `id` names a live cell right now.
     pub fn is_live(
         &self,
-        id: CellId
+        id: CellId,
     ) -> bool {
         self.slot(id).is_ok()
     }
@@ -435,7 +471,9 @@ impl Cells {
     pub fn unlink(&self) -> Result<()> {
         match &self.backend {
             CellBackend::InMemory(_) => self.reset_all()?,
-            CellBackend::Shm(table) => table.region.unlink().map_err(Error::Io)?
+            CellBackend::Shm(table) => {
+                table.region.unlink().map_err(Error::Io)?
+            }
         }
         self.text.unlink()
     }
@@ -444,20 +482,23 @@ impl Cells {
         match &self.backend {
             CellBackend::InMemory(table) => &table.slots,
             #[cfg(unix)]
-            CellBackend::Shm(table) => table.slots()
+            CellBackend::Shm(table) => table.slots(),
         }
     }
 
     fn slot(
         &self,
-        id: CellId
+        id: CellId,
     ) -> Result<&CellSlot> {
-        self.slots().get(id.index as usize).filter(|slot| slot.is(id)).ok_or(Error::Stale(id))
+        self.slots()
+            .get(id.index as usize)
+            .filter(|slot| slot.is(id))
+            .ok_or(Error::Stale(id))
     }
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[CellSlot], &AtomicU32) -> Result<T>
+        operation: impl FnOnce(&[CellSlot], &AtomicU32) -> Result<T>,
     ) -> Result<T> {
         match &self.backend {
             CellBackend::InMemory(table) => {
@@ -465,7 +506,7 @@ impl Cells {
                 operation(&table.slots, &table.hint)
             }
             #[cfg(unix)]
-            CellBackend::Shm(table) => table.with_structure(operation)
+            CellBackend::Shm(table) => table.with_structure(operation),
         }
     }
 }
@@ -479,7 +520,7 @@ pub enum Claim {
     /// remainder rather than being refused, so no unit goes unclaimed.
     Took { taken: i64, after: i64 },
     /// The limit was already reached. Nothing was added, nothing is left.
-    Exhausted
+    Exhausted,
 }
 
 /// One cell, typed. Cheap to clone; every clone is the same place.
@@ -487,7 +528,7 @@ pub enum Claim {
 pub struct Orbital<T: CellType> {
     cells: Cells,
     id: CellId,
-    _type: PhantomData<T>
+    _type: PhantomData<T>,
 }
 
 impl<T: CellType> Orbital<T> {
@@ -501,7 +542,7 @@ impl<T: CellType> Orbital<T> {
 
     pub fn store(
         &self,
-        value: T
+        value: T,
     ) -> Result<()> {
         let slot = self.slot()?;
         slot.value.store(value.to_bits(), Ordering::Release);
@@ -512,7 +553,7 @@ impl<T: CellType> Orbital<T> {
     /// Replace the value and return what it was.
     pub fn swap(
         &self,
-        value: T
+        value: T,
     ) -> Result<T> {
         let slot = self.slot()?;
         let previous = slot.value.swap(value.to_bits(), Ordering::AcqRel);
@@ -532,7 +573,7 @@ impl<T: CellType> Orbital<T> {
     /// with [`Error::Stale`]. Blocking; an async runtime wraps it.
     pub fn wait_changed(
         &self,
-        since: u32
+        since: u32,
     ) -> Result<u32> {
         loop {
             let slot = self.slot()?;
@@ -556,14 +597,14 @@ impl<T: CellType> Orbital<T> {
     pub fn compare_exchange(
         &self,
         current: T,
-        new: T
+        new: T,
     ) -> Result<std::result::Result<T, T>> {
         let slot = self.slot()?;
         let exchanged = slot.value.compare_exchange(
             current.to_bits(),
             new.to_bits(),
             Ordering::AcqRel,
-            Ordering::Acquire
+            Ordering::Acquire,
         );
         if exchanged.is_ok() {
             slot.changed();
@@ -589,7 +630,7 @@ impl<T: CellType> Orbital<T> {
     pub fn wait_changed_until(
         &self,
         since: u32,
-        interrupt: &core::sync::atomic::AtomicBool
+        interrupt: &core::sync::atomic::AtomicBool,
     ) -> Result<Option<u32>> {
         loop {
             if interrupt.load(Ordering::SeqCst) {
@@ -638,7 +679,7 @@ impl Orbital<i64> {
     /// Add `by` (negative to subtract) and return the value after.
     pub fn fetch_add(
         &self,
-        by: i64
+        by: i64,
     ) -> Result<i64> {
         let slot = self.slot()?;
         slot.value
@@ -654,7 +695,7 @@ impl Orbital<i64> {
 
     pub fn fetch_sub(
         &self,
-        by: i64
+        by: i64,
     ) -> Result<i64> {
         self.fetch_add(by.checked_neg().ok_or(Error::Overflow)?)
     }
@@ -689,7 +730,7 @@ impl Orbital<i64> {
     pub fn add_until(
         &self,
         by: i64,
-        limit: i64
+        limit: i64,
     ) -> Result<Claim> {
         if by <= 0 {
             return Err(Error::Overflow);
@@ -704,7 +745,12 @@ impl Orbital<i64> {
             let after = current + taken;
             if slot
                 .value
-                .compare_exchange(current as u64, after as u64, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(
+                    current as u64,
+                    after as u64,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_ok()
             {
                 slot.changed();
@@ -720,11 +766,13 @@ impl Orbital<i64> {
 impl Orbital<u64> {
     pub fn fetch_add(
         &self,
-        by: u64
+        by: u64,
     ) -> Result<u64> {
         let slot = self.slot()?;
         slot.value
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| bits.checked_add(by))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
+                bits.checked_add(by)
+            })
             .map(|previous| {
                 slot.changed();
                 previous + by
@@ -734,11 +782,13 @@ impl Orbital<u64> {
 
     pub fn fetch_sub(
         &self,
-        by: u64
+        by: u64,
     ) -> Result<u64> {
         let slot = self.slot()?;
         slot.value
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| bits.checked_sub(by))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
+                bits.checked_sub(by)
+            })
             .map(|previous| {
                 slot.changed();
                 previous - by
@@ -752,7 +802,7 @@ impl Orbital<f64> {
     /// have no fetch-add of their own.
     pub fn fetch_add(
         &self,
-        by: f64
+        by: f64,
     ) -> Result<f64> {
         let slot = self.slot()?;
         let previous = slot
@@ -793,7 +843,7 @@ struct CellStateHeader {
     slot_size: u32,
     /// Where the next allocation starts looking; a hint, never a promise.
     hint: AtomicU32,
-    _reserved: [u8; 44]
+    _reserved: [u8; 44],
 }
 
 impl CellStateHeader {
@@ -811,7 +861,7 @@ impl CellStateHeader {
             capacity: CELL_CAPACITY as u32,
             slot_size: size_of::<CellSlot>() as u32,
             hint: AtomicU32::new(0),
-            _reserved: [0; 44]
+            _reserved: [0; 44],
         }
     }
 }
@@ -832,7 +882,7 @@ struct CellSlot {
     /// Waiters parked on `changes`; a writer wakes only when this is nonzero,
     /// so the write path costs one extra load when nobody is listening.
     waiters: AtomicU32,
-    _padding: [u8; 40]
+    _padding: [u8; 40],
 }
 
 impl CellSlot {
@@ -845,7 +895,7 @@ impl CellSlot {
             value: AtomicU64::new(0),
             changes: AtomicU32::new(0),
             waiters: AtomicU32::new(0),
-            _padding: [0; 40]
+            _padding: [0; 40],
         }
     }
 
@@ -862,7 +912,7 @@ impl CellSlot {
 
     fn is(
         &self,
-        id: CellId
+        id: CellId,
     ) -> bool {
         // `Acquire` on `state` publishes the generation written by `install`.
         self.state.load(Ordering::Acquire) == SLOT_OCCUPIED
@@ -874,9 +924,10 @@ impl CellSlot {
     fn install(
         &self,
         tag: u8,
-        value: u64
+        value: u64,
     ) -> u32 {
-        let generation = self.generation.load(Ordering::Relaxed).wrapping_add(1).max(1);
+        let generation =
+            self.generation.load(Ordering::Relaxed).wrapping_add(1).max(1);
         self.tag.store(tag, Ordering::Relaxed);
         self.value.store(value, Ordering::Relaxed);
         self.changes.store(0, Ordering::Relaxed);
@@ -897,7 +948,7 @@ struct MemoryCellTable {
     _fleet: Arc<Fleet>,
     slots: Vec<CellSlot>,
     hint: AtomicU32,
-    structural_lock: Mutex<()>
+    structural_lock: Mutex<()>,
 }
 
 impl MemoryCellTable {
@@ -906,7 +957,7 @@ impl MemoryCellTable {
             _fleet: fleet,
             slots: (0..CELL_CAPACITY).map(|_| CellSlot::empty()).collect(),
             hint: AtomicU32::new(0),
-            structural_lock: Mutex::new(())
+            structural_lock: Mutex::new(()),
         }
     }
 }
@@ -931,7 +982,7 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryCellTable> {
 #[cfg(unix)]
 struct ShmCellTable {
     region: ShmRegion,
-    structural_lock: Mutex<()>
+    structural_lock: Mutex<()>,
 }
 
 #[cfg(unix)]
@@ -943,9 +994,16 @@ impl ShmCellTable {
             ShmRegion::open_or_create_locked(name, shm_segment_size())?;
         if region.created() {
             unsafe {
-                ptr::write(region.as_ptr().cast::<CellStateHeader>(), CellStateHeader::new());
+                ptr::write(
+                    region.as_ptr().cast::<CellStateHeader>(),
+                    CellStateHeader::new(),
+                );
                 let slots = region.as_ptr().add(size_of::<CellStateHeader>());
-                ptr::write_bytes(slots, 0, CELL_CAPACITY * size_of::<CellSlot>());
+                ptr::write_bytes(
+                    slots,
+                    0,
+                    CELL_CAPACITY * size_of::<CellSlot>(),
+                );
             }
         } else {
             let header = unsafe { &*region.as_ptr().cast::<CellStateHeader>() };
@@ -955,17 +1013,20 @@ impl ShmCellTable {
                     format!(
                         "SHM segment {name} has wrong magic 0x{:08X} (expected 0x{STATE_MAGIC:08X})",
                         header.magic
-                    )
+                    ),
                 )));
             }
             if header.version != STATE_VERSION
-                || usize::from(header.header_size) != size_of::<CellStateHeader>()
+                || usize::from(header.header_size)
+                    != size_of::<CellStateHeader>()
                 || header.capacity as usize != CELL_CAPACITY
                 || header.slot_size as usize != size_of::<CellSlot>()
             {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("SHM segment {name} has an incompatible cell-state layout")
+                    format!(
+                        "SHM segment {name} has an incompatible cell-state layout"
+                    ),
                 )));
             }
         }
@@ -979,15 +1040,18 @@ impl ShmCellTable {
     fn slots(&self) -> &[CellSlot] {
         unsafe {
             std::slice::from_raw_parts(
-                self.region.as_ptr().add(size_of::<CellStateHeader>()).cast::<CellSlot>(),
-                CELL_CAPACITY
+                self.region
+                    .as_ptr()
+                    .add(size_of::<CellStateHeader>())
+                    .cast::<CellSlot>(),
+                CELL_CAPACITY,
             )
         }
     }
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[CellSlot], &AtomicU32) -> Result<T>
+        operation: impl FnOnce(&[CellSlot], &AtomicU32) -> Result<T>,
     ) -> Result<T> {
         let _local = lock_unpoisoned(&self.structural_lock);
         let _process = self.region.lock_exclusive()?;

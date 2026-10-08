@@ -9,7 +9,9 @@ use tokio::sync::Notify;
 use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 
-use crate::{AcquireError, ClientPolicy, OptionsError, PoolDirective, PoolOptions};
+use crate::{
+    AcquireError, ClientPolicy, OptionsError, PoolDirective, PoolOptions,
+};
 
 /// Creates and validates one protocol-specific outbound client.
 #[async_trait]
@@ -23,7 +25,7 @@ pub trait ClientManager: Send + Sync + 'static {
     /// Prove that an idle client may be handed out again.
     async fn recycle(
         &self,
-        client: &mut Self::Client
+        client: &mut Self::Client,
     ) -> Result<(), Self::Error>;
 }
 
@@ -37,7 +39,7 @@ pub struct PoolStats {
     pub waiting: usize,
     /// Requests that currently hold a client, including a client being created.
     pub in_flight: usize,
-    pub state: PoolState
+    pub state: PoolState,
 }
 
 /// Admission and lifecycle state of one pool.
@@ -46,7 +48,7 @@ pub enum PoolState {
     Open,
     Paused { reason: Arc<str> },
     Draining,
-    Closed
+    Closed,
 }
 
 /// Shutdown behavior declared by the owner of one active request.
@@ -55,18 +57,18 @@ pub enum ActiveRequestPolicy {
     /// Let the request finish naturally while pool drain waits for its lease.
     Preserve,
     /// Signal the request on drain, immediately or after the declared grace.
-    CancelOnDrain(Option<std::time::Duration>)
+    CancelOnDrain(Option<std::time::Duration>),
 }
 
 struct ActiveCancellation {
     policy: ActiveRequestPolicy,
-    token: CancellationToken
+    token: CancellationToken,
 }
 
 struct Entry<C> {
     client: C,
     created_at: Instant,
-    idle_since: Instant
+    idle_since: Instant,
 }
 
 struct State<C> {
@@ -78,7 +80,7 @@ struct State<C> {
     status: PoolState,
     next_active_id: u64,
     drain_started: Option<Instant>,
-    drain_cancellations: HashMap<u64, ActiveCancellation>
+    drain_cancellations: HashMap<u64, ActiveCancellation>,
 }
 
 struct Inner<M: ClientManager> {
@@ -87,12 +89,12 @@ struct Inner<M: ClientManager> {
     state: Mutex<State<M::Client>>,
     changed: Notify,
     admission_closed: CancellationToken,
-    active_cancellation: CancellationToken
+    active_cancellation: CancellationToken,
 }
 
 /// A bounded process-local pool of protocol-specific clients.
 pub struct ClientPool<M: ClientManager> {
-    inner: Arc<Inner<M>>
+    inner: Arc<Inner<M>>,
 }
 
 impl<M: ClientManager> Clone for ClientPool<M> {
@@ -105,7 +107,7 @@ impl<M: ClientManager> ClientPool<M> {
     /// Construct an empty pool. This performs no network IO.
     pub fn new(
         manager: M,
-        options: PoolOptions
+        options: PoolOptions,
     ) -> Result<Self, OptionsError> {
         options.validate()?;
         Ok(Self {
@@ -121,19 +123,19 @@ impl<M: ClientManager> ClientPool<M> {
                     status: PoolState::Open,
                     next_active_id: 0,
                     drain_started: None,
-                    drain_cancellations: HashMap::new()
+                    drain_cancellations: HashMap::new(),
                 }),
                 changed: Notify::new(),
                 admission_closed: CancellationToken::new(),
-                active_cancellation: CancellationToken::new()
-            })
+                active_cancellation: CancellationToken::new(),
+            }),
         })
     }
 
     /// Acquire one client, creating it lazily or waiting for returned capacity.
     pub async fn acquire(
         &self,
-        active_policy: ActiveRequestPolicy
+        active_policy: ActiveRequestPolicy,
     ) -> Result<ClientLease<M>, AcquireError<M::Error>> {
         self.acquire_inner(active_policy, None).await
     }
@@ -142,7 +144,7 @@ impl<M: ClientManager> ClientPool<M> {
     pub async fn acquire_cancellable(
         &self,
         active_policy: ActiveRequestPolicy,
-        cancellation: &CancellationToken
+        cancellation: &CancellationToken,
     ) -> Result<ClientLease<M>, AcquireError<M::Error>> {
         self.acquire_inner(active_policy, Some(cancellation)).await
     }
@@ -150,10 +152,13 @@ impl<M: ClientManager> ClientPool<M> {
     async fn acquire_inner(
         &self,
         active_policy: ActiveRequestPolicy,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<ClientLease<M>, AcquireError<M::Error>> {
-        let deadline =
-            self.inner.options.acquire_timeout.map(|duration| TokioInstant::now() + duration);
+        let deadline = self
+            .inner
+            .options
+            .acquire_timeout
+            .map(|duration| TokioInstant::now() + duration);
         let mut waiter = Waiter::new(self);
 
         loop {
@@ -173,7 +178,8 @@ impl<M: ClientManager> ClientPool<M> {
                         Action::Wait
                     }
                     PoolState::Open => {
-                        if state.in_flight >= self.inner.options.max_concurrency {
+                        if state.in_flight >= self.inner.options.max_concurrency
+                        {
                             waiter.enter(&mut state)?;
                             Action::Wait
                         } else if let Some(entry) = state.idle.pop_front() {
@@ -197,7 +203,10 @@ impl<M: ClientManager> ClientPool<M> {
             match action {
                 Action::Reuse(mut entry) => {
                     match self
-                        .operation(self.inner.manager.recycle(&mut entry.client), cancellation)
+                        .operation(
+                            self.inner.manager.recycle(&mut entry.client),
+                            cancellation,
+                        )
                         .await
                     {
                         Ok(Ok(())) => {}
@@ -210,10 +219,17 @@ impl<M: ClientManager> ClientPool<M> {
                             return Err(interrupted.acquire_error());
                         }
                     }
-                    return Ok(ClientLease::new(self.clone(), entry, active_policy));
+                    return Ok(ClientLease::new(
+                        self.clone(),
+                        entry,
+                        active_policy,
+                    ));
                 }
                 Action::Create => {
-                    match self.operation(self.inner.manager.create(), cancellation).await {
+                    match self
+                        .operation(self.inner.manager.create(), cancellation)
+                        .await
+                    {
                         Ok(Ok(client)) => {
                             self.finish_create(true, true);
                             return Ok(ClientLease::new(
@@ -221,9 +237,9 @@ impl<M: ClientManager> ClientPool<M> {
                                 Entry {
                                     client,
                                     created_at: Instant::now(),
-                                    idle_since: Instant::now()
+                                    idle_since: Instant::now(),
                                 },
-                                active_policy
+                                active_policy,
                             ));
                         }
                         Ok(Err(error)) => {
@@ -236,7 +252,10 @@ impl<M: ClientManager> ClientPool<M> {
                         }
                     }
                 }
-                Action::Wait => self.wait_for_change(notified, deadline, cancellation).await?
+                Action::Wait => {
+                    self.wait_for_change(notified, deadline, cancellation)
+                        .await?
+                }
             }
         }
     }
@@ -244,7 +263,7 @@ impl<M: ClientManager> ClientPool<M> {
     #[cfg(feature = "fleet")]
     pub(crate) async fn create(
         &self,
-        active_policy: ActiveRequestPolicy
+        active_policy: ActiveRequestPolicy,
     ) -> Result<ClientLease<M>, AcquireError<M::Error>> {
         self.create_inner(active_policy, None).await
     }
@@ -253,7 +272,7 @@ impl<M: ClientManager> ClientPool<M> {
     pub(crate) async fn create_cancellable(
         &self,
         active_policy: ActiveRequestPolicy,
-        cancellation: &CancellationToken
+        cancellation: &CancellationToken,
     ) -> Result<ClientLease<M>, AcquireError<M::Error>> {
         self.create_inner(active_policy, Some(cancellation)).await
     }
@@ -262,7 +281,7 @@ impl<M: ClientManager> ClientPool<M> {
     async fn create_inner(
         &self,
         active_policy: ActiveRequestPolicy,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<ClientLease<M>, AcquireError<M::Error>> {
         {
             let mut state = self.state();
@@ -285,8 +304,12 @@ impl<M: ClientManager> ClientPool<M> {
                 self.finish_create(true, true);
                 Ok(ClientLease::new(
                     self.clone(),
-                    Entry { client, created_at: Instant::now(), idle_since: Instant::now() },
-                    active_policy
+                    Entry {
+                        client,
+                        created_at: Instant::now(),
+                        idle_since: Instant::now(),
+                    },
+                    active_policy,
                 ))
             }
             Ok(Err(error)) => {
@@ -304,7 +327,7 @@ impl<M: ClientManager> ClientPool<M> {
     pub(crate) async fn acquire_idle_where(
         &self,
         predicate: impl Fn(&M::Client) -> bool,
-        active_policy: ActiveRequestPolicy
+        active_policy: ActiveRequestPolicy,
     ) -> Result<Option<ClientLease<M>>, AcquireError<M::Error>> {
         self.acquire_idle_where_inner(predicate, active_policy, None).await
     }
@@ -314,9 +337,14 @@ impl<M: ClientManager> ClientPool<M> {
         &self,
         predicate: impl Fn(&M::Client) -> bool,
         active_policy: ActiveRequestPolicy,
-        cancellation: &CancellationToken
+        cancellation: &CancellationToken,
     ) -> Result<Option<ClientLease<M>>, AcquireError<M::Error>> {
-        self.acquire_idle_where_inner(predicate, active_policy, Some(cancellation)).await
+        self.acquire_idle_where_inner(
+            predicate,
+            active_policy,
+            Some(cancellation),
+        )
+        .await
     }
 
     #[cfg(feature = "fleet")]
@@ -324,7 +352,7 @@ impl<M: ClientManager> ClientPool<M> {
         &self,
         predicate: impl Fn(&M::Client) -> bool,
         active_policy: ActiveRequestPolicy,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ClientLease<M>>, AcquireError<M::Error>> {
         let mut entry = {
             let mut state = self.state();
@@ -335,13 +363,21 @@ impl<M: ClientManager> ClientPool<M> {
             if state.in_flight >= self.inner.options.max_concurrency {
                 return Err(AcquireError::AtCapacity);
             }
-            let Some(index) = state.idle.iter().position(|entry| predicate(&entry.client)) else {
+            let Some(index) =
+                state.idle.iter().position(|entry| predicate(&entry.client))
+            else {
                 return Ok(None);
             };
             state.in_flight += 1;
             state.idle.remove(index).expect("idle index came from this queue")
         };
-        match self.operation(self.inner.manager.recycle(&mut entry.client), cancellation).await {
+        match self
+            .operation(
+                self.inner.manager.recycle(&mut entry.client),
+                cancellation,
+            )
+            .await
+        {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 self.retire_one();
@@ -358,13 +394,16 @@ impl<M: ClientManager> ClientPool<M> {
     #[cfg(feature = "fleet")]
     pub(crate) fn discard_idle_where(
         &self,
-        predicate: impl Fn(&M::Client) -> bool
+        predicate: impl Fn(&M::Client) -> bool,
     ) -> bool {
         let mut state = self.state();
-        let Some(index) = state.idle.iter().position(|entry| predicate(&entry.client)) else {
+        let Some(index) =
+            state.idle.iter().position(|entry| predicate(&entry.client))
+        else {
             return false;
         };
-        let retired = state.idle.remove(index).expect("idle index came from this queue");
+        let retired =
+            state.idle.remove(index).expect("idle index came from this queue");
         state.live = state.live.saturating_sub(1);
         drop(state);
         drop(retired);
@@ -375,7 +414,7 @@ impl<M: ClientManager> ClientPool<M> {
     /// Maintain the declared warm floor until cancellation, then close and drain.
     pub async fn run(
         &self,
-        cancellation: CancellationToken
+        cancellation: CancellationToken,
     ) -> Result<(), M::Error> {
         loop {
             if cancellation.is_cancelled() {
@@ -384,12 +423,18 @@ impl<M: ClientManager> ClientPool<M> {
             }
 
             self.prune_now();
-            if matches!(self.stats().state, PoolState::Draining | PoolState::Closed) {
+            if matches!(
+                self.stats().state,
+                PoolState::Draining | PoolState::Closed
+            ) {
                 self.drain().await;
                 return Ok(());
             }
             if self.reserve_warm_create() {
-                match self.operation(self.inner.manager.create(), Some(&cancellation)).await {
+                match self
+                    .operation(self.inner.manager.create(), Some(&cancellation))
+                    .await
+                {
                     Ok(Ok(client)) => self.finish_warm_create(client),
                     Ok(Err(error)) => {
                         self.finish_create(false, false);
@@ -444,7 +489,8 @@ impl<M: ClientManager> ClientPool<M> {
             if !matches!(&state.status, PoolState::Closed) {
                 state.status = PoolState::Draining;
             }
-            let drain_started = *state.drain_started.get_or_insert_with(Instant::now);
+            let drain_started =
+                *state.drain_started.get_or_insert_with(Instant::now);
             let idle = state.idle.len();
             let retired: Vec<_> = state.idle.drain(..).collect();
             state.live = state.live.saturating_sub(idle);
@@ -483,7 +529,7 @@ impl<M: ClientManager> ClientPool<M> {
                         _ = tokio::time::sleep_until(TokioInstant::from_std(deadline)) => {}
                     }
                 }
-                None => notified.await
+                None => notified.await,
             }
         }
     }
@@ -491,7 +537,7 @@ impl<M: ClientManager> ClientPool<M> {
     /// Pause new acquisitions without retiring retained or leased clients.
     pub fn pause(
         &self,
-        reason: impl Into<Arc<str>>
+        reason: impl Into<Arc<str>>,
     ) {
         let mut state = self.state();
         if matches!(&state.status, PoolState::Open | PoolState::Paused { .. }) {
@@ -516,11 +562,11 @@ impl<M: ClientManager> ClientPool<M> {
     /// Apply a protocol-neutral admission consequence.
     pub fn apply(
         &self,
-        directive: PoolDirective
+        directive: PoolDirective,
     ) {
         match directive {
             PoolDirective::Continue => {}
-            PoolDirective::Pause { reason } => self.pause(reason)
+            PoolDirective::Pause { reason } => self.pause(reason),
         }
     }
 
@@ -530,7 +576,10 @@ impl<M: ClientManager> ClientPool<M> {
     /// when its own policy has decided that active requests should no longer
     /// be preserved. Calling it while admission is open has no effect.
     pub fn cancel_active(&self) -> bool {
-        if !matches!(&self.state().status, PoolState::Draining | PoolState::Closed) {
+        if !matches!(
+            &self.state().status,
+            PoolState::Draining | PoolState::Closed
+        ) {
             return false;
         }
         self.inner.active_cancellation.cancel();
@@ -539,7 +588,7 @@ impl<M: ClientManager> ClientPool<M> {
 
     fn register_active(
         &self,
-        policy: ActiveRequestPolicy
+        policy: ActiveRequestPolicy,
     ) -> (CancellationToken, Option<u64>) {
         let token = self.inner.active_cancellation.child_token();
         if policy == ActiveRequestPolicy::Preserve {
@@ -551,18 +600,22 @@ impl<M: ClientManager> ClientPool<M> {
         state.next_active_id = state.next_active_id.wrapping_add(1);
         let cancel_now = match (policy, state.drain_started) {
             (ActiveRequestPolicy::CancelOnDrain(None), Some(_)) => true,
-            (ActiveRequestPolicy::CancelOnDrain(Some(duration)), Some(started)) => {
-                started.checked_add(duration).is_some_and(|deadline| deadline <= Instant::now())
-            }
-            _ => false
+            (
+                ActiveRequestPolicy::CancelOnDrain(Some(duration)),
+                Some(started),
+            ) => started
+                .checked_add(duration)
+                .is_some_and(|deadline| deadline <= Instant::now()),
+            _ => false,
         };
         if cancel_now {
             token.cancel();
             (token, None)
         } else {
-            state
-                .drain_cancellations
-                .insert(id, ActiveCancellation { policy, token: token.clone() });
+            state.drain_cancellations.insert(
+                id,
+                ActiveCancellation { policy, token: token.clone() },
+            );
             drop(state);
             self.inner.changed.notify_waiters();
             (token, Some(id))
@@ -571,7 +624,7 @@ impl<M: ClientManager> ClientPool<M> {
 
     fn unregister_active(
         &self,
-        registration: Option<u64>
+        registration: Option<u64>,
     ) {
         let Some(id) = registration else {
             return;
@@ -584,7 +637,7 @@ impl<M: ClientManager> ClientPool<M> {
     pub(crate) async fn wait_until_open(
         &self,
         deadline: Option<TokioInstant>,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<(), AcquireError<M::Error>> {
         let mut waiter = Waiter::new(self);
         loop {
@@ -612,7 +665,7 @@ impl<M: ClientManager> ClientPool<M> {
     #[cfg(feature = "fleet")]
     pub(crate) async fn wait_until_open_for_maintenance(
         &self,
-        cancellation: &CancellationToken
+        cancellation: &CancellationToken,
     ) -> bool {
         loop {
             let notified = self.inner.changed.notified();
@@ -633,11 +686,13 @@ impl<M: ClientManager> ClientPool<M> {
         PoolStats {
             live: state.live,
             idle: state.idle.len(),
-            leased: state.live.saturating_sub(state.idle.len() + state.creating),
+            leased: state
+                .live
+                .saturating_sub(state.idle.len() + state.creating),
             creating: state.creating,
             waiting: state.waiting,
             in_flight: state.in_flight,
-            state: state.status.clone()
+            state: state.status.clone(),
         }
     }
 
@@ -648,7 +703,7 @@ impl<M: ClientManager> ClientPool<M> {
     fn finish_create(
         &self,
         succeeded: bool,
-        admitted: bool
+        admitted: bool,
     ) {
         let mut state = self.state();
         state.creating = state.creating.saturating_sub(1);
@@ -664,7 +719,7 @@ impl<M: ClientManager> ClientPool<M> {
 
     fn finish_warm_create(
         &self,
-        client: M::Client
+        client: M::Client,
     ) {
         let now = Instant::now();
         let mut state = self.state();
@@ -674,7 +729,11 @@ impl<M: ClientManager> ClientPool<M> {
         {
             state.live = state.live.saturating_sub(1);
         } else {
-            state.idle.push_back(Entry { client, created_at: now, idle_since: now });
+            state.idle.push_back(Entry {
+                client,
+                created_at: now,
+                idle_since: now,
+            });
         }
         drop(state);
         self.inner.changed.notify_waiters();
@@ -703,14 +762,15 @@ impl<M: ClientManager> ClientPool<M> {
 
     fn return_entry(
         &self,
-        mut entry: Entry<M::Client>
+        mut entry: Entry<M::Client>,
     ) {
         let now = Instant::now();
         let mut state = self.state();
         state.in_flight = state.in_flight.saturating_sub(1);
-        let reusable = matches!(&state.status, PoolState::Open | PoolState::Paused { .. })
-            && state.idle.len() < self.inner.options.max_idle
-            && !expired(&entry, now, &self.inner.options);
+        let reusable =
+            matches!(&state.status, PoolState::Open | PoolState::Paused { .. })
+                && state.idle.len() < self.inner.options.max_idle
+                && !expired(&entry, now, &self.inner.options);
         if reusable {
             entry.idle_since = now;
             state.idle.push_back(entry);
@@ -728,7 +788,7 @@ impl<M: ClientManager> ClientPool<M> {
 
     fn prune_expired(
         &self,
-        state: &mut State<M::Client>
+        state: &mut State<M::Client>,
     ) {
         let now = Instant::now();
         let before = state.idle.len();
@@ -738,17 +798,21 @@ impl<M: ClientManager> ClientPool<M> {
 
     fn next_retirement_deadline(&self) -> Option<Instant> {
         let state = self.state();
-        state.idle.iter().filter_map(|entry| retirement_deadline(entry, &self.inner.options)).min()
+        state
+            .idle
+            .iter()
+            .filter_map(|entry| retirement_deadline(entry, &self.inner.options))
+            .min()
     }
 
     async fn wait_for_change<F>(
         &self,
         notified: F,
         deadline: Option<TokioInstant>,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<(), AcquireError<M::Error>>
     where
-        F: Future<Output = ()>
+        F: Future<Output = ()>,
     {
         match (deadline, cancellation) {
             (Some(deadline), Some(cancellation)) => {
@@ -784,10 +848,10 @@ impl<M: ClientManager> ClientPool<M> {
     async fn operation<F, T>(
         &self,
         operation: F,
-        cancellation: Option<&CancellationToken>
+        cancellation: Option<&CancellationToken>,
     ) -> Result<T, OperationInterrupted>
     where
-        F: Future<Output = T>
+        F: Future<Output = T>,
     {
         match cancellation {
             Some(cancellation) => tokio::select! {
@@ -802,21 +866,21 @@ impl<M: ClientManager> ClientPool<M> {
                 _ = self.inner.admission_closed.cancelled() => {
                     Err(OperationInterrupted::AdmissionClosed)
                 }
-            }
+            },
         }
     }
 }
 
 enum OperationInterrupted {
     Caller,
-    AdmissionClosed
+    AdmissionClosed,
 }
 
 impl OperationInterrupted {
     fn acquire_error<E>(self) -> AcquireError<E> {
         match self {
             Self::Caller => AcquireError::Cancelled,
-            Self::AdmissionClosed => AcquireError::Closed
+            Self::AdmissionClosed => AcquireError::Closed,
         }
     }
 }
@@ -824,12 +888,12 @@ impl OperationInterrupted {
 enum Action<C> {
     Reuse(Entry<C>),
     Create,
-    Wait
+    Wait,
 }
 
 struct Waiter<'a, M: ClientManager> {
     pool: &'a ClientPool<M>,
-    entered: bool
+    entered: bool,
 }
 
 impl<'a, M: ClientManager> Waiter<'a, M> {
@@ -839,14 +903,14 @@ impl<'a, M: ClientManager> Waiter<'a, M> {
 
     fn enter(
         &mut self,
-        state: &mut State<M::Client>
+        state: &mut State<M::Client>,
     ) -> Result<(), AcquireError<M::Error>> {
         if self.entered {
             return Ok(());
         }
         if state.waiting >= self.pool.inner.options.max_waiting {
             return Err(AcquireError::QueueFull {
-                max_waiting: self.pool.inner.options.max_waiting
+                max_waiting: self.pool.inner.options.max_waiting,
             });
         }
         state.waiting += 1;
@@ -856,7 +920,7 @@ impl<'a, M: ClientManager> Waiter<'a, M> {
 
     fn leave(
         &mut self,
-        state: &mut State<M::Client>
+        state: &mut State<M::Client>,
     ) {
         if self.entered {
             state.waiting = state.waiting.saturating_sub(1);
@@ -882,17 +946,23 @@ pub struct ClientLease<M: ClientManager> {
     pool: ClientPool<M>,
     entry: Option<Entry<M::Client>>,
     active_cancellation: CancellationToken,
-    active_registration: Option<u64>
+    active_registration: Option<u64>,
 }
 
 impl<M: ClientManager> ClientLease<M> {
     fn new(
         pool: ClientPool<M>,
         entry: Entry<M::Client>,
-        active_policy: ActiveRequestPolicy
+        active_policy: ActiveRequestPolicy,
     ) -> Self {
-        let (active_cancellation, active_registration) = pool.register_active(active_policy);
-        Self { pool, entry: Some(entry), active_cancellation, active_registration }
+        let (active_cancellation, active_registration) =
+            pool.register_active(active_policy);
+        Self {
+            pool,
+            entry: Some(entry),
+            active_cancellation,
+            active_registration,
+        }
     }
 
     /// Retire this client instead of returning it to the idle pool.
@@ -906,7 +976,7 @@ impl<M: ClientManager> ClientLease<M> {
     pub fn observe<O, P: ClientPolicy<O>>(
         &self,
         policy: &P,
-        outcome: &O
+        outcome: &O,
     ) {
         self.pool.apply(policy.classify(outcome));
     }
@@ -945,7 +1015,7 @@ impl<M: ClientManager> Drop for ClientLease<M> {
 
 fn take_due_cancellations<C>(
     state: &mut State<C>,
-    now: Instant
+    now: Instant,
 ) -> Vec<CancellationToken> {
     let Some(started) = state.drain_started else {
         return Vec::new();
@@ -957,15 +1027,17 @@ fn take_due_cancellations<C>(
             let due = match active.policy {
                 ActiveRequestPolicy::Preserve => false,
                 ActiveRequestPolicy::CancelOnDrain(None) => true,
-                ActiveRequestPolicy::CancelOnDrain(Some(grace)) => {
-                    started.checked_add(grace).is_some_and(|deadline| deadline <= now)
-                }
+                ActiveRequestPolicy::CancelOnDrain(Some(grace)) => started
+                    .checked_add(grace)
+                    .is_some_and(|deadline| deadline <= now),
             };
             due.then_some(*id)
         })
         .collect();
     due.into_iter()
-        .filter_map(|id| state.drain_cancellations.remove(&id).map(|active| active.token))
+        .filter_map(|id| {
+            state.drain_cancellations.remove(&id).map(|active| active.token)
+        })
         .collect()
 }
 
@@ -975,8 +1047,11 @@ fn next_active_cancellation_deadline<C>(state: &State<C>) -> Option<Instant> {
         .drain_cancellations
         .values()
         .filter_map(|active| match active.policy {
-            ActiveRequestPolicy::CancelOnDrain(Some(grace)) => started.checked_add(grace),
-            ActiveRequestPolicy::Preserve | ActiveRequestPolicy::CancelOnDrain(None) => None
+            ActiveRequestPolicy::CancelOnDrain(Some(grace)) => {
+                started.checked_add(grace)
+            }
+            ActiveRequestPolicy::Preserve
+            | ActiveRequestPolicy::CancelOnDrain(None) => None,
         })
         .min()
 }
@@ -984,21 +1059,25 @@ fn next_active_cancellation_deadline<C>(state: &State<C>) -> Option<Instant> {
 fn expired<C>(
     entry: &Entry<C>,
     now: Instant,
-    options: &PoolOptions
+    options: &PoolOptions,
 ) -> bool {
     retirement_deadline(entry, options).is_some_and(|deadline| deadline <= now)
 }
 
 fn retirement_deadline<C>(
     entry: &Entry<C>,
-    options: &PoolOptions
+    options: &PoolOptions,
 ) -> Option<Instant> {
-    let idle = options.idle_timeout.and_then(|duration| entry.idle_since.checked_add(duration));
-    let lifetime = options.max_lifetime.and_then(|duration| entry.created_at.checked_add(duration));
+    let idle = options
+        .idle_timeout
+        .and_then(|duration| entry.idle_since.checked_add(duration));
+    let lifetime = options
+        .max_lifetime
+        .and_then(|duration| entry.created_at.checked_add(duration));
     match (idle, lifetime) {
         (Some(idle), Some(lifetime)) => Some(idle.min(lifetime)),
         (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-        (None, None) => None
+        (None, None) => None,
     }
 }
 

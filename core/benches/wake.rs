@@ -28,7 +28,8 @@ fn parks() -> i64 {
 }
 
 fn main() {
-    let rounds: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(50_000);
+    let rounds: u32 =
+        std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(50_000);
 
     // 0 means it is A's turn to act, 1 means B's.
     let turn = Arc::new(AtomicU32::new(0));

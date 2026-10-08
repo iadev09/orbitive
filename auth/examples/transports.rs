@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orbit_auth::{
-    Audience, Authority, Blake3State, Capability, Claims, FleetAuth, Keyring, Purpose, Result,
-    SecretKey, Validation
+    Audience, Authority, Blake3State, Capability, Claims, FleetAuth, Keyring,
+    Purpose, Result, SecretKey, Validation,
 };
 use orbit_core::Fleet;
 
@@ -15,7 +15,7 @@ fn main() -> Result<()> {
     let authority = Authority::new(
         "shared-prod",
         "identity-service",
-        Keyring::new(1, [(1, SecretKey::generate()?)])?
+        Keyring::new(1, [(1, SecretKey::generate()?)])?,
     )?;
     // The host supplies its Fleet; use join_shm_as for cross-process sharing.
     let fleet = Arc::new(Fleet::join("auth-example", 1).unwrap());
@@ -24,7 +24,7 @@ fn main() -> Result<()> {
         &authority,
         SecretKey::generate()?,
         NonZeroUsize::new(128).unwrap(),
-        Blake3State
+        Blake3State,
     )?;
     let now = 1_800_000_000;
     let session_audience = Audience::new("session-service")?;
@@ -37,9 +37,9 @@ fn main() -> Result<()> {
             capabilities: BTreeSet::from([Capability::new("profile:read")?]),
             issued_at: now,
             not_before: now,
-            expires_at: now + 300
+            expires_at: now + 300,
         },
-        &session_state
+        &session_state,
     )?;
 
     // session.example.com: adapter extracts its own secure session cookie and
@@ -47,20 +47,20 @@ fn main() -> Result<()> {
     let session_validator = authority.validator(Validation {
         audience: session_audience,
         purpose: Purpose::Session,
-        required_capabilities: BTreeSet::new()
+        required_capabilities: BTreeSet::new(),
     });
     let signed_in = session_validator.validate_cached(
         session.expose(),
         now,
         &cache,
         Duration::from_secs(30),
-        &cache
+        &cache,
     )?;
 
     for (audience, purpose) in [
         ("public-api", Purpose::Access), // api.other-domain.com: Bearer header
         ("realtime", Purpose::WebSocket), // ws.third-domain.net: first AUTH frame
-        ("profile-worker", Purpose::Internal)  // Orbit adapter: initial control envelope
+        ("profile-worker", Purpose::Internal), // Orbit adapter: initial control envelope
     ] {
         let audience = Audience::new(audience)?;
         // The issuer's application policy must authorize each target and the
@@ -77,21 +77,21 @@ fn main() -> Result<()> {
                 capabilities: BTreeSet::from([read.clone()]),
                 issued_at: now,
                 not_before: now,
-                expires_at: now + 60
+                expires_at: now + 60,
             },
-            &session_state
+            &session_state,
         )?;
         let validator = authority.validator(Validation {
             audience,
             purpose,
-            required_capabilities: BTreeSet::from([read])
+            required_capabilities: BTreeSet::from([read]),
         });
         let principal = validator.validate_cached(
             token.expose(),
             now,
             &cache,
             Duration::from_secs(30),
-            &cache
+            &cache,
         )?;
         assert_eq!(principal.subject(), signed_in.subject());
         // WS/Orbit adapters may bind this Principal to an authenticated connection.
@@ -106,16 +106,17 @@ fn main() -> Result<()> {
             capabilities: BTreeSet::new(),
             issued_at: now,
             not_before: now,
-            expires_at: now + 300
+            expires_at: now + 300,
         },
-        &session_state
+        &session_state,
     )?;
     let refresh_validator = authority.validator(Validation {
         audience: Audience::new("session-service")?,
         purpose: Purpose::Refresh,
-        required_capabilities: BTreeSet::new()
+        required_capabilities: BTreeSet::new(),
     });
-    let renewed = cache.refresh(&refresh_validator, refresh.expose(), now, now + 3600)?;
+    let renewed =
+        cache.refresh(&refresh_validator, refresh.expose(), now, now + 3600)?;
     assert_eq!(renewed.id(), session_state.id());
     cache.revoke_session(renewed.id(), now)?;
     Ok(())

@@ -9,13 +9,25 @@ pub const MAX_LABEL_LEN: usize = 256;
 pub const MAX_CAPABILITIES: usize = 64;
 
 pub(crate) fn valid_label(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_LABEL_LEN && !value.chars().any(char::is_control)
+    !value.is_empty()
+        && value.len() <= MAX_LABEL_LEN
+        && !value.chars().any(char::is_control)
 }
 
 macro_rules! label {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+        )]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
@@ -49,7 +61,10 @@ macro_rules! label {
 }
 
 label!(Audience, "Exact logical recipient; independent of DNS and transport.");
-label!(Capability, "Exact application-defined permission; no implicit wildcards or hierarchy.");
+label!(
+    Capability,
+    "Exact application-defined permission; no implicit wildcards or hierarchy."
+);
 
 /// Cryptographically separated credential uses, independent of extraction method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +74,7 @@ pub enum Purpose {
     Refresh,
     Access,
     WebSocket,
-    Internal
+    Internal,
 }
 
 impl Purpose {
@@ -69,7 +84,7 @@ impl Purpose {
             Self::Refresh => b"refresh",
             Self::Access => b"access",
             Self::WebSocket => b"websocket",
-            Self::Internal => b"internal"
+            Self::Internal => b"internal",
         }
     }
 }
@@ -88,7 +103,7 @@ pub struct Claims {
     pub capabilities: BTreeSet<Capability>,
     pub issued_at: u64,
     pub not_before: u64,
-    pub expires_at: u64
+    pub expires_at: u64,
 }
 
 impl Claims {
@@ -113,7 +128,7 @@ pub struct Principal {
     pub(crate) jti: TokenId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<crate::fleet::SessionBinding>,
-    pub(crate) claims: Claims
+    pub(crate) claims: Claims,
 }
 
 impl Principal {
@@ -137,7 +152,7 @@ impl Principal {
     }
     pub fn has_capability(
         &self,
-        capability: &Capability
+        capability: &Capability,
     ) -> bool {
         self.claims.capabilities.contains(capability)
     }
@@ -148,7 +163,7 @@ impl Principal {
 pub struct Validation {
     pub audience: Audience,
     pub purpose: Purpose,
-    pub required_capabilities: BTreeSet<Capability>
+    pub required_capabilities: BTreeSet<Capability>,
 }
 
 /// Called after static validation on EVERY authentication, including cache hits.
@@ -160,7 +175,7 @@ pub trait ValidationHook {
     fn check(
         &self,
         principal: &Principal,
-        now: u64
+        now: u64,
     ) -> Result<()>;
 
     /// `Validator::validate_lapsed`: policy for a credential past its own
@@ -168,7 +183,7 @@ pub trait ValidationHook {
     fn check_lapsed(
         &self,
         _: &Principal,
-        _: u64
+        _: u64,
     ) -> Result<()> {
         Err(Error::Expired)
     }
@@ -181,7 +196,7 @@ impl ValidationHook for AllowReusable {
     fn check(
         &self,
         _: &Principal,
-        _: u64
+        _: u64,
     ) -> Result<()> {
         Ok(())
     }
