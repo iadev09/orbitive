@@ -35,7 +35,7 @@ pub use inbox::{
     Admission, Inbox, InboxGeometry, LANE_NAME_MAX, LANE_ROLE_MAX, Reclaimed,
 };
 #[cfg(all(unix, feature = "tokio"))]
-pub use receiver::InboxReceiver;
+pub use receiver::{InboxReceiver, Received};
 #[cfg(unix)]
 pub use segment::{Joined, LinkSegment, LinkSegmentHandle, check_name};
 

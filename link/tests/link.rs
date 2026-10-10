@@ -191,3 +191,37 @@ async fn a_tokio_receiver_observes_queued_and_reactor_woken_frames() {
     owner.inbox().release_lane(0).unwrap();
     owner.unlink().unwrap();
 }
+
+/// A process hears another claim and release a lane through the lane it
+/// already reads: no thread, registry or interval of its own.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn a_tokio_receiver_hears_lanes_claimed_and_released() {
+    use orbit_link::Received;
+
+    let name = fleet_name("dir");
+    let owner = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+    owner.inbox().claim_lane(0, "checkout", "worker", 1).unwrap();
+    let peer = LinkSegment::open(&name, SPEC).unwrap();
+    let mut receiver = owner.receiver(0).unwrap();
+
+    let waiting = tokio::spawn(async move {
+        let mut frame = Vec::new();
+        let received = receiver.next(&mut frame).await.unwrap();
+        (receiver, received)
+    });
+    tokio::task::yield_now().await;
+    peer.inbox().claim_lane(1, "checkout-edge", "edge", 1).unwrap();
+    let (mut receiver, claimed) = waiting.await.unwrap();
+    assert_eq!(claimed, Received::Directory(owner.inbox().directory()));
+
+    peer.inbox().release_lane(1).unwrap();
+    let mut frame = Vec::new();
+    assert_eq!(
+        receiver.next(&mut frame).await.unwrap(),
+        Received::Directory(owner.inbox().directory())
+    );
+
+    owner.inbox().release_lane(0).unwrap();
+    owner.unlink().unwrap();
+}

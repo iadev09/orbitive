@@ -4,6 +4,17 @@ use std::sync::Arc;
 
 use crate::{LinkSegment, Result};
 
+/// What [`InboxReceiver::next`] observed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// A frame was copied out of the lane.
+    Frame,
+    /// The lane directory moved to this generation: a lane was claimed or
+    /// released. Read [`crate::Inbox::serving`] or the lane identities to see
+    /// which.
+    Directory(u64),
+}
+
 /// One lane's async reader.
 ///
 /// The socket is a wake source, not a message source. [`Self::recv`] always
@@ -14,6 +25,8 @@ pub struct InboxReceiver {
     segment: Arc<LinkSegment>,
     lane: usize,
     socket: tokio::net::UnixDatagram,
+    /// The directory generation this receiver last reported.
+    directory: u64,
 }
 
 impl InboxReceiver {
@@ -22,7 +35,8 @@ impl InboxReceiver {
         lane: usize,
     ) -> Result<Self> {
         let socket = segment.inbox().bind_receiver(lane)?;
-        Ok(Self { segment, lane, socket })
+        let directory = segment.inbox().directory();
+        Ok(Self { segment, lane, socket, directory })
     }
 
     /// Wait for and copy the next frame from this lane.
@@ -34,15 +48,39 @@ impl InboxReceiver {
         &mut self,
         out: &mut Vec<u8>,
     ) -> Result<()> {
+        loop {
+            if self.next(out).await? == Received::Frame {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Wait for the next frame or the next directory change, whichever comes
+    /// first. A change is reported as the generation the directory moved to;
+    /// several claims or releases between two looks arrive as one, so compare
+    /// the directory itself to learn each of them. Cancellation loses
+    /// neither: a frame stays in SHM, and an unreported change is reported
+    /// next.
+    pub async fn next(
+        &mut self,
+        out: &mut Vec<u8>,
+    ) -> Result<Received> {
         let inbox = self.segment.inbox();
         loop {
+            let directory = inbox.directory();
+            if directory != self.directory {
+                self.directory = directory;
+                return Ok(Received::Directory(directory));
+            }
             let seen = inbox.receiver_generation(self.lane)?;
             if inbox.read(self.lane, out)? {
-                return Ok(());
+                return Ok(Received::Frame);
             }
 
             inbox.arm_receiver(self.lane)?;
-            if inbox.receiver_generation(self.lane)? != seen {
+            if inbox.receiver_generation(self.lane)? != seen
+                || inbox.directory() != self.directory
+            {
                 inbox.disarm_receiver(self.lane);
                 continue;
             }

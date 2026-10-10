@@ -689,6 +689,7 @@ impl Inbox {
         lane.pid.store(0, Ordering::Release);
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
         self.wake(lane_index, lane);
+        self.announce_directory();
         Ok(())
     }
 
@@ -921,6 +922,21 @@ impl Inbox {
         // Last, and after the name: a caller that sees the new number sees
         // every byte that made it new.
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
+        self.announce_directory();
+    }
+
+    /// Wake every claimed lane once: the directory moved. A reader woken with
+    /// no frame compares [`Inbox::directory`] with the value it last saw, so
+    /// a process learns who joined or left from the lane it already reads,
+    /// with no thread, registry or interval of its own. Claims and releases
+    /// are rare; traffic never comes through here.
+    fn announce_directory(&self) {
+        for lane_index in 0..self.lanes {
+            let lane = self.lane_header(lane_index);
+            if lane.consumers.load(Ordering::Acquire) != 0 {
+                self.wake(lane_index, lane);
+            }
+        }
     }
 
     /// Bump the word a reader watches, and wake it if one is parked.
