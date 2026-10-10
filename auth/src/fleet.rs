@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::keyring::{context, derive};
 use crate::table::{
     CONSUMED, REVOKED, Record, RecordProtection, SESSION, Snapshot, StoreKey,
-    Table, find, insert,
+    Table, find, insert, subject_sessions,
 };
 use crate::{
     Authority, CacheKey, CachedPrincipal, Claims, Error, MemoryCache,
@@ -154,7 +154,29 @@ impl<P: StateProtection> FleetAuth<P> {
         now: u64,
         expires_at: u64,
     ) -> Result<Session> {
-        let subject = subject.into();
+        self.create(subject.into(), now, expires_at, None)
+    }
+
+    /// Admit a new session and revoke the oldest excess sessions of this
+    /// subject under the same writer lock. The new session is always retained.
+    /// No new index, shared-memory layout or background driver is introduced.
+    pub fn create_session_with_limit(
+        &self,
+        subject: impl Into<String>,
+        now: u64,
+        expires_at: u64,
+        limit: NonZeroUsize,
+    ) -> Result<Session> {
+        self.create(subject.into(), now, expires_at, Some(limit))
+    }
+
+    fn create(
+        &self,
+        subject: String,
+        now: u64,
+        expires_at: u64,
+        limit: Option<NonZeroUsize>,
+    ) -> Result<Session> {
         if !crate::principal::valid_label(&subject) || now >= expires_at {
             return Err(Error::InvalidInput);
         }
@@ -173,9 +195,116 @@ impl<P: StateProtection> FleetAuth<P> {
             if find(slots, record.key, &self.protection)?.is_some() {
                 return Err(Error::InvalidInput);
             }
-            insert(slots, record, now, &self.protection)
+            let mut live = match limit {
+                Some(_) => subject_sessions(
+                    slots,
+                    record.subject,
+                    now,
+                    &self.protection,
+                )?,
+                None => Vec::new(),
+            };
+            // Do not revoke anything if admission itself fails (e.g. full table).
+            insert(slots, record, now, &self.protection)?;
+            if let Some(limit) = limit {
+                live.sort_unstable_by_key(|session| {
+                    (session.record.created_at, session.index)
+                });
+                let excess = live.len().saturating_sub(limit.get() - 1);
+                for session in live.into_iter().take(excess) {
+                    let mut old = session.record;
+                    old.status = REVOKED;
+                    slots[session.index].store(
+                        old,
+                        session.index,
+                        &self.protection,
+                    )?;
+                }
+            }
+            Ok(())
         })?;
         Ok(self.handle(id, subject, record))
+    }
+
+    /// Revoke every live session of this subject in this realm/issuer.
+    /// Writers are serialized; readers observe each authenticated replacement.
+    pub fn revoke_subject_sessions(
+        &self,
+        subject: &str,
+        now: u64,
+    ) -> Result<usize> {
+        if !crate::principal::valid_label(subject) {
+            return Err(Error::InvalidInput);
+        }
+        self.table.write(|slots| {
+            let live = subject_sessions(
+                slots,
+                self.subject_tag(subject),
+                now,
+                &self.protection,
+            )?;
+            for session in &live {
+                let mut record = session.record;
+                record.status = REVOKED;
+                slots[session.index].store(
+                    record,
+                    session.index,
+                    &self.protection,
+                )?;
+            }
+            Ok(live.len())
+        })
+    }
+
+    /// Extend live subject sessions using the caller's declared policy.
+    /// The callback receives creation and current expiry times. Validate all
+    /// target horizons before writing; never resurrect or shorten a session.
+    pub fn extend_subject_sessions(
+        &self,
+        subject: &str,
+        now: u64,
+        horizon: impl Fn(u64, u64) -> u64,
+    ) -> Result<usize> {
+        if !crate::principal::valid_label(subject) {
+            return Err(Error::InvalidInput);
+        }
+        self.table.write(|slots| {
+            let live = subject_sessions(
+                slots,
+                self.subject_tag(subject),
+                now,
+                &self.protection,
+            )?;
+            let targets: Vec<_> = live
+                .into_iter()
+                .map(|session| {
+                    let target = horizon(
+                        session.record.created_at,
+                        session.record.expires_at,
+                    );
+                    (session, target)
+                })
+                .collect();
+            if targets.iter().any(|(session, target)| {
+                *target < session.record.expires_at || *target <= now
+            }) {
+                return Err(Error::InvalidInput);
+            }
+            let mut changed = 0;
+            for (session, target) in targets {
+                if target > session.record.expires_at {
+                    let mut record = session.record;
+                    record.expires_at = target;
+                    slots[session.index].store(
+                        record,
+                        session.index,
+                        &self.protection,
+                    )?;
+                    changed += 1;
+                }
+            }
+            Ok(changed)
+        })
     }
 
     /// Atomically publish revocation. Every subsequent validation rechecks the

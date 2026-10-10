@@ -54,6 +54,141 @@ fn claims(purpose: Purpose) -> Claims {
 }
 
 #[test]
+fn subject_session_operations_share_authority_and_preserve_other_subjects() {
+    let authority = authority();
+    let fleet = Arc::new(Fleet::join("subject", 1).unwrap());
+    let first = auth(fleet.clone(), &authority);
+    let peer = auth(fleet.clone(), &authority);
+    let expired = first.create_session("user:42", 50, 90).unwrap();
+    let oldest = first.create_session("user:42", 100, 200).unwrap();
+    let kept = first.create_session("user:42", 110, 210).unwrap();
+    let other = first.create_session("user:43", 110, 210).unwrap();
+    let token =
+        authority.issue_session(claims(Purpose::Access), &oldest).unwrap();
+    let validator = authority.validator(policy(Purpose::Access));
+    validator
+        .validate_cached(
+            token.expose(),
+            115,
+            &peer,
+            Duration::from_secs(60),
+            &peer,
+        )
+        .unwrap();
+    let newest = peer
+        .create_session_with_limit(
+            "user:42",
+            120,
+            220,
+            NonZeroUsize::new(2).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        validator.validate_cached(
+            token.expose(),
+            121,
+            &peer,
+            Duration::from_secs(60),
+            &peer
+        ),
+        Err(Error::Revoked)
+    );
+    assert!(first.session(kept.id(), "user:42", 121).is_ok());
+    assert!(first.session(newest.id(), "user:42", 121).is_ok());
+    assert!(first.session(expired.id(), "user:42", 121).is_err());
+    assert_eq!(
+        peer.extend_subject_sessions("user:42", 130, |created, current| {
+            current.max((created + 200).min(230))
+        }),
+        Ok(2)
+    );
+    assert_eq!(
+        first.session(kept.id(), "user:42", 131).unwrap().expires_at(),
+        230
+    );
+    assert_eq!(
+        first.session(other.id(), "user:43", 131).unwrap().expires_at(),
+        210
+    );
+    assert_eq!(peer.revoke_subject_sessions("missing", 131), Ok(0));
+    assert_eq!(peer.revoke_subject_sessions("user:42", 131), Ok(2));
+    assert_eq!(
+        first.session(kept.id(), "user:42", 132).map(|_| ()),
+        Err(Error::Revoked)
+    );
+    assert!(first.session(other.id(), "user:43", 132).is_ok());
+    assert_eq!(peer.extend_subject_sessions("user:42", 132, |_, _| 300), Ok(0));
+    let foreign_authority = Authority::new(
+        "other",
+        "login",
+        Keyring::new(1, [(1, SecretKey::from_bytes([7; 32]))]).unwrap(),
+    )
+    .unwrap();
+    let foreign = auth(fleet, &foreign_authority);
+    let foreign_session = foreign.create_session("user:43", 132, 230).unwrap();
+    first.revoke_subject_sessions("user:43", 133).unwrap();
+    assert!(foreign.session(foreign_session.id(), "user:43", 134).is_ok());
+}
+
+#[test]
+fn subject_extension_rejects_shortening_before_any_write() {
+    let authority = authority();
+    let state = auth(Arc::new(Fleet::join("subject", 1).unwrap()), &authority);
+    let first = state.create_session("user:42", 100, 200).unwrap();
+    let second = state.create_session("user:42", 110, 220).unwrap();
+    assert_eq!(
+        state.extend_subject_sessions("user:42", 120, |_, _| 210),
+        Err(Error::InvalidInput)
+    );
+    assert_eq!(
+        state.session(first.id(), "user:42", 121).unwrap().expires_at(),
+        200
+    );
+    assert_eq!(
+        state.session(second.id(), "user:42", 121).unwrap().expires_at(),
+        220
+    );
+}
+
+#[test]
+fn concurrent_bounded_logins_never_leave_excess_live_sessions() {
+    let authority = authority();
+    let state = Arc::new(auth(
+        Arc::new(Fleet::join("subject", 1).unwrap()),
+        &authority,
+    ));
+    let sessions = std::thread::scope(|threads| {
+        let joins: Vec<_> = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                threads.spawn(move || {
+                    state
+                        .create_session_with_limit(
+                            "user:42",
+                            100,
+                            200,
+                            NonZeroUsize::new(2).unwrap(),
+                        )
+                        .unwrap()
+                        .id()
+                })
+            })
+            .collect();
+        joins
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|id| state.session(**id, "user:42", 110).is_ok())
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn memory_backing_shares_only_the_supplied_fleet_and_checks_live_sessions() {
     let authority = authority();
     let fleet = Arc::new(Fleet::join("auth-memory", 1).unwrap());

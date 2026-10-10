@@ -511,6 +511,36 @@ pub(crate) fn find<P: StateProtection>(
     }
 }
 
+/// Enumerate one subject while the existing exclusive writer lock is held.
+/// Authenticate all occupied slots before making a bulk update.
+pub(crate) fn subject_sessions<P: StateProtection>(
+    slots: &[Slot],
+    subject: [u64; 4],
+    now: u64,
+    mac: &RecordProtection<P>,
+) -> Result<Vec<Snapshot>> {
+    let mut sessions = Vec::new();
+    for (index, slot) in slots.iter().enumerate() {
+        match slot.read_once()? {
+            Read::Empty => {}
+            Read::Changed => return Err(Error::PolicyUnavailable),
+            Read::Value(revision, wire) => {
+                let record = mac.decode(index, revision, &wire)?;
+                if record.status == SESSION
+                    && record.subject == subject
+                    && now < record.expires_at
+                {
+                    if now < record.created_at {
+                        return Err(Error::NotYetValid);
+                    }
+                    sessions.push(Snapshot { index, revision, record, wire });
+                }
+            }
+        }
+    }
+    Ok(sessions)
+}
+
 /// Caller has checked absence and holds the writer lock. Reclaims only expired
 /// state; no tombstone is removed early to admit another record.
 pub(crate) fn insert<P: StateProtection>(
