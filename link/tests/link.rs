@@ -225,3 +225,37 @@ async fn a_tokio_receiver_hears_lanes_claimed_and_released() {
     owner.inbox().release_lane(0).unwrap();
     owner.unlink().unwrap();
 }
+
+/// A process that holds no lane — a master — is woken by the same claims and
+/// releases, through a watcher slot that never shows up in the directory.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn a_watcher_without_a_lane_hears_lanes_claimed_and_released() {
+    let name = fleet_name("watch");
+    let master = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+    let worker = LinkSegment::open(&name, SPEC).unwrap();
+    let mut watcher = master.watch().unwrap();
+    assert_eq!(
+        master.inbox().watcher(watcher.slot()).unwrap(),
+        Some(std::process::id())
+    );
+
+    let waiting = tokio::spawn(async move {
+        let moved = watcher.next().await.unwrap();
+        (watcher, moved)
+    });
+    tokio::task::yield_now().await;
+    worker.inbox().claim_lane(0, "checkout", "worker", 1).unwrap();
+    let (mut watcher, claimed) = waiting.await.unwrap();
+    assert_eq!(claimed, master.inbox().directory());
+    assert!(master.inbox().serving("checkout").contains(&0));
+
+    worker.inbox().release_lane(0).unwrap();
+    assert_eq!(watcher.next().await.unwrap(), master.inbox().directory());
+    assert!(master.inbox().serving("checkout").is_empty());
+
+    let slot = watcher.slot();
+    drop(watcher);
+    assert_eq!(master.inbox().watcher(slot).unwrap(), None);
+    master.unlink().unwrap();
+}

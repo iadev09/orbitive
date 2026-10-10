@@ -32,6 +32,12 @@ again before awaiting readiness, so a write that crosses either boundary is
 not lost. Cancelling the future consumes no frame: the next call checks SHM
 first. Blocking integrations may continue to use the lane's wake word.
 
+`LinkSegment::watch()` gives a process that holds no lane a
+`DirectoryWatcher`, woken by the same claims and releases. Being woken is not
+being connected: the watcher takes a slot of its own, serves nothing and never
+appears in the directory. Why it is shaped this way is in
+[DIRECTORY_WATCH.md](DIRECTORY_WATCH.md).
+
 The crate deliberately defines no application frame. HTTP heads, invocation
 envelopes, resource leases and routing policy belong to adapters. It also does
 not own an upstream connection pool: reoffering retains bounded SHM capacity,

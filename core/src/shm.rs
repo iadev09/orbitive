@@ -840,8 +840,50 @@ pub fn try_hold_lane(
     Err(error)
 }
 
-/// Every lock file beside segment `shm_name` of `uid`: the region's own and
-/// one per lane that was ever held ([`try_hold_lane`]). What removes a segment
+/// One process's hold on one directory-watcher slot of a segment: the same
+/// kernel-released `flock` as a [`LaneHold`], on a lock file of its own.
+///
+/// A watcher is not a lane. It serves nothing and takes no frames; it only
+/// wants to be woken when the lane directory moves. Its slot is still owned
+/// the way a lane is, so a slot a dead process left can be taken by the next
+/// one without a timeout.
+pub struct WatcherHold {
+    lock_fd: OwnedFd,
+}
+
+impl Drop for WatcherHold {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.lock_fd.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Take watcher slot `slot` of segment `shm_name`, if no live process holds
+/// it.
+///
+/// `Ok(None)` means a process holding it is alive. Never waits.
+pub fn try_hold_watcher(
+    shm_name: &str,
+    slot: usize,
+) -> io::Result<Option<WatcherHold>> {
+    let name = format!("{}.watch{slot}", shm_name.trim_start_matches('/'));
+    let lock_fd = open_lock_file(&lock_file_path(&name))?;
+    // SAFETY: `lock_fd` is an open descriptor owned by this call.
+    let rc = unsafe {
+        libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+    };
+    if rc == 0 {
+        return Ok(Some(WatcherHold { lock_fd }));
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(error)
+}
+
+/// Every lock file beside segment `shm_name` of `uid`: the region's own, one
+/// per lane that was ever held ([`try_hold_lane`]) and one per watcher slot
+/// ([`try_hold_watcher`]). What removes a segment
 /// removes these with it; an unlocked one left behind is harmless, but it is
 /// one more file per lane for every segment that ever existed.
 pub fn companion_lock_files(
@@ -851,6 +893,7 @@ pub fn companion_lock_files(
     let base = shm_name.trim_start_matches('/');
     let own = format!("{base}.lock");
     let lane = format!("{base}.lane");
+    let watch = format!("{base}.watch");
     let dir = lock_dir_for_uid(uid);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -865,7 +908,10 @@ pub fn companion_lock_files(
         let Some(file) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if file == own || (file.starts_with(&lane) && file.ends_with(".lock")) {
+        if file == own
+            || ((file.starts_with(&lane) || file.starts_with(&watch))
+                && file.ends_with(".lock"))
+        {
             found.push(entry.path());
         }
     }

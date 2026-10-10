@@ -47,13 +47,17 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 5: a directory-watcher table follows the lanes. Being woken when the
+/// directory moves no longer requires holding a lane, so a process that serves
+/// nothing (a master) can watch it too.
+///
 /// 4: a lane carries a reactor-listener word for descriptor-native async wake.
 ///
 /// 3: a claimed lane's owner holds the lane's lock for as long as it lives, so
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 4;
+pub(crate) const INBOX_VERSION: u32 = 5;
 
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +156,32 @@ pub(crate) struct LaneHeader {
 // Two cache lines exactly: the identity grew into padding, not past it.
 const _: () = assert!(size_of::<LaneHeader>() == 128);
 
+/// One directory watcher's slot: a wake word and a reactor flag, nothing else.
+///
+/// A watcher is not a lane. It serves no name, takes no frames and never
+/// appears in the directory; it is only told when the directory moves, the
+/// way a cell tells whoever waits on it. Every slot is woken on every
+/// directory change and only one that is armed is rung, so the writer never
+/// learns who is listening and nobody is elected to pass the news on. A
+/// watcher that was not armed at that moment sees the directory generation
+/// moved on its next look; the generation is the truth, the wake a hint.
+///
+/// As many slots as lanes: every process that can join the fleet can watch it
+/// instead.
+#[repr(C, align(64))]
+pub(crate) struct WatcherHeader {
+    /// Bumped on every directory change.
+    pub(crate) changes: AtomicU32,
+    /// Set while the watcher's Tokio task waits on its named socket. Cleared
+    /// by the waker before it rings, so changes in a burst ring once.
+    pub(crate) reactor: AtomicU32,
+    /// The process that holds the slot, for the operator. Zero when free.
+    pub(crate) pid: AtomicU32,
+    _padding: [u8; 52],
+}
+
+const _: () = assert!(size_of::<WatcherHeader>() == 64);
+
 /// One frame's slot. `seq` is the whole protocol; `len` and the payload are
 /// only read once `seq` says the slot is filled.
 #[repr(C, align(64))]
@@ -195,12 +225,15 @@ impl InboxGeometry {
             + self.capacity * (size_of::<SlotHeader>() + self.payload_capacity)
     }
 
-    /// What a fleet's whole table occupies.
+    /// What a fleet's whole table occupies: the header, every lane, then one
+    /// watcher slot per lane. Watchers sit after the lanes so a lane's offset
+    /// and alignment are what they were before watchers existed.
     pub const fn segment_bytes(
         &self,
         fleet_capacity: usize,
     ) -> usize {
-        size_of::<TableHeader>() + fleet_capacity * self.lane_bytes()
+        size_of::<TableHeader>()
+            + fleet_capacity * (self.lane_bytes() + size_of::<WatcherHeader>())
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -925,9 +958,10 @@ impl Inbox {
         self.announce_directory();
     }
 
-    /// Wake every claimed lane once: the directory moved. A reader woken with
-    /// no frame compares [`Inbox::directory`] with the value it last saw, so
-    /// a process learns who joined or left from the lane it already reads,
+    /// Wake every claimed lane and every watcher once: the directory moved.
+    /// A reader woken with no frame compares [`Inbox::directory`] with the
+    /// value it last saw, so a process learns who joined or left from the
+    /// lane it already reads, or from its watcher slot when it holds no lane,
     /// with no thread, registry or interval of its own. Claims and releases
     /// are rare; traffic never comes through here.
     fn announce_directory(&self) {
@@ -936,6 +970,25 @@ impl Inbox {
             if lane.consumers.load(Ordering::Acquire) != 0 {
                 self.wake(lane_index, lane);
             }
+        }
+        for slot in 0..self.lanes {
+            self.wake_watcher(slot);
+        }
+    }
+
+    /// Bump a watcher's word and ring it if it is waiting. A free slot or one
+    /// whose holder is not waiting costs one atomic add.
+    fn wake_watcher(
+        &self,
+        slot: usize,
+    ) {
+        let watcher = self.watcher_header(slot);
+        watcher.changes.fetch_add(1, Ordering::SeqCst);
+        #[cfg(unix)]
+        if watcher.reactor.swap(0, Ordering::SeqCst) != 0
+            && let Some(bell) = &self.bell
+        {
+            bell.ring(crate::bell::Doorbell::Watcher(slot));
         }
     }
 
@@ -957,7 +1010,7 @@ impl Inbox {
         if lane.reactor.swap(0, Ordering::SeqCst) != 0
             && let Some(bell) = &self.bell
         {
-            bell.ring(lane_index);
+            bell.ring(crate::bell::Doorbell::Lane(lane_index));
         }
     }
 
@@ -980,7 +1033,9 @@ impl Inbox {
             .bell
             .as_ref()
             .ok_or(Error::Malformed("the inbox has no reactor bell"))?;
-        let socket = bell.bind(lane_index).map_err(Error::Io)?;
+        let socket = bell
+            .bind(crate::bell::Doorbell::Lane(lane_index))
+            .map_err(Error::Io)?;
         tokio::net::UnixDatagram::from_std(socket).map_err(Error::Io)
     }
 
@@ -991,7 +1046,7 @@ impl Inbox {
     ) {
         self.disarm_receiver(lane_index);
         if let Some(bell) = &self.bell {
-            bell.unbind(lane_index);
+            bell.unbind(crate::bell::Doorbell::Lane(lane_index));
         }
     }
 
@@ -1021,6 +1076,100 @@ impl Inbox {
     ) {
         if lane_index < self.lanes {
             self.lane_header(lane_index).reactor.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// Take a watcher slot whose hold the caller has just won: clear what a
+    /// previous holder left and bind its socket.
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn bind_watcher(
+        &self,
+        slot: usize,
+    ) -> Result<tokio::net::UnixDatagram> {
+        self.check_lane(slot)?;
+        let bell = self
+            .bell
+            .as_ref()
+            .ok_or(Error::Malformed("the inbox has no reactor bell"))?;
+        let watcher = self.watcher_header(slot);
+        watcher.reactor.store(0, Ordering::SeqCst);
+        let socket = bell
+            .bind(crate::bell::Doorbell::Watcher(slot))
+            .map_err(Error::Io)?;
+        watcher.pid.store(std::process::id(), Ordering::Release);
+        tokio::net::UnixDatagram::from_std(socket).map_err(Error::Io)
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn unbind_watcher(
+        &self,
+        slot: usize,
+    ) {
+        if slot >= self.lanes {
+            return;
+        }
+        let watcher = self.watcher_header(slot);
+        watcher.reactor.store(0, Ordering::SeqCst);
+        watcher.pid.store(0, Ordering::Release);
+        if let Some(bell) = &self.bell {
+            bell.unbind(crate::bell::Doorbell::Watcher(slot));
+        }
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn watcher_generation(
+        &self,
+        slot: usize,
+    ) -> Result<u32> {
+        self.check_lane(slot)?;
+        Ok(self.watcher_header(slot).changes.load(Ordering::SeqCst))
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn arm_watcher(
+        &self,
+        slot: usize,
+    ) -> Result<()> {
+        self.check_lane(slot)?;
+        self.watcher_header(slot).reactor.store(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn disarm_watcher(
+        &self,
+        slot: usize,
+    ) {
+        if slot < self.lanes {
+            self.watcher_header(slot).reactor.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// The process holding this watcher slot, if one said.
+    pub fn watcher(
+        &self,
+        slot: usize,
+    ) -> Result<Option<u32>> {
+        self.check_lane(slot)?;
+        Ok(match self.watcher_header(slot).pid.load(Ordering::Acquire) {
+            0 => None,
+            pid => Some(pid),
+        })
+    }
+
+    fn watcher_header(
+        &self,
+        slot: usize,
+    ) -> &WatcherHeader {
+        unsafe {
+            &*self
+                .base
+                .add(
+                    size_of::<TableHeader>()
+                        + self.lanes * self.geometry.lane_bytes()
+                        + slot * size_of::<WatcherHeader>(),
+                )
+                .cast::<WatcherHeader>()
         }
     }
 

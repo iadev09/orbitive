@@ -29,6 +29,8 @@ mod inbox;
 mod receiver;
 #[cfg(unix)]
 mod segment;
+#[cfg(all(unix, feature = "tokio"))]
+mod watcher;
 
 pub use body::LinkBodies;
 pub use inbox::{
@@ -38,6 +40,8 @@ pub use inbox::{
 pub use receiver::{InboxReceiver, Received};
 #[cfg(unix)]
 pub use segment::{Joined, LinkSegment, LinkSegmentHandle, check_name};
+#[cfg(all(unix, feature = "tokio"))]
+pub use watcher::DirectoryWatcher;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -89,6 +93,7 @@ impl LinkSpec {
 pub enum Error {
     InboxFull,
     NoLane,
+    NoWatcher,
     FrameTooLarge,
     Malformed(&'static str),
     InvalidName {
@@ -119,6 +124,9 @@ impl fmt::Display for Error {
             Self::NoLane => {
                 formatter.write_str("every lane in the named fleet is held")
             }
+            Self::NoWatcher => formatter.write_str(
+                "every directory watcher slot in the named fleet is held",
+            ),
             Self::FrameTooLarge => {
                 formatter.write_str("the frame does not fit in one inbox slot")
             }

@@ -1,4 +1,4 @@
-//! Named descriptor wake for an inbox lane.
+//! Named descriptor wake for an inbox lane or a directory watcher.
 //!
 //! Frames remain in shared memory. The datagram contains one meaningless
 //! byte and exists only so an async runtime can sleep on a descriptor instead
@@ -6,6 +6,23 @@
 
 use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
+
+/// Who a datagram wakes. Lanes and watchers have separate addresses because a
+/// named socket has exactly one binder.
+#[derive(Clone, Copy)]
+pub(crate) enum Doorbell {
+    Lane(usize),
+    Watcher(usize),
+}
+
+impl Doorbell {
+    fn suffix(self) -> String {
+        match self {
+            Self::Lane(lane) => lane.to_string(),
+            Self::Watcher(slot) => format!("w{slot}"),
+        }
+    }
+}
 
 pub(crate) struct Bell {
     prefix: String,
@@ -25,33 +42,41 @@ impl Bell {
     #[cfg(target_os = "linux")]
     fn address(
         &self,
-        lane: usize,
+        door: Doorbell,
     ) -> io::Result<SocketAddr> {
         use std::os::linux::net::SocketAddrExt;
-        SocketAddr::from_abstract_name(format!("{}.{lane}", self.prefix))
+        SocketAddr::from_abstract_name(format!(
+            "{}.{}",
+            self.prefix,
+            door.suffix()
+        ))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn path(
         &self,
-        lane: usize,
+        door: Doorbell,
     ) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!("/tmp/{}.{lane}", self.prefix))
+        std::path::PathBuf::from(format!(
+            "/tmp/{}.{}",
+            self.prefix,
+            door.suffix()
+        ))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn address(
         &self,
-        lane: usize,
+        door: Doorbell,
     ) -> io::Result<SocketAddr> {
-        SocketAddr::from_pathname(self.path(lane))
+        SocketAddr::from_pathname(self.path(door))
     }
 
     pub(crate) fn ring(
         &self,
-        lane: usize,
+        door: Doorbell,
     ) {
-        if let Ok(address) = self.address(lane) {
+        if let Ok(address) = self.address(door) {
             let _ = self.sender.send_to_addr(&[1], &address);
         }
     }
@@ -59,12 +84,12 @@ impl Bell {
     #[cfg(feature = "tokio")]
     pub(crate) fn bind(
         &self,
-        lane: usize,
+        door: Doorbell,
     ) -> io::Result<UnixDatagram> {
         #[cfg(not(target_os = "linux"))]
         {
             use std::os::unix::fs::DirBuilderExt;
-            let path = self.path(lane);
+            let path = self.path(door);
             if let Some(directory) = path.parent() {
                 match std::fs::DirBuilder::new().mode(0o700).create(directory) {
                     Err(error)
@@ -77,7 +102,7 @@ impl Bell {
             }
             let _ = std::fs::remove_file(&path);
         }
-        let socket = UnixDatagram::bind_addr(&self.address(lane)?)?;
+        let socket = UnixDatagram::bind_addr(&self.address(door)?)?;
         socket.set_nonblocking(true)?;
         Ok(socket)
     }
@@ -85,11 +110,11 @@ impl Bell {
     #[cfg(feature = "tokio")]
     pub(crate) fn unbind(
         &self,
-        lane: usize,
+        door: Doorbell,
     ) {
         #[cfg(not(target_os = "linux"))]
-        let _ = std::fs::remove_file(self.path(lane));
+        let _ = std::fs::remove_file(self.path(door));
         #[cfg(target_os = "linux")]
-        let _ = lane;
+        let _ = door;
     }
 }

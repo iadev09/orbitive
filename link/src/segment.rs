@@ -6,6 +6,8 @@ use std::sync::Arc;
 #[cfg(feature = "tokio")]
 use std::sync::Mutex;
 
+#[cfg(feature = "tokio")]
+use orbit_core::shm::try_hold_watcher;
 use orbit_core::shm::{LaneHold, ShmRegion, ring_segment_name, try_hold_lane};
 
 use super::{Error, Inbox, LinkSpec, Reclaimed, Result};
@@ -142,6 +144,26 @@ impl LinkSegment {
                 Err(error)
             }
         }
+    }
+
+    /// Watch the lane directory without holding a lane.
+    ///
+    /// For a process that serves nothing but needs to know who joined or left
+    /// — a master whose workers hold the lanes. The watcher takes the first
+    /// free slot; a slot whose holder died is free, because the kernel
+    /// released its hold. It is woken by the same claim and release that wake
+    /// every lane, and never appears in the directory itself.
+    #[cfg(feature = "tokio")]
+    pub fn watch(self: &Arc<Self>) -> Result<crate::DirectoryWatcher> {
+        for slot in 0..self.inbox.lanes() {
+            let Some(hold) =
+                try_hold_watcher(&self.name, slot).map_err(Error::Io)?
+            else {
+                continue;
+            };
+            return crate::DirectoryWatcher::bind(Arc::clone(self), slot, hold);
+        }
+        Err(Error::NoWatcher)
     }
 
     #[cfg(feature = "tokio")]
