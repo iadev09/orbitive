@@ -28,6 +28,74 @@ fn pattern(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_death_wakes_a_quiet_writer_without_touching_a_sibling() {
+    use std::future::poll_fn;
+
+    let name = fleet_name("death");
+    let table = |node, incarnation| {
+        Streams::new(
+            Arc::new(Fleet::join_shm_as(name, 3, NodeId::new(node)).unwrap()),
+            Incarnation::new(incarnation),
+        )
+        .unwrap()
+    };
+    let owner = table(0, 10);
+    owner.reset_all();
+    let peer = table(1, 11);
+    let sibling = table(2, 11);
+    let (origin, ticket) = owner.create().unwrap();
+    let _remote = peer.open(ticket).unwrap();
+    let (_read, write) = origin.split();
+    let (mut other, ticket) = owner.create().unwrap();
+    let mut other_remote = sibling.open(ticket).unwrap();
+
+    let (parked, ready) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn(async move {
+        let mut parked = Some(parked);
+        poll_fn(|cx| {
+            let result = write.poll_peer_dead(cx);
+            if result.is_pending()
+                && let Some(parked) = parked.take()
+            {
+                parked.send(()).unwrap();
+            }
+            result
+        })
+        .await
+        .unwrap();
+    });
+    ready.await.unwrap();
+    owner.node_dead(NodeId::new(1), Incarnation::new(12));
+    assert!(!waiter.is_finished(), "a different incarnation is not this peer");
+    assert!(
+        Streams::node_dead_in_shm(
+            name,
+            3,
+            orbit_stream::StreamSpec::DEFAULT,
+            NodeId::new(1),
+            Incarnation::new(11)
+        )
+        .unwrap()
+    );
+    waiter.await.unwrap();
+
+    other.write_all(b"still live").await.unwrap();
+    let mut bytes = [0; 10];
+    other_remote.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(&bytes, b"still live");
+    drop((_remote, peer));
+    let replacement = table(1, 12);
+    let (mut fresh, ticket) = owner.create().unwrap();
+    let mut fresh_remote = replacement.open(ticket).unwrap();
+    owner.node_dead(NodeId::new(1), Incarnation::new(11));
+    fresh.write_all(b"new").await.unwrap();
+    let mut bytes = [0; 3];
+    fresh_remote.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(&bytes, b"new");
+    owner.unlink().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplex_copies_across_two_nodes() {
     let name = fleet_name("d");
     let owner = Streams::new(

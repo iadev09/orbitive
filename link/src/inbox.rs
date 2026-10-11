@@ -639,10 +639,25 @@ impl Inbox {
         lane_index: usize,
     ) -> Result<Option<u32>> {
         self.check_lane(lane_index)?;
+        if self.consumers(lane_index)? == 0 {
+            return Ok(None);
+        }
         Ok(match self.lane_header(lane_index).pid.load(Ordering::Acquire) {
             0 => None,
             pid => Some(pid),
         })
+    }
+
+    /// The last process incarnation on a lane, including one withdrawn while
+    /// its accepted exchanges drain. Not a routing or liveness observation.
+    pub fn last_owner(
+        &self,
+        lane_index: usize,
+    ) -> Result<Option<(u32, u64)>> {
+        self.check_lane(lane_index)?;
+        let lane = self.lane_header(lane_index);
+        let pid = lane.pid.load(Ordering::Acquire);
+        Ok((pid != 0).then(|| (pid, lane.incarnation.load(Ordering::Acquire))))
     }
 
     /// What serves this lane's name, if its owner said.
@@ -752,7 +767,9 @@ impl Inbox {
         lane.consumers.store(0, Ordering::Release);
         lane.service_len.store(0, Ordering::Release);
         lane.role_len.store(0, Ordering::Release);
-        lane.pid.store(0, Ordering::Release);
+        // Keep the ownership stamp until the next claim. Withdrawing from
+        // routing is not death: accepted streams may still be draining. A
+        // later confirmed process exit must still be able to end those sides.
         self.clear_interest(lane_index);
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
         self.wake(lane_index, lane);

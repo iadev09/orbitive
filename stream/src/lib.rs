@@ -53,8 +53,8 @@ mod wake;
 
 use layout::{
     Direction, FLAG_FIN, FLAG_READER_GONE, FLAG_RESET, GENERATION_MASK,
-    SIDE_CLAIMED, SIDE_FREE, SIDE_RELEASED, SLOT_BITS, SLOT_EMPTY, SLOT_LIVE,
-    SLOT_MASK, Slot,
+    SIDE_CLAIMED, SIDE_DEAD, SIDE_FREE, SIDE_RELEASED, SLOT_BITS, SLOT_EMPTY,
+    SLOT_LIVE, SLOT_MASK, Slot,
 };
 use orbit_core::NodeId;
 #[cfg(any(
@@ -441,6 +441,42 @@ pub struct Streams {
 }
 
 impl Streams {
+    /// Report one confirmed death to an existing shared table without
+    /// claiming an endpoint, superseding a node, or installing a driver.
+    /// Returns false when the table does not exist; never creates it then.
+    #[cfg(unix)]
+    pub fn node_dead_in_shm(
+        name: &str,
+        fleet_capacity: u16,
+        spec: StreamSpec,
+        node: NodeId,
+        incarnation: Incarnation,
+    ) -> Result<bool> {
+        spec.validate()?;
+        if node.get() >= fleet_capacity {
+            return Err(Error::Malformed(
+                "recovery node is outside the fleet".into(),
+            ));
+        }
+        let segment = orbit_core::shm::ring_segment_name(name, spec.kind);
+        match orbit_core::shm::ShmRegion::validate_existing(
+            &segment,
+            segment_size_for(fleet_capacity, spec),
+        )? {
+            orbit_core::shm::ShmValidation::Missing => Ok(false),
+            orbit_core::shm::ShmValidation::Valid { .. } => {
+                table::recover_shm(
+                    name,
+                    fleet_capacity,
+                    spec,
+                    node.get(),
+                    incarnation.get(),
+                )?;
+                Ok(true)
+            }
+        }
+    }
+
     /// Open the fleet's table as this process's incarnation. Every side
     /// this process claims is stamped with it, and [`Streams::node_dead`]
     /// for the same node and incarnation is what ends those sides.
@@ -1580,6 +1616,41 @@ pub struct WriteHalf {
 }
 
 impl WriteHalf {
+    /// Wait for the peer's confirmed node death, even while no bytes are
+    /// being produced. Ordinary FIN and endpoint release are not death.
+    ///
+    /// Shares the writer's readiness registration: poll this from the same
+    /// task as writes, not from a second concurrent writer task.
+    pub fn poll_peer_dead(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+        let slot = match self.handle.slot() {
+            Ok(slot) => slot,
+            Err(error) => return std::task::Poll::Ready(Err(error)),
+        };
+        let peer = &slot.claimed[1 - self.handle.side.index()];
+        if peer.load(Ordering::SeqCst) == SIDE_DEAD {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        let interest = Interest {
+            direction: self.handle.side.write_direction(),
+            writer: true,
+        };
+        if let Err(error) =
+            self.handle.table.register(self.handle.index, interest, cx.waker())
+        {
+            return std::task::Poll::Ready(Err(error));
+        }
+        // node_dead always rings both directions. Check after registering so
+        // a death racing the first check cannot strand this task.
+        if peer.load(Ordering::SeqCst) == SIDE_DEAD {
+            std::task::Poll::Ready(Ok(()))
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+
     pub fn id(&self) -> StreamId {
         self.handle.id
     }

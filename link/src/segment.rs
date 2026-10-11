@@ -17,6 +17,7 @@ pub struct LinkSegment {
     region: ShmRegion,
     inbox: Inbox,
     name: String,
+    fleet_name: String,
     spec: LinkSpec,
     #[cfg(feature = "tokio")]
     receivers: Mutex<HashSet<usize>>,
@@ -72,6 +73,7 @@ impl LinkSegment {
             region,
             inbox,
             name: segment_name,
+            fleet_name: name.to_owned(),
             spec,
             #[cfg(feature = "tokio")]
             receivers: Mutex::new(HashSet::new()),
@@ -88,14 +90,41 @@ impl LinkSegment {
     ) -> Result<Joined> {
         let mut reclaimed = Vec::new();
         for lane in 0..self.inbox.lanes() {
-            if let Some(lane) = self.reclaim_if_gone(lane)? {
+            let mut recovery = Ok(());
+            if let Some(lane) = self.reclaim_if_gone_with(lane, |gone| {
+                recovery = self.recover_streams(gone.lane, gone.incarnation);
+            })? {
+                recovery?;
                 reclaimed.push(lane);
             }
         }
         let (lane, hold) =
-            self.inbox
-                .join(service, role, incarnation, |lane| self.hold(lane))?;
+            self.inbox.join(service, role, incarnation, |lane| {
+                let Some(hold) = self.hold(lane)? else { return Ok(None) };
+                // A withdrawn owner may have died during drain. End its sides
+                // under the hold before its stamp is replaced by the new claim.
+                if let Some((_, previous)) = self.inbox.last_owner(lane)? {
+                    self.recover_streams(lane, previous)?;
+                }
+                Ok(Some(hold))
+            })?;
         Ok(Joined { lane, hold, reclaimed })
+    }
+
+    fn recover_streams(
+        &self,
+        lane: usize,
+        incarnation: u64,
+    ) -> Result<()> {
+        orbit_stream::Streams::node_dead_in_shm(
+            &self.fleet_name,
+            self.spec.fleet_capacity,
+            self.spec.streams,
+            orbit_core::NodeId::new(lane as u16),
+            orbit_stream::Incarnation::new(incarnation),
+        )
+        .map(|_| ())
+        .map_err(Error::Stream)
     }
 
     /// Take back `lane` if it is claimed and its kernel hold is free: its
@@ -111,13 +140,58 @@ impl LinkSegment {
         &self,
         lane: usize,
     ) -> Result<Option<Reclaimed>> {
+        self.reclaim_if_gone_with(lane, |_| {})
+    }
+
+    /// Run resource recovery while the reclaimed lane is still kernel-held,
+    /// before another participant can publish a replacement on that index.
+    pub fn reclaim_if_gone_with(
+        &self,
+        lane: usize,
+        recover: impl FnOnce(&Reclaimed),
+    ) -> Result<Option<Reclaimed>> {
         if self.inbox.consumers(lane)? == 0 {
             return Ok(None);
         }
         match self.hold(lane)? {
-            Some(_gone) => self.inbox.reclaim(lane),
+            Some(_gone) => {
+                let gone = self.inbox.reclaim(lane)?;
+                if let Some(gone) = &gone {
+                    recover(gone);
+                }
+                Ok(gone)
+            }
             None => Ok(None),
         }
+    }
+
+    /// Recover only lanes last owned by this exact process incarnation.
+    /// The caller has observed process exit; the kernel hold additionally
+    /// fences this scan against a concurrent claim. Withdrawn lanes retain
+    /// their stamp so a process dying during graceful drain is covered too.
+    pub fn reclaim_process(
+        &self,
+        pid: u32,
+        incarnation: u64,
+        mut recover: impl FnMut(&Reclaimed),
+    ) -> Result<Vec<Reclaimed>> {
+        let mut reclaimed = Vec::new();
+        for lane in 0..self.inbox.lanes() {
+            if self.inbox.last_owner(lane)? != Some((pid, incarnation)) {
+                continue;
+            }
+            let Some(_hold) = self.hold(lane)? else { continue };
+            if self.inbox.last_owner(lane)? != Some((pid, incarnation)) {
+                continue;
+            }
+            if self.inbox.consumers(lane)? != 0 {
+                self.inbox.release_lane(lane)?;
+            }
+            let gone = Reclaimed { lane, pid, incarnation };
+            recover(&gone);
+            reclaimed.push(gone);
+        }
+        Ok(reclaimed)
     }
 
     fn hold(

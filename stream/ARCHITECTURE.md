@@ -96,6 +96,18 @@ doorbell stops counting as listening only if its recorded incarnation
 matches, so a replacement process under the same node id is untouched. A
 side that `Handle::drop` finds already DEAD is not released twice.
 
+`WriteHalf::poll_peer_dead` registers the existing writer interest while an
+adapter is waiting for its own source to produce bytes. It observes only
+confirmed DEAD, not ordinary FIN or release; node death always rings both
+directions, including an empty ring. Check/register/check prevents a lost
+death wake without a timer. This interest belongs to the writer's task, not
+to a concurrent second writer.
+
+`Streams::node_dead_in_shm` is management recovery without endpoint ownership.
+It validates an existing segment, reuses a compatible local mapping when one
+exists, otherwise opens an uncached temporary view with no readiness driver.
+It does not supersede any live node or replace its local incarnation.
+
 ## Offers
 
 Discovery inside the segment: `offer` sets the slot's bit in the target

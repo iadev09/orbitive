@@ -166,6 +166,88 @@ fn a_join_reclaims_the_exact_dead_incarnation_and_ends_its_streams() {
     live_bodies.unlink().unwrap();
 }
 
+#[test]
+fn process_recovery_is_fenced_and_covers_withdrawn_lanes() {
+    let name = fleet_name("exit");
+    let held = Scratch::segment(&name);
+    let live = held.segment.join("checkout", "worker", 10).unwrap();
+    let gone = held.segment.join("checkout", "worker", 20).unwrap();
+    let pid = std::process::id();
+    held.segment.inbox().release_lane(gone.lane).unwrap();
+    assert_eq!(held.segment.inbox().owner(gone.lane).unwrap(), None);
+    assert_eq!(
+        held.segment.inbox().last_owner(gone.lane).unwrap(),
+        Some((pid, 20))
+    );
+    assert!(
+        held.segment
+            .reclaim_process(pid, 20, |_| panic!("live hold"))
+            .unwrap()
+            .is_empty()
+    );
+    drop(gone.hold);
+    assert!(
+        held.segment
+            .reclaim_process(pid, 21, |_| panic!("wrong incarnation"))
+            .unwrap()
+            .is_empty()
+    );
+    let dead = held
+        .segment
+        .reclaim_process(pid, 20, |dead| {
+            // A replacement cannot steal the identity while stream cleanup runs.
+            assert_eq!(dead.lane, gone.lane);
+            assert!(
+                held.segment
+                    .reclaim_process(pid, 20, |_| panic!("reentrant recovery"))
+                    .unwrap()
+                    .is_empty()
+            );
+        })
+        .unwrap();
+    assert_eq!(dead.len(), 1);
+    assert_eq!(held.segment.inbox().consumers(live.lane).unwrap(), 1);
+    let replacement = held.segment.join("checkout", "worker", 30).unwrap();
+    assert_eq!(replacement.lane, gone.lane);
+    assert!(
+        held.segment
+            .reclaim_process(pid, 20, |_| panic!("replacement"))
+            .unwrap()
+            .is_empty()
+    );
+    held.segment.inbox().release_lane(live.lane).unwrap();
+    held.segment.inbox().release_lane(replacement.lane).unwrap();
+    drop((live.hold, replacement.hold));
+}
+
+#[test]
+fn joining_a_withdrawn_lane_recovers_before_reusing_the_same_incarnation() {
+    let name = fleet_name("drain");
+    let held = Scratch::segment(&name);
+    let live = held.segment.join("checkout", "worker", 10).unwrap();
+    let gone = held.segment.join("checkout", "worker", 20).unwrap();
+    let local = LinkBodies::for_name(&name, live.lane, 10, SPEC).unwrap();
+    let remote = LinkBodies::for_name(&name, gone.lane, 20, SPEC).unwrap();
+    let (old, ticket) = local.create().unwrap();
+    let old_remote = remote.accept(ticket).unwrap();
+    held.segment.inbox().release_lane(gone.lane).unwrap();
+    drop(gone.hold);
+
+    let next = held.segment.join("checkout", "worker", 20).unwrap();
+    assert_eq!(next.lane, gone.lane);
+    let mut bytes = [0; 1];
+    assert!(matches!(
+        old.try_read(&mut bytes),
+        Err(orbit_stream::Error::Reset)
+    ));
+    drop((old, old_remote));
+    let (fresh, ticket) = local.create().unwrap();
+    let fresh_remote = remote.accept(ticket).unwrap();
+    fresh.blocking_write_all(b"x").unwrap();
+    assert_eq!(fresh_remote.blocking_read_chunk(1).unwrap().as_ref(), b"x");
+    local.unlink().unwrap();
+}
+
 #[cfg(feature = "tokio")]
 #[tokio::test(flavor = "current_thread")]
 async fn a_tokio_receiver_observes_queued_and_reactor_woken_frames() {

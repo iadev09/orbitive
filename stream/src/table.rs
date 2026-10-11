@@ -655,6 +655,52 @@ enum Key {
 static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Recovery has no allocation identity of its own. Reuse any local mapping
+/// of this segment, or attach a temporary view without starting a driver.
+#[cfg(unix)]
+pub(crate) fn recover_shm(
+    name: &str,
+    fleet_capacity: u16,
+    spec: StreamSpec,
+    node: u16,
+    incarnation: u64,
+) -> Result<()> {
+    let segment = ring_segment_name(name, spec.kind);
+    let held =
+        lock_unpoisoned(&TABLES).iter().find_map(|(key, table)| match key {
+            Key::Shm(mapped, _) if mapped == &segment => table.upgrade(),
+            _ => None,
+        });
+    let table = match held {
+        Some(table) => {
+            if table.geometry.fleet_capacity != usize::from(fleet_capacity)
+                || table.geometry.lane_capacity != spec.lane_capacity
+                || table.geometry.buffer_bytes != spec.buffer_bytes
+            {
+                return Err(Error::Malformed(
+                    "recovery stream geometry differs".into(),
+                ));
+            }
+            table
+        }
+        None => {
+            let fleet = Arc::new(
+                Fleet::join_shm_as(
+                    name,
+                    fleet_capacity,
+                    orbit_core::NodeId::ZERO,
+                )
+                .map_err(|error| {
+                    Error::Io(std::io::Error::other(error.to_string()))
+                })?,
+            );
+            open_inner(&fleet, Incarnation::new(0), spec, true)?
+        }
+    };
+    table.node_dead(node, incarnation);
+    Ok(())
+}
+
 /// The table `spec` names for `fleet`, shared by every handle in this
 /// process. The kind is part of the identity in both backings: two specs
 /// are two tables, in one process as in the fleet.
@@ -662,6 +708,15 @@ pub(crate) fn open(
     fleet: &Arc<Fleet>,
     incarnation: Incarnation,
     spec: StreamSpec,
+) -> Result<Arc<Table>> {
+    open_inner(fleet, incarnation, spec, false)
+}
+
+fn open_inner(
+    fleet: &Arc<Fleet>,
+    incarnation: Incarnation,
+    spec: StreamSpec,
+    recovery: bool,
 ) -> Result<Arc<Table>> {
     if !crate::waits_supported() {
         return Err(Error::Io(std::io::Error::new(
@@ -685,7 +740,7 @@ pub(crate) fn open(
     let mut tables = lock_unpoisoned(&TABLES);
     tables.retain(|_, table| table.strong_count() > 0);
     if let Some(table) = tables.get(&key).and_then(Weak::upgrade) {
-        if table.incarnation != incarnation.get() {
+        if !recovery && table.incarnation != incarnation.get() {
             return Err(Error::Malformed(format!(
                 "this process already opened the stream table as incarnation {}",
                 table.incarnation
@@ -746,7 +801,9 @@ pub(crate) fn open(
         },
         readiness: std::sync::OnceLock::new(),
     });
-    tables.insert(key, Arc::downgrade(&table));
+    if !recovery {
+        tables.insert(key, Arc::downgrade(&table));
+    }
     Ok(table)
 }
 

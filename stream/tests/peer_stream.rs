@@ -73,6 +73,24 @@ fn stream_peer() {
     report("dropped");
 }
 
+/// A supervisor-shaped process: no endpoint or local stream table exists.
+#[test]
+fn stream_recovery_peer() {
+    let Ok(name) = std::env::var("ORBIT_STREAM_RECOVERY_FLEET") else {
+        return;
+    };
+    assert!(
+        Streams::node_dead_in_shm(
+            &name,
+            2,
+            orbit_stream::StreamSpec::DEFAULT,
+            NodeId::new(1),
+            Incarnation::new(PEER_INCARNATION),
+        )
+        .unwrap()
+    );
+}
+
 struct Peer {
     child: Child,
     lines: Receiver<String>,
@@ -255,6 +273,31 @@ fn a_killed_peer_is_reported_dead_and_the_survivor_ends_cleanly() {
     ));
     assert!(owner.streams.is_live(ticket.id));
     drop(a);
+    assert!(!owner.streams.is_live(ticket.id));
+}
+
+#[test]
+fn a_management_process_without_endpoints_wakes_the_survivor() {
+    let owner = Owner::new("m");
+    let mut peer = Peer::spawn(owner.name);
+    peer.send("hold");
+    let (a, ticket) = owner.streams.create().unwrap();
+    owner.streams.offer(ticket, NodeId::new(1)).unwrap();
+    peer.expect("holding");
+    assert_eq!(a.blocking_read_chunk(16).unwrap().as_ref(), b"hello");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = [0; 8];
+        a.blocking_read(&mut bytes)
+    });
+    peer.kill();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "stream_recovery_peer"])
+        .env("ORBIT_STREAM_RECOVERY_FLEET", owner.name)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(matches!(reader.join().unwrap(), Err(Error::Reset)));
     assert!(!owner.streams.is_live(ticket.id));
 }
 
