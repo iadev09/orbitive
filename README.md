@@ -8,227 +8,294 @@
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="license">
 </p>
 
-> **Bounded same-host coordination for Rust process fleets**
+**Shared state and bounded communication between Rust processes on the same machine.**
 
-Orbitive is a Rust facade for bounded, same-host coordination shared by a
-fleet of sibling processes. `orbit-core` is the primitive substrate; the
-workspace also contains optional semantic and application-facing layers built
-from those primitives. Cache coherence, locks, reusable links, rustls session
-sharing and outbound client pools therefore remain separate crates while the
-`orbitive` facade provides one deliberate public entry point.
+Orbitive lets processes share events, counters, caches, locks and byte streams
+through POSIX shared memory. It runs inside your application, with no separate
+broker to deploy. Processes find shared resources by name; they do not need to
+inherit memory mappings from a common parent.
 
-It provides two storage shapes:
+Use it when several local workers need to exchange data or coordinate access
+to resources within a fixed memory budget. Choose the modules you need through
+Cargo features. The core API does not require an async runtime; Tokio
+integration is available for asynchronous communication.
 
-- rings for recent, append-only history;
-- fixed-capacity tables for current keyed state.
+Shared memory is runtime state. Orbitive does not provide durable storage,
+cross-machine replication or a network protocol. Applications own their message
+formats, process lifecycle and recovery policy.
 
-Both shapes can run in process memory or over POSIX shared memory. They are
-intended for ephemeral runtime coordination where a database or network broker
-would be unnecessary. They do not provide durability or network replication.
+[API documentation](https://docs.rs/orbitive) ·
+[Crate](https://crates.io/crates/orbitive) ·
+[Source](https://github.com/iadev09/orbitive)
 
-The facade is published as `orbitive`. Its runtime model and public type names
-use the established Orbit vocabulary, such as `Fleet`, `OrbitTyped`, and
-`OrbitEpoch`.
+## Quick start: send an event between processes
 
-## Add the facade
+This Unix example publishes an event in one process and reads it from another.
+It uses the `events` feature, which provides topics and byte payloads over a
+bounded shared ring. See [platform support](#platform-support) for release-specific
+requirements.
+
+Create a project:
+
+```sh
+cargo new orbitive-demo
+cd orbitive-demo
+```
+
+Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-orbitive = { version = "0.5.4", features = ["events", "lock"] }
+orbitive = { version = "0.5.4", features = ["events"] }
 ```
 
-Core types used by most integrations are available at the crate root. The full
-low-level surface remains under `orbitive::core`.
+Replace `src/main.rs` with:
 
 ```rust
 use std::sync::Arc;
 
 use orbitive::events::FleetEventBus;
-use orbitive::Fleet;
+use orbitive::{Fleet, NodeId};
 
-let fleet = Arc::new(Fleet::join("example", 1)?);
-let bus = FleetEventBus::new(fleet);
-bus.publish("worker.ready", b"worker-1")?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let action = std::env::args().nth(1).unwrap_or_default();
+    let node = match action.as_str() {
+        "publish" => NodeId::new(0),
+        "read" => NodeId::new(1),
+        _ => return Err("usage: orbitive-demo <publish|read>".into()),
+    };
 
-# Ok::<(), Box<dyn std::error::Error>>(())
+    // Same name and capacity; a different node id for each process role.
+    let fleet = Arc::new(Fleet::join_shm_as("demo", 2, node)?);
+    let bus = FleetEventBus::new(fleet);
+
+    if action == "publish" {
+        bus.publish("worker.ready", b"hello from another process")?;
+        println!("Published worker.ready");
+    } else {
+        let mut cursor = bus.cursor_from_start();
+        let batch = bus.poll(&mut cursor);
+        for event in batch.events {
+            println!("{}: {}", event.topic, String::from_utf8_lossy(&event.payload));
+        }
+        if batch.lagged != 0 {
+            eprintln!("{} events were unavailable", batch.lagged);
+        }
+    }
+    Ok(())
+}
 ```
 
-## Feature modules
+Run the publisher, then the reader, as the same OS user:
 
-| Feature | Module | Purpose |
+```sh
+cargo run -- publish
+cargo run -- read
+```
+
+On a fresh `demo` fleet, the output from the two commands is:
+
+```text
+Published worker.ready
+worker.ready: hello from another process
+```
+
+These are separate process invocations. The publisher can exit before the
+reader starts because the named SHM object survives the publisher. This is not
+disk persistence: the data is not a durable log and should not be expected to
+survive a reboot.
+
+The reader takes one snapshot of retained events and exits. Each run starts a
+new cursor, so repeated runs can read earlier retained messages again. In a
+long-lived consumer, keep the cursor between reads; use `cursor_at_head()` to
+start after existing events. For event-driven waiting, the event bus exposes
+`event_fd()`; drain readiness and then poll the ring.
+
+Only run one publisher for node 0 and one reader for node 1 at a time in this
+example. Use a different fleet name if `demo` already belongs to an application.
+When both programs have exited, remove the example's event ring:
+
+```sh
+cargo install orbitive-cli
+orbit list demo
+orbit clear demo --kind 220
+```
+
+Kind `220` is the default event bus ring. The CLI is a separate package; it is
+not required to use the library. See [resource lifecycle](#resource-lifecycle)
+before clearing resources used by a running application.
+
+## The model
+
+A **fleet** is a named group of cooperating processes on one machine. Each
+member uses a **node id** to address its part of the shared storage. Fleet
+capacity reserves space for those nodes; it is not a live process count.
+
+A **kind** identifies a ring or table within the fleet. A **layout** specifies
+its physical capacity and payload limits. Peers opening the same resource must
+agree on its kind, layout and fleet capacity.
+
+Storage has different semantics depending on the module:
+
+| Shape | Use | When capacity is reached |
 | --- | --- | --- |
-| always | `orbitive::fleet` | fleet membership and node identity |
-| always | `orbitive::ring` | typed rings, cursors, and readiness primitives |
-| Unix | `orbitive::shm` | POSIX shared-memory regions and naming |
-| always | `orbitive::core` | the complete low-level core surface |
-| `auth` | `orbitive::auth` | encrypted tokens, local Principal cache and fleet session/refresh/replay state |
-| `cache` | `orbitive::cache` | process-local L1 caches with fleet-wide mutation propagation |
-| `counter` | `orbitive::counter` | keyed signed counters shared across the fleet |
-| `cell` | `orbitive::cell` | typed atomic cells addressed by id, shared across the fleet |
-| `events` | `orbitive::events` | raw topic and byte-payload event streams |
-| `invoke` | `orbitive::invoke` | bounded invocation requests with operation routing |
-| `link` / `link-tokio` | `orbitive::link` | named reusable duplex sessions between fleet members |
-| `lock` | `orbitive::lock` | keyed leases with ownership checks and fencing tokens |
-| `metrics` | `orbitive::metrics` | current metrics snapshots across workers |
-| `pool` | `orbitive::pool` | fleet-wide resource leases, reservations, and creation claims |
-| `stream` / `stream-tokio` | `orbitive::stream` | bounded byte streams and paired exchanges between fleet members |
-| `pool-stream` | `orbitive::pool` + `orbitive::stream` | binding between a fleet resource lease and a paired exchange |
-| `client-pool` | `orbitive::client_pool` | Tokio-based process-local outbound client ownership and lifecycle |
-| `client-pool-fleet` | `orbitive::client_pool` | fleet-wide client admission and remote-owner execution over pool-stream |
-| `rustls` / `rustls_0_24` | `orbitive::rustls` | fleet-shared rustls server sessions and rustls 0.24 client sessions |
+| Ring | Retained events and recent history | Older frames may be overwritten; cursors report loss |
+| Current-state table | Counters, leases, sessions and keyed state | The module defines refusal or eviction behavior |
+| Inbox and stream | Addressed work and bounded byte flow | Admission or writes report capacity limits; callers handle backpressure |
 
-`auth` can be enabled individually and is included in `full`. It shares authentication trust across
-domains and protocols through encrypted, audience/purpose-scoped tokens and
-a local decoded cache plus shared session, refresh and replay state. Backing follows
-the supplied Fleet. Cookie, Bearer, WebSocket and internal transport extraction
-remain in adapters; see [`orbit-auth`](auth/README.md).
+The published entry point is `orbitive`. Public names such as `Fleet`,
+`OrbitTyped` and `OrbitEpoch` use **Orbit**, the runtime model's name.
 
-`stream` is the transport primitive: it provides bounded duplex byte flow and
-typed paired exchanges without deciding why an application moves those bytes.
-The optional `pool-stream` composition binds a fleet-owned resource lease to
-an exchange. It is not enabled by `full`; applications opt in when remotely
-owned resources execute over Orbit streams.
+### Local memory versus shared memory
 
-`client-pool` is also opt-in and requires Tokio. The base `orbitive` facade and
-`orbit-core` remain independent of an async runtime. The local layer owns real
-client objects inside their process; `client-pool-fleet` adds Orbit admission
-and carries operations to a remote owner without pretending that a client
-object can move through shared memory. Neither layer knows HTTP, database, mail
-or application protocol formats.
+Choose the backing explicitly:
 
-The implementation crates are also published separately as
-[`orbit-core`](core/README.md), [`orbit-cache`](cache/README.md),
-[`orbit-arena`](arena/README.md), [`orbit-cell`](cell/README.md), [`orbit-counter`](counter/README.md), [`orbit-events`](events/README.md),
-[`orbit-invoke`](invoke/README.md), [`orbit-link`](link/README.md),
-[`orbit-lock`](lock/README.md),
-[`orbit-metrics`](metrics/README.md), [`orbit-pool`](pool/README.md),
-[`orbit-client-pool`](client-pool/README.md),
-[`orbit-rustls`](rustls/README.md), and
-[`orbit-stream`](stream/README.md). Direct dependencies are supported when an
-integration needs a single narrow layer; applications can otherwise use the
-facade and enable only the modules they need.
+| Constructor | Storage | Intended use |
+| --- | --- | --- |
+| `Fleet::join(name, capacity)` | Process-local memory, node 0 | In-process coordination and tests |
+| `Fleet::join_as(name, capacity, node)` | Process-local memory, explicit node | In-process use with explicit identity |
+| `Fleet::join_shm(name, capacity)` | Named POSIX SHM, node 0 | A single shared-memory member |
+| `Fleet::join_shm_as(name, capacity, node)` | Named POSIX SHM, explicit node | Multiple cooperating processes |
 
-The optional [`orbit-auth`](auth/README.md) implementation is also available as
-a narrow direct dependency, with backing selected by the supplied Fleet.
+**Matching names do not connect separate `Fleet::join` handles.** Share a
+handle or its clone within one process. Use SHM constructors for communication
+between processes. For per-node rings, assign each active process a distinct
+node id below the fleet capacity; the core does not allocate unique ids for you.
 
-The facade and implementation crates are versioned independently. A change to
-one `orbit-*` crate does not bump unrelated packages; `orbitive` advances only
-when its own public surface or one of its selected component requirements
-changes. Direct users should therefore pin the package they consume rather
-than assume every package in the repository has the facade's version.
+## Choose a module
 
-## Compile-time geometry
+Core types are available without optional features. Enable only the modules
+your application uses; each linked guide describes its API and limits.
 
-The default shared-memory geometry can be selected once for an entire
-downstream Cargo build graph. Put the desired values in the application's
-`.cargo/config.toml`; ordinary `cargo build`, `cargo test`, and `cargo run`
-commands then compile every Orbit dependency with the same values:
+| Need | Cargo feature | Guide |
+| --- | --- | --- |
+| Typed rings, cursors, SHM mappings and read-only observers | None | [Core](core/README.md) |
+| Topic and byte-payload events | `events` | [Events](events/README.md) |
+| Keyed shared counters | `counter` | [Counters](counter/README.md) |
+| Typed atomic cells | `cell` | [Cells](cell/README.md) |
+| Per-process caches with shared invalidation | `cache` | [Cache](cache/README.md) |
+| Shared byte storage with pinned reads | `arena` | [Arena](arena/README.md) |
+| Keyed leases with fencing tokens | `lock` | [Locks](lock/README.md) |
+| Worker metrics snapshots | `metrics` | [Metrics](metrics/README.md) |
+| Bounded invocation requests | `invoke`, `invoke-tokio` | [Invoke](invoke/README.md) |
+| Named dispatch and reusable duplex sessions | `link`, `link-tokio` | [Link](link/README.md) |
+| Duplex byte streams and paired exchanges | `stream`, `stream-tokio` | [Stream](stream/README.md) |
+| Fleet-wide resource leases and creation claims | `pool` | [Pool](pool/README.md) |
+| Resource leases bound to stream exchanges | `pool-stream` | [Pool](pool/README.md) |
+| Process-local outbound client pools | `client-pool` | [Client pool](client-pool/README.md) |
+| Client pools with remote-owner execution within the fleet | `client-pool-fleet` | [Client pool](client-pool/README.md) |
+| Encrypted tokens and shared session, refresh and replay state | `auth` | [Auth](auth/README.md) |
+| Shared rustls server sessions | `rustls` or `rustls_0_23` | [rustls](rustls/README.md) |
+| Shared rustls 0.24 server and client sessions | `rustls_0_24` | [rustls](rustls/README.md) |
+
+Feature names generally match module paths: `events` enables
+`orbitive::events`, and `link-tokio` enables the async API in `orbitive::link`.
+The `*-tokio` features also enable their base modules. Client pools require
+Tokio. The `rustls_0_24` feature currently selects a rustls 0.24 prerelease;
+choose the feature matching your application's rustls dependency.
+
+`full` is a convenience bundle containing `auth`, `arena`, `cache`, `cell`,
+`events`, `counter`, `invoke`, `link`, `metrics`, `lock`, `rustls`, `stream`,
+`stream-tokio` and `pool`. It does **not** enable every optional integration:
+`link-tokio`, `invoke-tokio`, `pool-stream`, client pools and `rustls_0_24`
+remain explicit choices.
+
+The `orbit-*` implementation crates are also available directly. Most
+applications can depend on `orbitive` and use its feature modules; libraries
+building a narrow integration can depend on the underlying crate. Packages
+are versioned independently, so their version numbers need not match.
+
+### Events, streams or links?
+
+Use **events** when readers need to observe recent publications and can handle
+a bounded retention window. Each reader has an independent cursor; there is
+no acknowledgement or durable replay.
+
+Use **stream** for bounded duplex byte flow or paired exchanges. Your
+application supplies the protocol and decides how to handle backpressure.
+
+Use **link** when callers need to find a named local worker and dispatch work
+to its inbox, optionally carrying a ticket for a duplex stream. A full inbox
+refuses admission rather than overwriting accepted frames. Applications still
+choose message encoding and routing policy.
+
+For Tokio-backed links and streams, application data stays in SHM. Local
+Unix-datagram sockets provide wake notifications to the runtime; they carry no
+application payload. A wake tells the receiver to check shared state.
+
+## Capacity and compatibility
+
+Orbitive bounds storage explicitly. Ring capacity, payload limits, table slots
+and stream windows are part of a resource's layout. More capacity reserves more
+memory; it does not make events durable or consumers lossless.
+
+Core rings use `OrbitTyped::KIND` and `OrbitTyped::RING_SPEC`. Links and streams
+accept explicit specifications. Several higher-level modules also let an
+application select default geometry at compile time in `.cargo/config.toml`:
 
 ```toml
 [env]
 ORBIT_EVENT_RING_CAPACITY = { value = "1024", force = true }
 ORBIT_EVENT_RING_PAYLOAD_CAPACITY = { value = "512", force = true }
-
-ORBIT_COUNTER_CAPACITY = { value = "1024", force = true }
-ORBIT_COUNTER_KEY_MAX = { value = "240", force = true }
-
-ORBIT_INVOKE_RING_CAPACITY = { value = "256", force = true }
-ORBIT_INVOKE_RING_PAYLOAD_CAPACITY = { value = "8192", force = true }
-
-ORBIT_CACHE_MUTATION_RING_CAPACITY = { value = "1024", force = true }
-ORBIT_CACHE_MUTATION_RING_PAYLOAD_CAPACITY = { value = "1024", force = true }
-ORBIT_CACHE_PAYLOAD_RING_CAPACITY = { value = "1024", force = true }
-ORBIT_CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY = { value = "4096", force = true }
-
-ORBIT_LOCK_EVENT_RING_CAPACITY = { value = "1024", force = true }
-ORBIT_LOCK_EVENT_RING_PAYLOAD_CAPACITY = { value = "1024", force = true }
-ORBIT_LOCK_STATE_CAPACITY = { value = "256", force = true }
-ORBIT_LOCK_STATE_PAYLOAD_CAPACITY = { value = "960", force = true }
-
-ORBIT_METRIC_SNAPSHOT_RING_CAPACITY = { value = "1024", force = true }
-ORBIT_KEYED_METRIC_RING_CAPACITY = { value = "4096", force = true }
-
-ORBIT_RUSTLS_SESSION_SET_COUNT = { value = "256", force = true }
-ORBIT_RUSTLS_SESSION_WAYS = { value = "8", force = true }
-ORBIT_RUSTLS_SESSION_DOMAIN_CAPACITY = { value = "64", force = true }
-ORBIT_RUSTLS_SESSION_KEY_CAPACITY = { value = "64", force = true }
-ORBIT_RUSTLS_SESSION_VALUE_CAPACITY = { value = "16384", force = true }
 ```
 
-Every key is optional and retains the documented default when absent. Values
-are decimal byte or entry counts and may contain `_` separators. Invalid
-values fail compilation. These settings are part of the fleet wire contract:
-all peers that open the same fleet must be built with the same geometry, and
-existing SHM objects must be cleared before a geometry change takes effect.
+These values apply to every dependency in that application's Cargo build.
+Omitted settings retain the module's defaults; invalid values fail compilation.
+See the individual module guides for available settings and capacity behavior.
+For events, the payload budget includes the topic and frame header as well as
+the application's bytes.
 
-## Command-line inspection
+All peers sharing a resource must use compatible layouts. An existing SHM
+object is not resized to accommodate a new binary. To change a layout, stop
+its users and remove the old object, or assign a new kind so old and new layouts
+can coexist during migration. Check the module's assigned kinds before choosing
+one for your own data.
 
-The separately published `orbitive-cli` package installs the `orbit` command.
-It can inspect Orbit POSIX shared-memory objects without joining the fleet:
+## Resource lifecycle
+
+Named SHM objects outlive the handles and processes that created them.
+Dropping a handle releases its mapping, not the shared resource's name.
+Applications must decide who initializes state, reclaims dead owners and
+removes retired resources. Recovery behavior belongs to the selected module;
+there is no universal process supervisor built into `Fleet`.
+
+Use the `orbit` CLI to inspect objects without joining the fleet:
 
 ```sh
-cargo install orbitive-cli
 orbit list example
 orbit list example --kind 231
 ```
 
-It can also remove one object or every object belonging to a stopped fleet:
+After stopping all users of the selected resources:
 
 ```sh
 orbit clear example --kind 231
 orbit clear example --all --yes
 ```
 
-Do not clear a running fleet. Existing POSIX mappings survive unlink while a
-later process can create a different object under the same name.
+Unlinking an object does not invalidate mappings already held by running
+processes. Clearing a live resource can leave old processes using one object
+while new processes create another under the same name.
 
-## External read-only observation (no fleet join)
+Fleet resources are scoped by OS user id. The default SHM policy grants owner
+read/write access. Processes sharing those credentials are within the same
+trust boundary. For external observation, `FleetObserver` opens existing rings
+read-only without allocating a writer node or changing their lifecycle; see
+[Core](core/README.md#external-read-only-observation).
 
-On Unix, an independent Rust process can inspect an existing SHM ring without
-joining as a writer or reproducing the producer's fleet geometry:
+## Platform support
 
-```rust,no_run
-use orbitive::FleetObserver;
-use orbitive::ring::cursor::{RingCursor, poll_ring};
+Shared-memory APIs target Unix. Native ring readiness is implemented for
+Linux, FreeBSD and macOS 14.4 or later. On older macOS, constructing a native
+ring readiness bridge returns `Unsupported`; polling remains available where
+the module permits it. SHM support does not imply support for every async or
+platform-specific integration.
 
-let observer = FleetObserver::attach_existing("example")?;
-let ring = observer.ring(221)?;
+**FreeBSD release note:** the published `orbit-core 0.5.3` used by
+`orbitive 0.5.4` has a compile error in the SHM permission argument. The source
+tree contains the fix; it is not yet included in that crates.io release.
 
-for lane_index in 0..ring.metadata().lane_count {
-    let lane = ring.lane(lane_index)?;
-    let mut cursor = RingCursor::from_counter(lane.retained_range().start);
-    for frame in poll_ring(&lane, &mut cursor).frames {
-        println!("{lane_index}: {frame:?}");
-    }
-}
+## License
 
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-The observer opens exact existing objects read-only. It cannot create, reset,
-publish, or unlink, and dropping it only unmaps local memory. Raw frame access
-belongs to core; the crate that owns a kind remains responsible for payload
-decoding and freshness or liveness judgments. A consumer linked to the same
-typed contract can use `observer.typed_ring::<T>()` for an additional
-`OrbitTyped::RING_SPEC` check.
-
-This is intentionally observation rather than another form of `Fleet::join`:
-the external process receives no node id, holds no fleet membership, owns no
-writer lane, and does not keep the fleet alive. `ring(kind)` opens only that
-already-existing uid-scoped object. Use `attach_existing_for_uid` when an
-operator process is permitted to inspect a different user's namespace.
-
-## Runtime contract
-
-Every process joining the same shared fleet must agree on the immutable fleet
-capacity, node ownership, stable kind numbers, and ring or table layouts.
-Capacity reserves physical node lanes; it does not assert current membership
-or liveness. Storage is
-bounded: old ring frames may be overwritten, caches may miss, and session
-entries may be evicted. Callers must treat those outcomes according to the
-semantic module they use.
-
-Shared-memory operation currently targets Unix. Native readiness is available
-on Linux, FreeBSD, and macOS 14.4 or later. On older macOS, readiness creation
-returns `io::ErrorKind::Unsupported`; callers can use polling where the
-semantic module permits it.
+Licensed under either the MIT license or the Apache License, Version 2.0,
+at your option.
