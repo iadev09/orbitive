@@ -64,7 +64,7 @@ fn raw_create(
         libc::shm_open(
             name.as_ptr(),
             libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-            mode,
+            mode as libc::mode_t,
         )
     };
     assert!(fd >= 0, "{}", std::io::Error::last_os_error());

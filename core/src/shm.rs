@@ -339,7 +339,7 @@ impl ShmRegion {
                 libc::shm_open(
                     cname.as_ptr(),
                     libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                    creation_mode,
+                    creation_mode as libc::mode_t,
                 )
             } else {
                 libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0)
