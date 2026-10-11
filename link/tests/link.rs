@@ -234,7 +234,7 @@ async fn a_watcher_without_a_lane_hears_lanes_claimed_and_released() {
     let name = fleet_name("watch");
     let master = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
     let worker = LinkSegment::open(&name, SPEC).unwrap();
-    let mut watcher = master.watch().unwrap();
+    let mut watcher = master.watch("worker").unwrap();
     assert_eq!(
         master.inbox().watcher(watcher.slot()).unwrap(),
         Some(std::process::id())
@@ -258,4 +258,72 @@ async fn a_watcher_without_a_lane_hears_lanes_claimed_and_released() {
     drop(watcher);
     assert_eq!(master.inbox().watcher(slot).unwrap(), None);
     master.unlink().unwrap();
+}
+
+/// One event crosses to the side that wants it, once, and does not come back:
+/// the edge publishes two topics, the application wants one, and the
+/// application's republication is not sent back over the same segment.
+#[cfg(feature = "events")]
+#[test]
+fn an_event_crosses_once_to_the_side_that_wants_it() {
+    use orbit_events::FleetEventBus;
+    use orbit_link::{LinkEvents, Routing};
+
+    let name = fleet_name("events");
+    let segment = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+    segment.inbox().claim_lane(0, "web", "edge", 1).unwrap();
+    segment.inbox().claim_lane(1, "shop", "php", 1).unwrap();
+
+    let edge_bus = Arc::new(FleetEventBus::new(Arc::new(
+        Fleet::join(&format!("{name}e"), 1).unwrap(),
+    )));
+    let app_bus = Arc::new(FleetEventBus::new(Arc::new(
+        Fleet::join(&format!("{name}a"), 1).unwrap(),
+    )));
+    let edge = LinkEvents::for_lane(
+        &segment,
+        0,
+        Arc::clone(&edge_bus),
+        |role| role != "edge",
+        Routing::Topic,
+    )
+    .unwrap();
+    let app = LinkEvents::for_lane(
+        &segment,
+        1,
+        Arc::clone(&app_bus),
+        |role| role == "edge",
+        Routing::Topic,
+    )
+    .unwrap();
+    app.interest(&["cache.reset"]);
+    edge.interest(&["cache.reset"]);
+
+    edge_bus.publish("cache.reset", b"all").unwrap();
+    edge_bus.publish("worker.booted", b"w1").unwrap();
+    edge.pump().unwrap();
+
+    let mut frame = Vec::new();
+    assert!(segment.inbox().read(1, &mut frame).unwrap());
+    assert_eq!(app.accept(&frame).unwrap(), ("cache.reset", &b"all"[..]));
+    assert!(
+        !segment.inbox().read(1, &mut frame).unwrap(),
+        "only the wanted topic crossed"
+    );
+
+    let received = app_bus.poll(&mut app_bus.cursor_from_start()).events;
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        (received[0].topic.as_str(), received[0].payload.as_slice()),
+        ("cache.reset", &b"all"[..])
+    );
+
+    app.pump().unwrap();
+    assert!(
+        !segment.inbox().read(0, &mut frame).unwrap(),
+        "the republication did not go back"
+    );
+
+    drop((edge, app));
+    segment.unlink().unwrap();
 }

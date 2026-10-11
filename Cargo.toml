@@ -27,6 +27,9 @@ invoke = ["dep:orbit-invoke"]
 invoke-tokio = ["invoke", "orbit-invoke?/tokio"]
 link = ["dep:orbit-link"]
 link-tokio = ["link", "orbit-link?/tokio"]
+# Bridge fleet events across a link. Explicit: `link` and `events` together do
+# not imply it.
+link-events = ["link-tokio", "events", "orbit-link?/events"]
 metrics = ["dep:orbit-metrics"]
 rustls = ["rustls_0_23"]
 stream = ["dep:orbit-stream"]

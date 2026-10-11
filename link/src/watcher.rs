@@ -24,9 +24,10 @@ impl DirectoryWatcher {
     pub(crate) fn bind(
         segment: Arc<LinkSegment>,
         slot: usize,
+        role: &str,
         hold: WatcherHold,
     ) -> Result<Self> {
-        let socket = segment.inbox().bind_watcher(slot)?;
+        let socket = segment.inbox().bind_watcher(slot, role)?;
         let directory = segment.inbox().directory();
         Ok(Self { segment, slot, socket, directory, _hold: hold })
     }

@@ -24,6 +24,9 @@ use orbit_stream::StreamSpec;
 #[cfg(unix)]
 mod bell;
 mod body;
+#[cfg(all(unix, feature = "events"))]
+pub mod events;
+mod frame;
 mod inbox;
 #[cfg(all(unix, feature = "tokio"))]
 mod receiver;
@@ -33,6 +36,9 @@ mod segment;
 mod watcher;
 
 pub use body::LinkBodies;
+#[cfg(all(unix, feature = "events"))]
+pub use events::{LinkEvents, Routing};
+pub use frame::{EVENT_FRAME_TAG, RESERVED_FRAME_TAGS, is_reserved};
 pub use inbox::{
     Admission, Inbox, InboxGeometry, LANE_NAME_MAX, LANE_ROLE_MAX, Reclaimed,
 };
@@ -110,6 +116,8 @@ pub enum Error {
     Io(std::io::Error),
     Core(orbit_core::Error),
     Stream(orbit_stream::Error),
+    #[cfg(feature = "events")]
+    Events(orbit_events::Error),
 }
 
 impl fmt::Display for Error {
@@ -147,6 +155,10 @@ impl fmt::Display for Error {
             Self::Stream(error) => {
                 write!(formatter, "Orbit link stream error: {error}")
             }
+            #[cfg(feature = "events")]
+            Self::Events(error) => {
+                write!(formatter, "Orbit link event error: {error}")
+            }
         }
     }
 }
@@ -157,6 +169,8 @@ impl std::error::Error for Error {
             Self::Io(error) => Some(error),
             Self::Core(error) => Some(error),
             Self::Stream(error) => Some(error),
+            #[cfg(feature = "events")]
+            Self::Events(error) => Some(error),
             _ => None,
         }
     }

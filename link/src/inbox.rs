@@ -47,6 +47,9 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 6: an interest table follows the watchers, one entry per lane and per
+/// watcher slot, and a watcher carries a role.
+///
 /// 5: a directory-watcher table follows the lanes. Being woken when the
 /// directory moves no longer requires holding a lane, so a process that serves
 /// nothing (a master) can watch it too.
@@ -57,7 +60,7 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 5;
+pub(crate) const INBOX_VERSION: u32 = 6;
 
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,10 +180,36 @@ pub(crate) struct WatcherHeader {
     pub(crate) reactor: AtomicU32,
     /// The process that holds the slot, for the operator. Zero when free.
     pub(crate) pid: AtomicU32,
-    _padding: [u8; 52],
+    /// What the watching process is, in the same words a lane uses (`edge`,
+    /// `php`), so a reader can tell which side of a link a watcher is on.
+    pub(crate) role: [u8; LANE_ROLE_MAX],
+    pub(crate) role_len: AtomicU8,
+    _padding: [u8; 43],
 }
 
 const _: () = assert!(size_of::<WatcherHeader>() == 64);
+
+/// Words in one interest set.
+pub(crate) const INTEREST_WORDS: usize = 7;
+/// Bits in one interest set.
+#[cfg_attr(not(feature = "events"), allow(dead_code))]
+pub(crate) const INTEREST_BITS: usize = INTEREST_WORDS * 64;
+
+/// What one lane or watcher wants to receive: a fixed-size set of routing-key
+/// hashes, owned and written only by the slot's holder.
+///
+/// A set rather than a list, so there is no count to run out of: a false
+/// positive forwards something nobody consumes, and the receiver's own
+/// subscriptions drop it. `seq` is odd while the holder rewrites the set; a
+/// reader that sees it odd, or changed across its read, reads again.
+#[repr(C, align(64))]
+pub(crate) struct InterestEntry {
+    pub(crate) seq: AtomicU32,
+    _padding: [u8; 4],
+    pub(crate) bits: [AtomicU64; INTEREST_WORDS],
+}
+
+const _: () = assert!(size_of::<InterestEntry>() == 64);
 
 /// One frame's slot. `seq` is the whole protocol; `len` and the payload are
 /// only read once `seq` says the slot is filled.
@@ -225,15 +254,19 @@ impl InboxGeometry {
             + self.capacity * (size_of::<SlotHeader>() + self.payload_capacity)
     }
 
-    /// What a fleet's whole table occupies: the header, every lane, then one
-    /// watcher slot per lane. Watchers sit after the lanes so a lane's offset
-    /// and alignment are what they were before watchers existed.
+    /// What a fleet's whole table occupies: the header, every lane, one
+    /// watcher slot per lane, then one interest entry per lane and per
+    /// watcher slot. Everything new sits after the lanes, so a lane's offset
+    /// and alignment are what they were before.
     pub const fn segment_bytes(
         &self,
         fleet_capacity: usize,
     ) -> usize {
         size_of::<TableHeader>()
-            + fleet_capacity * (self.lane_bytes() + size_of::<WatcherHeader>())
+            + fleet_capacity
+                * (self.lane_bytes()
+                    + size_of::<WatcherHeader>()
+                    + 2 * size_of::<InterestEntry>())
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -720,6 +753,7 @@ impl Inbox {
         lane.service_len.store(0, Ordering::Release);
         lane.role_len.store(0, Ordering::Release);
         lane.pid.store(0, Ordering::Release);
+        self.clear_interest(lane_index);
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
         self.wake(lane_index, lane);
         self.announce_directory();
@@ -918,6 +952,7 @@ impl Inbox {
         lane.role_len.store(0, Ordering::Relaxed);
         lane.waiters.store(0, Ordering::Relaxed);
         lane.reactor.store(0, Ordering::Relaxed);
+        self.clear_interest(lane_index);
         for position in 0..self.geometry.capacity {
             let slot = self.slot_header(lane_index, position as u64);
             slot.len.store(0, Ordering::Relaxed);
@@ -1085,17 +1120,30 @@ impl Inbox {
     pub(crate) fn bind_watcher(
         &self,
         slot: usize,
+        role: &str,
     ) -> Result<tokio::net::UnixDatagram> {
         self.check_lane(slot)?;
+        if role.is_empty() || role.len() > LANE_ROLE_MAX || !role.is_ascii() {
+            return Err(Error::Malformed("role tag does not fit a watcher"));
+        }
         let bell = self
             .bell
             .as_ref()
             .ok_or(Error::Malformed("the inbox has no reactor bell"))?;
         let watcher = self.watcher_header(slot);
         watcher.reactor.store(0, Ordering::SeqCst);
+        self.clear_interest(self.lanes + slot);
         let socket = bell
             .bind(crate::bell::Doorbell::Watcher(slot))
             .map_err(Error::Io)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                role.as_ptr(),
+                watcher.role.as_ptr().cast_mut(),
+                role.len(),
+            );
+        }
+        watcher.role_len.store(role.len() as u8, Ordering::Release);
         watcher.pid.store(std::process::id(), Ordering::Release);
         tokio::net::UnixDatagram::from_std(socket).map_err(Error::Io)
     }
@@ -1111,6 +1159,8 @@ impl Inbox {
         let watcher = self.watcher_header(slot);
         watcher.reactor.store(0, Ordering::SeqCst);
         watcher.pid.store(0, Ordering::Release);
+        watcher.role_len.store(0, Ordering::Release);
+        self.clear_interest(self.lanes + slot);
         if let Some(bell) = &self.bell {
             bell.unbind(crate::bell::Doorbell::Watcher(slot));
         }
@@ -1155,6 +1205,95 @@ impl Inbox {
             0 => None,
             pid => Some(pid),
         })
+    }
+
+    /// What the process holding this watcher slot said it is, if it holds it.
+    pub fn watcher_role(
+        &self,
+        slot: usize,
+    ) -> Result<Option<String>> {
+        self.check_lane(slot)?;
+        let watcher = self.watcher_header(slot);
+        if watcher.pid.load(Ordering::Acquire) == 0 {
+            return Ok(None);
+        }
+        let len = watcher.role_len.load(Ordering::Acquire) as usize;
+        if len == 0 || len > LANE_ROLE_MAX {
+            return Ok(None);
+        }
+        let bytes =
+            unsafe { std::slice::from_raw_parts(watcher.role.as_ptr(), len) };
+        Ok(String::from_utf8(bytes.to_vec()).ok())
+    }
+
+    /// Replace one interest entry. Only the holder of the lane or watcher
+    /// slot it belongs to writes it.
+    pub(crate) fn write_interest(
+        &self,
+        entry: usize,
+        bits: &[u64; INTEREST_WORDS],
+    ) {
+        let interest = self.interest_entry(entry);
+        // One writer per entry, so the parity is set rather than counted: a
+        // holder that died between the two stores left it odd, and the next
+        // holder's first write repairs it.
+        let writing = interest.seq.load(Ordering::Relaxed) | 1;
+        interest.seq.store(writing, Ordering::Release);
+        for (word, value) in interest.bits.iter().zip(bits) {
+            word.store(*value, Ordering::Release);
+        }
+        interest.seq.store(writing.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Read one interest entry as it stood between two of its writes.
+    ///
+    /// A read that overlaps a write, or meets an entry its writer left half
+    /// written, does not wait: it answers "wants everything". That is a false
+    /// positive, which the set already allows — at worst something is
+    /// forwarded that nobody consumes — and it never parks the reader on a
+    /// writer that may be gone.
+    #[cfg_attr(not(feature = "events"), allow(dead_code))]
+    pub(crate) fn read_interest(
+        &self,
+        entry: usize,
+    ) -> [u64; INTEREST_WORDS] {
+        let interest = self.interest_entry(entry);
+        let before = interest.seq.load(Ordering::Acquire);
+        if before.is_multiple_of(2) {
+            let mut bits = [0u64; INTEREST_WORDS];
+            for (value, word) in bits.iter_mut().zip(&interest.bits) {
+                *value = word.load(Ordering::Acquire);
+            }
+            if interest.seq.load(Ordering::Acquire) == before {
+                return bits;
+            }
+        }
+        [u64::MAX; INTEREST_WORDS]
+    }
+
+    fn clear_interest(
+        &self,
+        entry: usize,
+    ) {
+        self.write_interest(entry, &[0; INTEREST_WORDS]);
+    }
+
+    fn interest_entry(
+        &self,
+        entry: usize,
+    ) -> &InterestEntry {
+        unsafe {
+            &*self
+                .base
+                .add(
+                    size_of::<TableHeader>()
+                        + self.lanes
+                            * (self.geometry.lane_bytes()
+                                + size_of::<WatcherHeader>())
+                        + entry * size_of::<InterestEntry>(),
+                )
+                .cast::<InterestEntry>()
+        }
     }
 
     fn watcher_header(

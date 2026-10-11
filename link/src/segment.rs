@@ -152,16 +152,26 @@ impl LinkSegment {
     /// — a master whose workers hold the lanes. The watcher takes the first
     /// free slot; a slot whose holder died is free, because the kernel
     /// released its hold. It is woken by the same claim and release that wake
-    /// every lane, and never appears in the directory itself.
+    /// every lane, and never appears in the directory itself. `role` says
+    /// what the watching process is, in a lane's words (`edge`, `php`), so a
+    /// reader can tell which side of a link it is on.
     #[cfg(feature = "tokio")]
-    pub fn watch(self: &Arc<Self>) -> Result<crate::DirectoryWatcher> {
+    pub fn watch(
+        self: &Arc<Self>,
+        role: &str,
+    ) -> Result<crate::DirectoryWatcher> {
         for slot in 0..self.inbox.lanes() {
             let Some(hold) =
                 try_hold_watcher(&self.name, slot).map_err(Error::Io)?
             else {
                 continue;
             };
-            return crate::DirectoryWatcher::bind(Arc::clone(self), slot, hold);
+            return crate::DirectoryWatcher::bind(
+                Arc::clone(self),
+                slot,
+                role,
+                hold,
+            );
         }
         Err(Error::NoWatcher)
     }

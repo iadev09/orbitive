@@ -1,6 +1,7 @@
 # Link events: carrying fleet events between fleets (design)
 
-Status: design, not implemented. This note fixes the shape before code.
+Status: implemented in `orbit-link` behind its `events` feature (facade:
+`link-events`). This note keeps the reasoning; the API is `LinkEvents`.
 
 ## What it is for
 
@@ -151,11 +152,18 @@ In both, the frame carries the ring topic and payload unchanged, and the
 receiver republishes them as they were: an envelope stays an envelope, so
 every runtime of the receiving fleet reads it the way it reads its own.
 
-## Open decisions
+## Decided
 
-- Size of the interest set (bits per lane) and the hash; it is geometry, so it
-  belongs in the link spec rather than a constant.
-- Whether interest lives in the lane header's spare bytes (no growth) or in
-  its own table (growth, so a new kind).
-- How the receiver's republished-id memory is bounded if its forwarder stops
-  reading (shutdown): released on drop, or capped by the ring's own capacity.
+- **Interest set:** 448 bits per entry (seven words, one cache line with its
+  sequence word), two positions per key from FNV-1a, so processes built by
+  different binaries or compilers agree on them.
+- **Where interest lives:** its own table after the watchers, one entry per
+  lane and per watcher slot (inbox layout 6). The segment grows, so a
+  deployment moves the inbox to a new kind. A watcher also carries a role, so
+  a lane-less process is counted on the right side.
+- **A half-written entry:** read as "wants everything" rather than waited on.
+  That is a false positive, which the set already allows, and it never parks
+  a reader on a writer that may be gone. The next holder's write repairs it.
+- **The republished-id memory:** forgotten as the bridge's own cursor reads
+  past each id (own counters arrive in order), and with the bridge when it is
+  dropped.

@@ -7,8 +7,13 @@ use crate::{LinkSegment, Result};
 /// What [`InboxReceiver::next`] observed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Received {
-    /// A frame was copied out of the lane.
+    /// A downstream frame was copied out of the lane.
     Frame,
+    /// An orbit-link event frame was copied out of the lane; hand it to
+    /// `LinkEvents::accept` (the `events` feature). Its first byte is in
+    /// [`crate::RESERVED_FRAME_TAGS`], so a downstream decoder never sees it
+    /// as one of its own.
+    Event,
     /// The lane directory moved to this generation: a lane was claimed or
     /// released. Read [`crate::Inbox::serving`] or the lane identities to see
     /// which.
@@ -39,7 +44,7 @@ impl InboxReceiver {
         Ok(Self { segment, lane, socket, directory })
     }
 
-    /// Wait for and copy the next frame from this lane.
+    /// Wait for and copy the next frame from this lane, of either kind.
     ///
     /// Cancellation leaves the frame in SHM. A later call first reads the
     /// lane and therefore observes it even if the cancelled future had
@@ -49,7 +54,7 @@ impl InboxReceiver {
         out: &mut Vec<u8>,
     ) -> Result<()> {
         loop {
-            if self.next(out).await? == Received::Frame {
+            if !matches!(self.next(out).await?, Received::Directory(_)) {
                 return Ok(());
             }
         }
@@ -74,7 +79,11 @@ impl InboxReceiver {
             }
             let seen = inbox.receiver_generation(self.lane)?;
             if inbox.read(self.lane, out)? {
-                return Ok(Received::Frame);
+                return Ok(if crate::frame::is_event(out) {
+                    Received::Event
+                } else {
+                    Received::Frame
+                });
             }
 
             inbox.arm_receiver(self.lane)?;

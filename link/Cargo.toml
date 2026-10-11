@@ -14,10 +14,14 @@ exclude.workspace = true
 
 [features]
 tokio = ["orbit-stream/tokio", "dep:tokio"]
+# Carry fleet events between two fleets meeting in a link segment. Never
+# implied by enabling the link and the event bus separately.
+events = ["tokio", "dep:orbit-events"]
 
 [dependencies]
 orbit-core.workspace = true
 orbit-stream.workspace = true
+orbit-events = { workspace = true, optional = true }
 tokio = { version = "1", default-features = false, features = ["net", "rt"], optional = true }
 
 [dev-dependencies]
