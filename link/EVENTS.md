@@ -101,6 +101,56 @@ extracted, its own lane reader passes event frames to `accept`. The feature
 owns no thread, task or interval, and does no typing: topics, keys and
 payloads stay bytes.
 
+## Two shapes of event
+
+The same bridge serves both; only the routing key differs.
+
+**One ring topic per event type.** Each event is its own type with its own
+ring topic, published and decoded by code that knows that type. The key is the
+ring topic itself.
+
+```rust
+// Publisher, in one fleet: a typed event, one ring topic per type.
+bus.publish("cache.invalidated.v1", &invalidation.encode())?;
+
+// Its forwarder: the ring topic is the routing key.
+for event in cursor.poll(&bus)?.events {
+    bridge.forward(&event, event.topic.as_bytes())?;
+}
+
+// A subscriber in the other fleet declares the same topic.
+bridge.interest(&["cache.invalidated.v1"])?;
+```
+
+**One envelope for applications of several runtimes.** Applications running
+on the fleet in different languages — JavaScript, PHP, Python — share one
+wrapper event instead of one ring topic per event: every event rides one ring
+topic, and the domain topic and payload sit inside the envelope, in a
+language-neutral value encoding each runtime can read. The ring topic says
+only "this is an application event", so routing by it would put every
+application event behind one interest. The downstream opens its own envelope
+and routes by the inner topic.
+
+```rust
+// Publisher: a PHP or JavaScript application emits a domain event; the host
+// wraps it in the shared envelope under the one envelope ring topic.
+bus.publish("application.event", &Envelope::new("wallet.expired.v1", payload).encode())?;
+
+// Its forwarder: the routing key is the topic inside the envelope.
+for event in cursor.poll(&bus)?.events {
+    let envelope = Envelope::decode(&event.payload)?;
+    bridge.forward(&event, envelope.topic().as_bytes())?;
+}
+
+// A subscriber in the other fleet — say a Python application that can decode
+// `wallet.expired.v1` — declares the inner topic, not the envelope's.
+bridge.interest(&["wallet.expired.v1"])?;
+```
+
+In both, the frame carries the ring topic and payload unchanged, and the
+receiver republishes them as they were: an envelope stays an envelope, so
+every runtime of the receiving fleet reads it the way it reads its own.
+
 ## Open decisions
 
 - Size of the interest set (bits per lane) and the hash; it is geometry, so it
