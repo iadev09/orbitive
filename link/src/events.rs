@@ -36,6 +36,15 @@ use orbit_events::{
 use crate::inbox::{INTEREST_BITS, INTEREST_WORDS};
 use crate::{DirectoryWatcher, Error, LinkSegment, Result, frame};
 
+/// What this feature's keys are tagged with in the shared interest table.
+///
+/// The table belongs to the link, not to events: whatever else crosses a link
+/// one day records its interest in the same set. A key is hashed after this
+/// tag, so an event topic and another feature's key that happen to be spelled
+/// the same land on different bits. Both ends compute it from this constant;
+/// a build without it reads none of the other side's interest.
+const INTEREST_TAG: &[u8] = b"events\0";
+
 /// What an event is matched by against the far side's interest.
 #[derive(Clone, Copy)]
 pub enum Routing {
@@ -123,7 +132,7 @@ impl<L: EventLayout> LinkEvents<L> {
     ) {
         let mut bits = [0u64; INTEREST_WORDS];
         for key in keys {
-            for bit in positions(key.as_ref()) {
+            for bit in positions(INTEREST_TAG, key.as_ref()) {
                 bits[bit / 64] |= 1 << (bit % 64);
             }
         }
@@ -259,7 +268,7 @@ impl<L: EventLayout> LinkEvents<L> {
                 merge(lanes + slot);
             }
         }
-        positions(key)
+        positions(INTEREST_TAG, key)
             .iter()
             .all(|bit| union[bit / 64] & (1 << (bit % 64)) != 0)
     }
@@ -301,11 +310,15 @@ impl<L: EventLayout> Drop for LinkEvents<L> {
     }
 }
 
-/// Two bit positions for a key. FNV-1a, so every process — whatever binary or
-/// compiler built it — computes the same positions for the same bytes.
-fn positions(key: &[u8]) -> [usize; 2] {
+/// Two bit positions for a key under its feature's tag. FNV-1a, so every
+/// process — whatever binary or compiler built it — computes the same
+/// positions for the same bytes.
+fn positions(
+    tag: &[u8],
+    key: &[u8],
+) -> [usize; 2] {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in key {
+    for byte in tag.iter().chain(key) {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }

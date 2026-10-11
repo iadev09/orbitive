@@ -156,7 +156,11 @@ every runtime of the receiving fleet reads it the way it reads its own.
 
 - **Interest set:** 448 bits per entry (seven words, one cache line with its
   sequence word), two positions per key from FNV-1a, so processes built by
-  different binaries or compilers agree on them.
+  different binaries or compilers agree on them. The table belongs to the
+  link, not to events, so each key is hashed after its feature's tag
+  (`events\0`): another feature's key spelled like an event topic lands on
+  other bits. The tag is part of the wire contract — both ends must run a
+  build that has it.
 - **Where interest lives:** its own table after the watchers, one entry per
   lane and per watcher slot (inbox layout 6). The segment grows, so a
   deployment moves the inbox to a new kind. A watcher also carries a role, so
