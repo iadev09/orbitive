@@ -295,8 +295,14 @@ impl<L: EventLayout> LinkEvents<L> {
         let inbox = self.segment.inbox();
         let far: Vec<usize> =
             (0..inbox.lanes()).filter(|lane| self.is_far_lane(*lane)).collect();
-        let (lane, _) =
-            inbox.ready(&far).into_iter().next().ok_or(Error::NoLane)?;
+        let Some((lane, _)) = inbox.ready(&far).into_iter().next() else {
+            // Every far lane refused. One a killed process left keeps
+            // refusing until it is taken back.
+            for lane in far {
+                self.segment.reclaim_if_gone(lane)?;
+            }
+            return Err(Error::NoLane);
+        };
         frame::encode_event(&event.topic, &event.payload, frame)?;
         inbox.write(lane, frame)?;
         Ok(())

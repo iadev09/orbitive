@@ -88,12 +88,7 @@ impl LinkSegment {
     ) -> Result<Joined> {
         let mut reclaimed = Vec::new();
         for lane in 0..self.inbox.lanes() {
-            if self.inbox.consumers(lane)? == 0 {
-                continue;
-            }
-            if let Some(_gone) = self.hold(lane)?
-                && let Some(lane) = self.inbox.reclaim(lane)?
-            {
+            if let Some(lane) = self.reclaim_if_gone(lane)? {
                 reclaimed.push(lane);
             }
         }
@@ -101,6 +96,28 @@ impl LinkSegment {
             self.inbox
                 .join(service, role, incarnation, |lane| self.hold(lane))?;
         Ok(Joined { lane, hold, reclaimed })
+    }
+
+    /// Take back `lane` if it is claimed and its kernel hold is free: its
+    /// owner died without releasing it. `None` when the lane is free or its
+    /// owner is alive.
+    ///
+    /// A join does this for every lane. A writer refused by a lane asks it
+    /// for that lane: a process killed outright leaves its lane claimed and
+    /// filling, so until the next join every writer would keep finding it
+    /// full. Reclaiming announces the directory, so watchers see the
+    /// departure as they see an orderly one.
+    pub fn reclaim_if_gone(
+        &self,
+        lane: usize,
+    ) -> Result<Option<Reclaimed>> {
+        if self.inbox.consumers(lane)? == 0 {
+            return Ok(None);
+        }
+        match self.hold(lane)? {
+            Some(_gone) => self.inbox.reclaim(lane),
+            None => Ok(None),
+        }
     }
 
     fn hold(
