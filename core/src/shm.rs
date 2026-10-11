@@ -332,6 +332,9 @@ impl ShmRegion {
         // Elsewhere, don't expose the object to its initial group before chown.
         #[cfg(not(target_os = "macos"))]
         let (can_create, creation_mode) = (true, 0o600u32);
+        // Apple declares shm_open as variadic, so its mode stays promoted to u32.
+        #[cfg(not(target_vendor = "apple"))]
+        let creation_mode = creation_mode as libc::mode_t;
         // Try create-exclusive first; if it already exists, open.
         let (raw_fd, created) = unsafe {
             // SAFETY: passing a valid C string and well-known POSIX flags.
@@ -339,7 +342,7 @@ impl ShmRegion {
                 libc::shm_open(
                     cname.as_ptr(),
                     libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                    creation_mode as libc::mode_t,
+                    creation_mode,
                 )
             } else {
                 libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0)

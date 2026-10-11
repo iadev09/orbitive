@@ -59,12 +59,14 @@ fn raw_create(
     name: &str,
     mode: u32,
 ) -> OwnedFd {
+    #[cfg(not(target_vendor = "apple"))]
+    let mode = mode as libc::mode_t;
     let name = CString::new(name).unwrap();
     let fd = unsafe {
         libc::shm_open(
             name.as_ptr(),
             libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-            mode as libc::mode_t,
+            mode,
         )
     };
     assert!(fd >= 0, "{}", std::io::Error::last_os_error());
