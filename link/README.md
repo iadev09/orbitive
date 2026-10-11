@@ -35,8 +35,9 @@ first. Blocking integrations may continue to use the lane's wake word.
 `LinkSegment::watch()` gives a process that holds no lane a
 `DirectoryWatcher`, woken by the same claims and releases. Being woken is not
 being connected: the watcher takes a slot of its own, serves nothing and never
-appears in the directory. Why it is shaped this way is in
-[DIRECTORY_WATCH.md](DIRECTORY_WATCH.md).
+appears in the directory. `DirectoryWatcher::next()` reports a changed
+directory generation; the caller reads the directory to determine which
+services are currently available.
 
 The crate deliberately defines no application frame. HTTP heads, invocation
 envelopes, resource leases and routing policy belong to adapters. It also does
@@ -74,3 +75,6 @@ compares the exchange payload arena with sockets across body size, application
 chunk size and concurrency. `orbit-link` uses `StreamSpec` duplex byte rings,
 not that exchange arena. Those results inform stream and chunk geometry; they
 are not a substitute for a downstream named-link integration test.
+
+Recorded results, environments and measurement limits are in
+[BENCHMARKS.md](BENCHMARKS.md).
