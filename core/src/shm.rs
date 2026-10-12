@@ -1008,7 +1008,9 @@ fn lock_dir() -> PathBuf {
     lock_dir_for_uid(uid)
 }
 
-fn lock_dir_for_uid(uid: u32) -> PathBuf {
+/// Locate the existing per-user companion lock directory without creating it.
+/// Tools can use its filenames as discovery hints, but must verify SHM objects.
+pub fn lock_dir_for_uid(uid: u32) -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())

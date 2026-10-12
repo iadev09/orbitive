@@ -14,7 +14,21 @@ cargo install orbitive-cli
 
 ## Usage
 
-List every shared-memory kind owned by the current effective user:
+Discover fleets without knowing their names:
+
+```sh
+orbit fleets
+orbit fleets --uid 501
+```
+
+Each row shows the fleet name, segment count and total segment size. Discovery
+uses existing fleet membership and segment companion lock filenames as hints,
+then confirms exact SHM names with `shm_open`. Stale locks without SHM are
+excluded. This is a snapshot of retained resources, not a running-process list.
+No registry is created and no fleet is joined. Objects without a companion
+lock hint, or outside the selected lock directory, cannot be discovered.
+
+List every shared-memory kind for a known fleet owned by the current effective user:
 
 ```sh
 orbit list example

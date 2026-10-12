@@ -27,10 +27,19 @@ struct Cli {
 enum Command {
     /// Explore retained cache keys; select a key to read its arena value.
     Cache(cache::CacheArgs),
+    /// Discover fleets with existing shared-memory objects.
+    Fleets(FleetsArgs),
     /// List shared-memory objects belonging to a fleet.
     List(ListArgs),
     /// Remove shared-memory objects belonging to a stopped fleet.
     Clear(ClearArgs),
+}
+
+#[derive(Debug, Args)]
+struct FleetsArgs {
+    /// Effective user id that owns the objects.
+    #[arg(long, value_name = "UID")]
+    uid: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -91,9 +100,29 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Cache(args) => cache::run(args),
+        Command::Fleets(args) => fleets(args),
         Command::List(args) => list(args),
         Command::Clear(args) => clear(args),
     }
+}
+
+fn fleets(args: FleetsArgs) -> Result<(), Box<dyn Error>> {
+    let uid = args.uid.unwrap_or_else(shm::effective_uid);
+    let fleets = shm::discover_fleets(uid)?;
+    if fleets.is_empty() {
+        println!("No Orbit SHM fleets found for uid={uid}.");
+        return Ok(());
+    }
+    println!("{:<24}  {:>8}  {:>12}", "FLEET", "SEGMENTS", "TOTAL SIZE");
+    for fleet in fleets {
+        println!(
+            "{:<24}  {:>8}  {:>12}",
+            fleet.name,
+            fleet.segments,
+            human_size(fleet.size)
+        );
+    }
+    Ok(())
 }
 
 fn list(args: ListArgs) -> Result<(), Box<dyn Error>> {
@@ -180,13 +209,5 @@ fn human_size(bytes: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::human_size;
-
-    #[test]
-    fn formats_binary_sizes() {
-        assert_eq!(human_size(900), "900 B");
-        assert_eq!(human_size(3_200), "3.12 KiB");
-        assert_eq!(human_size(3_355_443), "3.20 MiB");
-    }
-}
+#[path = "../tests/main/mod.rs"]
+mod tests;

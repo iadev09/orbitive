@@ -1,14 +1,101 @@
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::Path;
 use std::{fs, io};
 
-use orbit_core::shm::{companion_lock_files, ring_segment_name_for_uid};
+use orbit_core::shm::{
+    SHM_NAMESPACE, companion_lock_files, lock_dir_for_uid,
+    ring_segment_name_for_uid,
+};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Segment {
     pub kind: u8,
     pub name: String,
     pub size: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct FleetSummary {
+    pub name: String,
+    pub segments: usize,
+    pub size: u64,
+}
+
+pub fn discover_fleets(uid: u32) -> io::Result<Vec<FleetSummary>> {
+    discover_fleets_in(&lock_dir_for_uid(uid), uid)
+}
+
+fn discover_fleets_in(
+    dir: &Path,
+    uid: u32,
+) -> io::Result<Vec<FleetSummary>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(context(&dir.display().to_string(), error)),
+    };
+    let mut candidates = BTreeSet::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let filename = entry.file_name();
+        if let Some(fleet) =
+            filename.to_str().and_then(|name| fleet_hint(name, uid))
+        {
+            candidates.insert(fleet.to_owned());
+        }
+    }
+    let mut fleets = Vec::new();
+    for name in candidates {
+        let segments = discover(&name, uid, None)?;
+        if segments.is_empty() {
+            continue;
+        }
+        let size = segments.iter().try_fold(0_u64, |total, segment| {
+            total.checked_add(segment.size).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "fleet size overflow",
+                )
+            })
+        })?;
+        fleets.push(FleetSummary { name, segments: segments.len(), size });
+    }
+    Ok(fleets)
+}
+
+fn fleet_hint(
+    filename: &str,
+    uid: u32,
+) -> Option<&str> {
+    let stem = filename.strip_prefix(SHM_NAMESPACE)?.strip_prefix('-')?;
+    if let Some(fleet) = stem.strip_suffix(".fleet") {
+        validate_fleet(fleet).ok()?;
+        return Some(fleet);
+    }
+    let stem = stem.strip_suffix(".lock")?;
+    let (rest, owner) = stem.rsplit_once('-')?;
+    if owner != uid.to_string() {
+        return None;
+    }
+    let (fleet, kind) = rest.rsplit_once('-')?;
+    let kind_number = kind.parse::<u8>().ok()?;
+    if kind != kind_number.to_string() {
+        return None;
+    }
+    validate_fleet(fleet).ok()?;
+    Some(fleet)
 }
 
 pub fn effective_uid() -> u32 {
@@ -85,7 +172,12 @@ fn inspect(
         if error.kind() == io::ErrorKind::Interrupted {
             continue;
         }
-        if error.raw_os_error() == Some(libc::ENOENT) {
+        // A stale membership file may belong to a memory-only fleet whose
+        // name cannot fit the platform's POSIX SHM namespace.
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::ENOENT | libc::ENAMETOOLONG)
+        ) {
             return Ok(None);
         }
         return Err(context(&name, error));
@@ -142,92 +234,5 @@ fn context(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::sync::atomic::{AtomicU8, Ordering};
-
-    use orbit_core::shm::ring_segment_name_for_uid;
-
-    use super::{c_name, discover, effective_uid, unlink};
-
-    static NEXT_KIND: AtomicU8 = AtomicU8::new(240);
-
-    #[test]
-    fn follows_the_orbit_name_contract() {
-        assert_eq!(
-            ring_segment_name_for_uid("web", 231, 501),
-            "/orbit-web-231-501"
-        );
-    }
-
-    #[test]
-    fn discovers_and_unlinks_an_object() {
-        let uid = effective_uid();
-        let kind = NEXT_KIND.fetch_add(1, Ordering::Relaxed);
-        let fleet = format!("t{:x}", std::process::id());
-        let name = ring_segment_name_for_uid(&fleet, kind, uid);
-        let c_name = c_name(&name).expect("test name must be valid");
-
-        // SAFETY: `c_name` and flags form a valid exclusive SHM create call.
-        let raw_fd = unsafe {
-            libc::shm_open(
-                c_name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            )
-        };
-        assert!(raw_fd >= 0, "failed to create {name}: {}", io_error());
-        // SAFETY: `raw_fd` was returned by `shm_open` and is uniquely owned.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-        // SAFETY: `fd` is valid and the requested length is representable.
-        let rc = unsafe { libc::ftruncate(fd.as_raw_fd(), 4096) };
-        assert_eq!(rc, 0, "failed to size {name}: {}", io_error());
-        drop(fd);
-
-        let found =
-            discover(&fleet, uid, Some(kind)).expect("discovery must succeed");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].kind, kind);
-        assert_eq!(found[0].name, name);
-        assert!(found[0].size >= 4096);
-
-        unlink(&found[0], uid).expect("unlink must succeed");
-        assert!(
-            discover(&fleet, uid, Some(kind))
-                .expect("second discovery must succeed")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn discovery_does_not_match_an_orbit_prefix() {
-        let uid = effective_uid();
-        let fleet = format!("p{:x}", std::process::id());
-        let similar_name = format!("/orbit-{fleet}-231-{uid}-extra");
-        let c_name = c_name(&similar_name).expect("test name must be valid");
-
-        // SAFETY: `c_name` and flags form a valid exclusive SHM create call.
-        let raw_fd = unsafe {
-            libc::shm_open(
-                c_name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            )
-        };
-        assert!(raw_fd >= 0, "failed to create {similar_name}: {}", io_error());
-        // SAFETY: `raw_fd` was returned by `shm_open` and is uniquely owned.
-        drop(unsafe { OwnedFd::from_raw_fd(raw_fd) });
-
-        let found =
-            discover(&fleet, uid, None).expect("discovery must succeed");
-        assert!(found.is_empty());
-
-        // SAFETY: `c_name` identifies the object created by this test.
-        let rc = unsafe { libc::shm_unlink(c_name.as_ptr()) };
-        assert_eq!(rc, 0, "failed to remove {similar_name}: {}", io_error());
-    }
-
-    fn io_error() -> std::io::Error {
-        std::io::Error::last_os_error()
-    }
-}
+#[path = "../tests/shm/mod.rs"]
+mod tests;
