@@ -165,6 +165,19 @@ pub(crate) fn encode_reset<L: CacheLayout>(store: &[u8]) -> Result<Bytes> {
 }
 
 pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
+    decode_with_slot_limit::<{ orbit_arena::ARENA_SLOTS }>(frame)
+}
+
+/// Diagnostic readers don't share a producer's compiled capacity profile.
+/// Their arena reader validates addresses against the actual mapped header.
+pub(crate) fn decode_observed(frame: &Frame) -> Option<CacheMutation> {
+    decode_with_slot_limit::<{ usize::MAX }>(frame)
+}
+
+#[inline]
+fn decode_with_slot_limit<const SLOTS: usize>(
+    frame: &Frame
+) -> Option<CacheMutation> {
     if frame.payload.len() < MIN_MUTATION_HEADER_LEN
         || frame.payload[0] != PROTOCOL_VERSION
     {
@@ -194,7 +207,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
             if store_len > 0
                 && key_len > 0
                 && generation > 0
-                && (slot as usize) < orbit_arena::ARENA_SLOTS
+                && (slot as usize) < SLOTS
                 && value_len <= usize::MAX as u64 =>
         {
             Some(CacheMutation::Put {

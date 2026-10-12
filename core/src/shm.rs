@@ -190,16 +190,41 @@ impl ShmRegion {
         owner_uid: u32,
         policy: ShmAccessPolicy,
     ) -> io::Result<Self> {
+        Self::open_existing(name, minimum_size, owner_uid, policy, false)
+    }
+
+    /// Attach writable to an existing object, without creating or sizing it.
+    /// Semantic readers use this only for existing atomic reader-pin fields.
+    pub fn open_existing_read_write(
+        name: &str,
+        minimum_size: usize,
+        owner_uid: u32,
+        policy: ShmAccessPolicy,
+    ) -> io::Result<Self> {
+        Self::open_existing(name, minimum_size, owner_uid, policy, true)
+    }
+
+    fn open_existing(
+        name: &str,
+        minimum_size: usize,
+        owner_uid: u32,
+        policy: ShmAccessPolicy,
+        writable: bool,
+    ) -> io::Result<Self> {
         let cname = CString::new(name).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte")
         })?;
         let raw_fd = loop {
-            // SAFETY: passing a valid C string and read-only POSIX flags.
+            // SAFETY: passing a valid C string and existing-only POSIX flags.
             // macOS `shm_open` rejects `O_CLOEXEC` with EINVAL. This
             // descriptor closes immediately after `mmap`, before the view is
             // returned, so it cannot leak across a later exec.
             let fd = unsafe {
-                libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0o600)
+                libc::shm_open(
+                    cname.as_ptr(),
+                    if writable { libc::O_RDWR } else { libc::O_RDONLY },
+                    0o600,
+                )
             };
             if fd >= 0 {
                 break fd;
@@ -219,12 +244,12 @@ impl ShmRegion {
         // Map the complete object so its persisted header can describe the
         // geometry without the observer reproducing the producer's layout.
         // SAFETY: fd is valid, actual_size is positive after minimum
-        // validation, and the mapping is read-only.
+        // validation. Protection follows the requested attachment capability.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 actual_size,
-                libc::PROT_READ,
+                libc::PROT_READ | if writable { libc::PROT_WRITE } else { 0 },
                 libc::MAP_SHARED,
                 fd.as_raw_fd(),
                 0,
@@ -238,7 +263,8 @@ impl ShmRegion {
             .expect("mmap returned non-null on success");
 
         Ok(Self {
-            lock_path: lock_file_path(name),
+            lock_path: lock_dir_for_uid(owner_uid)
+                .join(format!("{}.lock", name.trim_start_matches('/'))),
             name: cname,
             process_lock: false,
             ptr,
@@ -774,6 +800,35 @@ pub fn join_fleet_membership(fleet_name: &str) -> io::Result<FleetMembership> {
         return Err(io::Error::last_os_error());
     }
     Ok(FleetMembership { lock_fd })
+}
+
+/// Protect an existing fleet against clearing while a diagnostic reader pins
+/// its arena. Never creates a membership file or reserves a writer lane.
+pub fn hold_existing_fleet(fleet_name: &str) -> io::Result<FleetMembership> {
+    use std::os::unix::fs::MetadataExt;
+    let path = fleet_lock_path(fleet_name);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "fleet membership file has an unexpected owner or type",
+        ));
+    }
+    let lock_fd: OwnedFd = file.into();
+    loop {
+        let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_SH) };
+        if rc == 0 {
+            return Ok(FleetMembership { lock_fd });
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 /// Exclusive hold on a fleet, for the tool that removes its segments.

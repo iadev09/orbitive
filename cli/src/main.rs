@@ -3,6 +3,7 @@
 #[cfg(not(unix))]
 compile_error!("orbitive-cli currently requires a Unix target");
 
+mod cache;
 mod shm;
 
 use std::error::Error;
@@ -24,6 +25,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Explore retained cache keys; select a key to read its arena value.
+    Cache(cache::CacheArgs),
     /// List shared-memory objects belonging to a fleet.
     List(ListArgs),
     /// Remove shared-memory objects belonging to a stopped fleet.
@@ -87,6 +90,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
+        Command::Cache(args) => cache::run(args),
         Command::List(args) => list(args),
         Command::Clear(args) => clear(args),
     }

@@ -29,9 +29,13 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use orbit_core::Fleet;
 #[cfg(unix)]
+mod reader;
+#[cfg(unix)]
 use orbit_core::shm::{
     LaneHold, ShmRegion, ShmRegionLock, ring_segment_name, try_hold_lane,
 };
+#[cfg(unix)]
+pub use reader::{ArenaReader, ReaderEntry};
 
 /// Reserved Orbit SHM kind for the arena segment.
 pub const ARENA_KIND: u8 = 193;

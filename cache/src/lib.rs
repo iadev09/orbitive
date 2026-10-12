@@ -9,6 +9,8 @@
 mod error;
 mod layout;
 mod local;
+#[cfg(unix)]
+pub mod observer;
 mod protocol;
 mod transport;
 

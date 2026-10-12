@@ -57,3 +57,11 @@ record with its 64 MiB default). Idle L1 metadata does not hold pins. A returned
 `entry.value` owns its pin until the last `Bytes` clone drops; it remains valid
 across invalidation. Kernel-held reader ownership allows SIGKILL recovery
 without timers or clearing another live process' pins.
+
+On Unix, `observer::CacheObserver` maps existing mutation history without
+joining a fleet or opening arena values. Its diagnostic snapshot reports
+retained Put candidates after applying retained Delete/Reset mutations,
+including loss and concurrent-change accounting. This is not an authoritative
+list of worker L1 entries; missing retained history cannot prove a cache miss.
+Use an existing arena reader capability only when selecting a value, and
+handle exact-address reuse as unavailable rather than replacement data.

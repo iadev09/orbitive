@@ -70,3 +70,12 @@ after exec; inherited handles/entries cannot be used by a fork child.
 The v2 arena uses SHM kind 193. Kind 242 belongs to the former anonymous-pin
 layout; it is not reopened, resized or automatically unlinked. All peers must
 rebuild for the same layout before sharing this arena.
+
+On Unix, diagnostics can attach an `ArenaReader` to an existing
+`FleetObserver`. It exposes only exact-address pinned reads: no writes, reset,
+or unlink, and no writer lock. It claims one of the existing reader-owner rows;
+capacity exhaustion is an explicit error, never a live-owner reclaim. No SHM
+is created. The attachment protects the fleet against clearing until its last
+entry drops. Run as the owning uid. The diagnostic reader validates the ABI
+and reads the persisted geometry; it need not share the producer's compiled
+capacity profile. This does not relax geometry checks for ordinary writers.
