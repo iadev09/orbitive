@@ -17,7 +17,7 @@ all-features = true
 
 [features]
 auth = ["dep:orbit-auth"]
-cache = ["dep:orbit-cache"]
+cache = ["dep:orbit-cache", "arena"]
 lock = ["dep:orbit-lock"]
 events = ["dep:orbit-events"]
 counter = ["dep:orbit-counter"]

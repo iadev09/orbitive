@@ -159,6 +159,13 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
     group.finish();
 
     observer_cache.transport().unlink_rings().expect("unlink benchmark rings");
+    // This benchmark owns a fresh, isolated fleet, unlike a cache runtime
+    // which may share its arena with file bodies.
+    observer_cache
+        .transport()
+        .arena()
+        .unlink()
+        .expect("unlink benchmark arena");
 }
 
 #[cfg(not(unix))]

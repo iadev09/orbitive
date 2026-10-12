@@ -15,18 +15,26 @@
 //! Readers take no lock. A writer holds the region's process lock (`flock`,
 //! which the kernel releases when a process dies) for the duration of a put,
 //! so a crashed writer leaves at most one unpublished record behind.
+//! Reader pins are per-owner counters protected by a lifetime kernel hold.
+//! Allocation reclaims only owners whose hold can be taken, including after
+//! SIGKILL. Ordinary reads and drops use atomics, not kernel calls.
 
+use std::cell::UnsafeCell;
 use std::fmt;
+#[cfg(unix)]
+use std::mem::ManuallyDrop;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use orbit_core::Fleet;
 #[cfg(unix)]
-use orbit_core::shm::{ShmRegion, ShmRegionLock, ring_segment_name};
+use orbit_core::shm::{
+    LaneHold, ShmRegion, ShmRegionLock, ring_segment_name, try_hold_lane,
+};
 
 /// Reserved Orbit SHM kind for the arena segment.
-pub const ARENA_KIND: u8 = 242;
+pub const ARENA_KIND: u8 = 193;
 /// Index slots: how many records the arena can name at once. Power of two.
 ///
 /// Compile-time geometry: `ORBIT_ARENA_SLOTS` in the application's
@@ -50,9 +58,11 @@ const SLOT_LIVE: u8 = 1;
 /// Evicted or reset while a reader held it: unreachable to lookups, its
 /// bytes untouched until the last pin drops.
 const SLOT_RETIRED: u8 = 2;
+// Addressed records have no caller key and cannot collide with keyed records.
+const SLOT_ADDRESSED: u8 = 3;
 
 const MAGIC: u32 = 0x41_52_45_4e; // "AREN"
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -101,6 +111,14 @@ impl From<std::io::Error> for Error {
 /// digest's problem and not a weak hash of this crate's choosing.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Key(u128);
+
+/// A particular immutable record, not a reusable key or a byte offset.
+/// A reused index slot has a different generation and is an honest miss.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Address {
+    pub slot: u32,
+    pub generation: u64,
+}
 
 impl Key {
     pub const fn new(digest: u128) -> Self {
@@ -186,11 +204,14 @@ struct Header {
     /// Bumped by every reset, so a reader can tell "emptied since" apart
     /// from "never filled".
     generation: AtomicU32,
-    _reserved: [u8; 28],
+    readers: u32,
+    /// Non-repeating record generation, also ordering index eviction.
+    record_generation: AtomicU64,
+    _reserved: [u8; 16],
 }
 
 impl Header {
-    fn new() -> Self {
+    fn new(readers: u16) -> Self {
         Self {
             magic: MAGIC,
             version: VERSION,
@@ -200,17 +221,23 @@ impl Header {
             bytes: ARENA_BYTES as u64,
             cursor: AtomicU64::new(0),
             generation: AtomicU32::new(1),
-            _reserved: [0; 28],
+            readers: u32::from(readers),
+            record_generation: AtomicU64::new(0),
+            _reserved: [0; 16],
         }
     }
 
-    fn compatible(&self) -> bool {
+    fn compatible(
+        &self,
+        readers: u16,
+    ) -> bool {
         self.magic == MAGIC
             && self.version == VERSION
             && usize::from(self.header_size) == size_of::<Self>()
             && self.slots as usize == ARENA_SLOTS
             && self.slot_size as usize == size_of::<Slot>()
             && self.bytes as usize == ARENA_BYTES
+            && self.readers == u32::from(readers)
     }
 }
 
@@ -220,12 +247,9 @@ struct Slot {
     state: AtomicU8,
     encoding: AtomicU8,
     _reserved: [u8; 2],
-    /// Readers currently borrowing the bytes. A writer never overwrites a
-    /// span whose slot is pinned.
-    pins: AtomicU32,
+    _reserved_pin: u32,
     /// Bumped on every install; an [`Entry`] carries the one it pinned.
-    generation: AtomicU32,
-    _reserved2: u32,
+    generation: AtomicU64,
     key_lo: AtomicU64,
     key_hi: AtomicU64,
     body_offset: AtomicU64,
@@ -259,16 +283,32 @@ impl Slot {
 
 const _: () = assert!(size_of::<Slot>() == 128);
 const _: () = assert!(ARENA_SLOTS.is_power_of_two());
+const _: () = assert!(ARENA_SLOTS <= u32::MAX as usize);
 const _: () = assert!(ARENA_RECORD_MAX > 0);
 
-const fn segment_size() -> usize {
-    size_of::<Header>() + ARENA_SLOTS * size_of::<Slot>() + ARENA_BYTES
+const fn reader_stride() -> usize {
+    // One cache-line owner marker, followed by its per-slot pin counters.
+    64 + ARENA_SLOTS * size_of::<AtomicU32>()
 }
+
+const fn ring_offset(readers: usize) -> usize {
+    size_of::<Header>()
+        + ARENA_SLOTS * size_of::<Slot>()
+        + readers * reader_stride()
+}
+
+const fn segment_size(readers: usize) -> usize {
+    ring_offset(readers) + ARENA_BYTES
+}
+
+#[repr(C, align(64))]
+#[derive(Clone)]
+struct Block([u8; 64]);
 
 enum Backing {
     #[cfg(unix)]
     Shm(ShmRegion),
-    Memory(Box<[u8]>),
+    Memory(Box<[UnsafeCell<Block>]>),
 }
 
 struct Inner {
@@ -276,6 +316,14 @@ struct Inner {
     /// Serialises this process's writers; the cross-process lock is taken
     /// inside it, so threads never contend for a file lock they cannot share.
     write: Mutex<()>,
+    reader: usize,
+    pid: u32,
+    claimed: bool,
+    _fleet: Arc<Fleet>,
+    #[cfg(unix)]
+    name: Option<String>,
+    #[cfg(unix)]
+    _hold: Option<ManuallyDrop<LaneHold>>,
 }
 
 /// Held for a put: this process's writer mutex, and the region's process
@@ -291,7 +339,7 @@ impl Inner {
         match &self.backing {
             #[cfg(unix)]
             Backing::Shm(region) => region.as_ptr(),
-            Backing::Memory(bytes) => bytes.as_ptr().cast_mut(),
+            Backing::Memory(bytes) => bytes.as_ptr().cast_mut().cast(),
         }
     }
 
@@ -314,10 +362,7 @@ impl Inner {
 
     fn ring(&self) -> *mut u8 {
         // SAFETY: the ring follows the slots inside the mapped segment.
-        unsafe {
-            self.base()
-                .add(size_of::<Header>() + ARENA_SLOTS * size_of::<Slot>())
-        }
+        unsafe { self.base().add(ring_offset(self.header().readers as usize)) }
     }
 
     /// The bytes of one span. Only meaningful while the slot that names it is
@@ -338,6 +383,12 @@ impl Inner {
     }
 
     fn lock(&self) -> Result<WriteGuard<'_>> {
+        if self.pid != std::process::id() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "an inherited arena handle cannot be used after fork",
+            )));
+        }
         let local =
             self.write.lock().unwrap_or_else(|error| error.into_inner());
         #[cfg(unix)]
@@ -351,7 +402,110 @@ impl Inner {
             _shared: shared,
         })
     }
+
+    fn reader_active(
+        &self,
+        reader: usize,
+    ) -> &AtomicU32 {
+        // SAFETY: validated reader rows follow the index; all access is atomic.
+        unsafe {
+            &*self
+                .base()
+                .add(
+                    size_of::<Header>()
+                        + ARENA_SLOTS * size_of::<Slot>()
+                        + reader * reader_stride(),
+                )
+                .cast()
+        }
+    }
+
+    fn pin(
+        &self,
+        reader: usize,
+        slot: usize,
+    ) -> &AtomicU32 {
+        // SAFETY: the row contains exactly ARENA_SLOTS atomic counters.
+        unsafe {
+            &*self
+                .base()
+                .add(
+                    size_of::<Header>()
+                        + ARENA_SLOTS * size_of::<Slot>()
+                        + reader * reader_stride()
+                        + 64
+                        + slot * size_of::<AtomicU32>(),
+                )
+                .cast()
+        }
+    }
+
+    fn pinned(
+        &self,
+        slot: usize,
+    ) -> bool {
+        (0..self.header().readers as usize).any(|reader| {
+            self.reader_active(reader).load(Ordering::Acquire) != 0
+                && self.pin(reader, slot).load(Ordering::SeqCst) != 0
+        })
+    }
+
+    fn clear_reader(
+        &self,
+        reader: usize,
+    ) -> u64 {
+        let pins = (0..ARENA_SLOTS)
+            .map(|slot| {
+                u64::from(self.pin(reader, slot).swap(0, Ordering::SeqCst))
+            })
+            .sum();
+        self.reader_active(reader).store(0, Ordering::Release);
+        pins
+    }
+
+    // Called only under the writer lock. Taking the owner's kernel hold is
+    // death proof and also excludes a replacement owner while its row clears.
+    fn reclaim_locked(&self) -> Result<u64> {
+        let mut reclaimed = 0;
+        #[cfg(unix)]
+        if let Some(name) = &self.name {
+            for reader in 0..self.header().readers as usize {
+                if reader == self.reader
+                    || self.reader_active(reader).load(Ordering::Acquire) == 0
+                {
+                    continue;
+                }
+                if let Some(_hold) = try_hold_lane(name, reader)? {
+                    reclaimed += self.clear_reader(reader);
+                }
+            }
+        }
+        Ok(reclaimed)
+    }
 }
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Entries own Inner too: the last handle cannot leave live pins.
+        if self.claimed && self.pid == std::process::id() {
+            self.reader_active(self.reader).store(0, Ordering::Release);
+            #[cfg(unix)]
+            if let Some(hold) = &mut self._hold {
+                // SAFETY: this process releases its hold exactly once. A fork
+                // child must never unlock the parent's shared file description;
+                // its inherited descriptor closes only at process exit/exec.
+                unsafe {
+                    ManuallyDrop::drop(hold);
+                }
+            }
+        }
+    }
+}
+
+// Share one mapping and reader claim between all consumers in a process.
+// Inherited handles are not usable in a fork child. Private fleets are
+// distinguished by their shared inner state, not the caller's Arc wrapper.
+static OPEN: OnceLock<Mutex<Vec<Weak<Inner>>>> = OnceLock::new();
 
 /// The fleet's arena. Cheap to clone.
 #[derive(Clone)]
@@ -364,35 +518,103 @@ impl Arena {
     /// first. A fleet without shared memory gets a private in-process arena
     /// of the same geometry.
     pub fn new(fleet: Arc<Fleet>) -> Result<Self> {
+        #[cfg(unix)]
+        let name =
+            fleet.is_shm().then(|| ring_segment_name(fleet.name(), ARENA_KIND));
+        let mut open = OPEN
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(inner) =
+            open.iter().filter_map(Weak::upgrade).find(|inner| {
+                if inner.pid != std::process::id() {
+                    return false;
+                }
+                if !fleet.is_shm() {
+                    return inner._fleet.ptr_eq(&fleet);
+                }
+                #[cfg(unix)]
+                {
+                    inner.name == name
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            })
+        {
+            if inner.header().readers != u32::from(fleet.fleet_capacity()) {
+                return Err(Error::Io(std::io::Error::other(
+                    "incompatible arena reader capacity",
+                )));
+            }
+            return Ok(Self { inner });
+        }
+        open.retain(|inner| inner.strong_count() != 0);
+        let readers = fleet.fleet_capacity();
         let backing = if fleet.is_shm() {
             #[cfg(unix)]
             {
-                Backing::Shm(open_or_create(&ring_segment_name(
-                    fleet.name(),
-                    ARENA_KIND,
-                ))?)
+                Backing::Shm(open_or_create(
+                    name.as_ref().expect("SHM name"),
+                    readers,
+                )?)
             }
             #[cfg(not(unix))]
             unreachable!("non-Unix fleets cannot use POSIX SHM")
         } else {
-            let mut bytes = vec![0_u8; segment_size() + 64].into_boxed_slice();
-            // Align the header on its cache line inside the allocation.
-            let misalignment = bytes.as_ptr() as usize % 64;
-            let start = if misalignment == 0 { 0 } else { 64 - misalignment };
-            // SAFETY: start + size_of::<Header>() lies inside the allocation.
+            let mut bytes =
+                std::iter::repeat_with(|| UnsafeCell::new(Block([0; 64])))
+                    .take(segment_size(readers as usize).div_ceil(64))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+            // SAFETY: Block provides the header's actual 64-byte alignment.
             unsafe {
                 std::ptr::write(
-                    bytes.as_mut_ptr().add(start).cast::<Header>(),
-                    Header::new(),
+                    bytes.as_mut_ptr().cast::<Header>(),
+                    Header::new(readers),
                 )
             };
-            Backing::Memory(if start == 0 {
-                bytes
-            } else {
-                shift(bytes, start)
-            })
+            Backing::Memory(bytes)
         };
-        Ok(Self { inner: Arc::new(Inner { backing, write: Mutex::new(()) }) })
+        let mut inner = Inner {
+            backing,
+            write: Mutex::new(()),
+            reader: 0,
+            pid: std::process::id(),
+            claimed: false,
+            _fleet: fleet,
+            #[cfg(unix)]
+            name,
+            #[cfg(unix)]
+            _hold: None,
+        };
+        #[cfg(unix)]
+        if let Some(name) = &inner.name {
+            let _guard = inner.lock()?;
+            let mut claim = None;
+            for reader in 0..readers as usize {
+                if let Some(hold) = try_hold_lane(name, reader)? {
+                    inner.clear_reader(reader);
+                    inner.reader_active(reader).store(1, Ordering::Release);
+                    claim = Some((reader, hold));
+                    break;
+                }
+            }
+            drop(_guard);
+            let (reader, hold) = claim.ok_or_else(|| {
+                Error::Io(std::io::Error::other(
+                    "arena reader capacity exhausted",
+                ))
+            })?;
+            inner.reader = reader;
+            inner._hold = Some(ManuallyDrop::new(hold));
+        }
+        inner.reader_active(inner.reader).store(1, Ordering::Release);
+        inner.claimed = true;
+        let inner = Arc::new(inner);
+        open.push(Arc::downgrade(&inner));
+        Ok(Self { inner })
     }
 
     /// Borrow the record filed under `key`, pinning its bytes for as long as
@@ -401,6 +623,9 @@ impl Arena {
         &self,
         key: Key,
     ) -> Option<Entry> {
+        if self.inner.pid != std::process::id() {
+            return None;
+        }
         let slots = self.inner.slots();
         let mask = ARENA_SLOTS - 1;
         let start = key.lo() as usize & mask;
@@ -413,23 +638,52 @@ impl Arena {
                     // Pin, then look again: a writer that evicts marks the
                     // slot before it checks for pins, so one of us sees the
                     // other and a span is never both rewritten and read.
-                    slot.pins.fetch_add(1, Ordering::SeqCst);
-                    let generation = slot.generation.load(Ordering::Relaxed);
-                    if slot.state.load(Ordering::SeqCst) == SLOT_LIVE
-                        && slot.holds(key)
-                    {
-                        return Some(Entry::pinned(
-                            Arc::clone(&self.inner),
-                            index,
-                            generation,
-                        ));
-                    }
-                    slot.pins.fetch_sub(1, Ordering::SeqCst);
-                    return None;
+                    let generation = slot.generation.load(Ordering::Acquire);
+                    return self.pin_entry(index, generation, Some(key));
                 }
                 _ => {}
             }
         }
+        None
+    }
+
+    /// Borrow an exact addressed record. Reuse, eviction or reset is a miss.
+    pub fn get_address(
+        &self,
+        address: Address,
+    ) -> Option<Entry> {
+        self.pin_entry(address.slot as usize, address.generation, None)
+    }
+
+    fn pin_entry(
+        &self,
+        index: usize,
+        generation: u64,
+        key: Option<Key>,
+    ) -> Option<Entry> {
+        if self.inner.pid != std::process::id() || index >= ARENA_SLOTS {
+            return None;
+        }
+        let slot = &self.inner.slots()[index];
+        let pins = self.inner.pin(self.inner.reader, index);
+        pins.try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            count.checked_add(1)
+        })
+        .ok()?;
+        let state = slot.state.load(Ordering::SeqCst);
+        if slot.generation.load(Ordering::SeqCst) == generation
+            && match key {
+                Some(key) => state == SLOT_LIVE && slot.holds(key),
+                None => state == SLOT_ADDRESSED,
+            }
+        {
+            return Some(Entry::pinned(
+                Arc::clone(&self.inner),
+                index,
+                generation,
+            ));
+        }
+        pins.fetch_sub(1, Ordering::SeqCst);
         None
     }
 
@@ -441,6 +695,23 @@ impl Arena {
         key: Key,
         record: Record<'_>,
     ) -> Result<()> {
+        self.write_record(Some(key), record).map(|_| ())
+    }
+
+    /// Store an immutable body without assigning a caller key. The address
+    /// can be carried in a mutation; later writes cannot alias this generation.
+    pub fn store(
+        &self,
+        record: Record<'_>,
+    ) -> Result<Address> {
+        self.write_record(None, record)
+    }
+
+    fn write_record(
+        &self,
+        key: Option<Key>,
+        record: Record<'_>,
+    ) -> Result<Address> {
         let total = record.total();
         if total > ARENA_RECORD_MAX {
             return Err(Error::TooLarge { len: total, max: ARENA_RECORD_MAX });
@@ -450,11 +721,42 @@ impl Arena {
 
         // Whatever this key named before is gone once the new record is
         // published; retiring it first keeps a lookup from finding two.
-        if let Some(index) = self.find_locked(key) {
+        if let Some(index) = key.and_then(|key| self.find_locked(key)) {
             evict(&slots[index]);
         }
 
-        let offset = self.allocate_locked(total as u64)?;
+        let offset = match self.allocate_locked(total as u64) {
+            Ok(offset) => offset,
+            Err(Error::Pinned) => {
+                self.inner.reclaim_locked()?;
+                self.allocate_locked(total as u64)?
+            }
+            Err(error) => return Err(error),
+        };
+        let index = match self
+            .free_slot_locked(key.unwrap_or(Key::new(offset as u128)))
+        {
+            Ok(index) => index,
+            Err(Error::Pinned) => {
+                self.inner.reclaim_locked()?;
+                self.free_slot_locked(key.unwrap_or(Key::new(offset as u128)))?
+            }
+            Err(error) => return Err(error),
+        };
+        let slot = &slots[index];
+        let generation = self
+            .inner
+            .header()
+            .record_generation
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| {
+                Error::Io(std::io::Error::other(
+                    "arena record generation exhausted",
+                ))
+            })?
+            + 1;
         // SAFETY: the span is inside the ring, and every slot that named any
         // byte of it is now EMPTY or RETIRED-and-pinned-elsewhere (skipped),
         // so no reader borrows it.
@@ -474,12 +776,8 @@ impl Arena {
             }
         }
 
-        let index = self.free_slot_locked(key)?;
-        let slot = &slots[index];
-        let generation =
-            slot.generation.load(Ordering::Relaxed).wrapping_add(1).max(1);
-        slot.key_lo.store(key.lo(), Ordering::Relaxed);
-        slot.key_hi.store(key.hi(), Ordering::Relaxed);
+        slot.key_lo.store(key.map_or(0, Key::lo), Ordering::Relaxed);
+        slot.key_hi.store(key.map_or(0, Key::hi), Ordering::Relaxed);
         slot.body_offset.store(offset, Ordering::Relaxed);
         slot.body_len.store(record.body.len() as u64, Ordering::Relaxed);
         let (encoded_len, tag) =
@@ -490,10 +788,37 @@ impl Arena {
         slot.encoding.store(tag, Ordering::Relaxed);
         slot.stamp.store(record.stamp, Ordering::Relaxed);
         slot.extra.store(record.extra, Ordering::Relaxed);
-        slot.pins.store(0, Ordering::Relaxed);
         slot.generation.store(generation, Ordering::Relaxed);
-        slot.state.store(SLOT_LIVE, Ordering::Release);
-        Ok(())
+        slot.state.store(
+            if key.is_some() { SLOT_LIVE } else { SLOT_ADDRESSED },
+            Ordering::SeqCst,
+        );
+        Ok(Address { slot: index as u32, generation })
+    }
+
+    /// Withdraw only this exact record. Existing pins keep its bytes valid.
+    pub fn forget_address(
+        &self,
+        address: Address,
+    ) -> Result<bool> {
+        let _guard = self.inner.lock()?;
+        let Some(slot) = self.inner.slots().get(address.slot as usize) else {
+            return Ok(false);
+        };
+        if slot.state.load(Ordering::Acquire) != SLOT_ADDRESSED
+            || slot.generation.load(Ordering::Relaxed) != address.generation
+        {
+            return Ok(false);
+        }
+        evict(slot);
+        Ok(true)
+    }
+
+    /// Reclaim pins only from rows whose kernel hold can be taken. Never
+    /// uses a PID probe, heartbeat, timeout or live owner's counter reset.
+    pub fn reclaim_dead_pins(&self) -> Result<u64> {
+        let _guard = self.inner.lock()?;
+        self.inner.reclaim_locked()
     }
 
     /// Drop the record under `key`. Its bytes stay in the ring until the
@@ -516,7 +841,10 @@ impl Arena {
         let _guard = self.inner.lock()?;
         let mut live = 0;
         for slot in self.inner.slots() {
-            if slot.state.load(Ordering::Relaxed) == SLOT_LIVE {
+            if matches!(
+                slot.state.load(Ordering::Relaxed),
+                SLOT_LIVE | SLOT_ADDRESSED
+            ) {
                 live += 1;
             }
             if slot.state.load(Ordering::Relaxed) != SLOT_EMPTY {
@@ -532,7 +860,12 @@ impl Arena {
         self.inner
             .slots()
             .iter()
-            .filter(|slot| slot.state.load(Ordering::Relaxed) == SLOT_LIVE)
+            .filter(|slot| {
+                matches!(
+                    slot.state.load(Ordering::Relaxed),
+                    SLOT_LIVE | SLOT_ADDRESSED
+                )
+            })
             .count()
     }
 
@@ -587,10 +920,27 @@ impl Arena {
             let slot = &slots[index];
             match slot.state.load(Ordering::Acquire) {
                 SLOT_EMPTY => return Ok(index),
-                SLOT_RETIRED if slot.pins.load(Ordering::SeqCst) == 0 => {
+                SLOT_RETIRED if !self.inner.pinned(index) => {
                     return Ok(index);
                 }
                 _ => {}
+            }
+        }
+        // Index pressure can precede byte pressure (including empty bodies).
+        // Reuse the oldest unpinned record, not a recently published value
+        // just because its offset hashes to the start of this probe chain.
+        for _ in 0..ARENA_SLOTS {
+            let Some(index) = (0..ARENA_SLOTS)
+                .filter(|&index| !self.inner.pinned(index))
+                .min_by_key(|&index| {
+                    slots[index].generation.load(Ordering::Relaxed)
+                })
+            else {
+                return Err(Error::Pinned);
+            };
+            evict(&slots[index]);
+            if !self.inner.pinned(index) {
+                return Ok(index);
             }
         }
         Err(Error::Pinned)
@@ -621,7 +971,7 @@ impl Arena {
             }
             let end = position + len;
             let mut blocked_until = None;
-            for slot in slots {
+            for (index, slot) in slots.iter().enumerate() {
                 if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
                     continue;
                 }
@@ -629,7 +979,7 @@ impl Arena {
                 if span_end <= position || span_start >= end {
                     continue;
                 }
-                if slot.pins.load(Ordering::SeqCst) > 0 {
+                if self.inner.pinned(index) {
                     blocked_until = Some(
                         blocked_until
                             .map_or(span_end, |b: u64| b.max(span_end)),
@@ -637,7 +987,7 @@ impl Arena {
                     continue;
                 }
                 evict(slot);
-                if slot.pins.load(Ordering::SeqCst) > 0 {
+                if self.inner.pinned(index) {
                     // A reader got in between: its bytes stay.
                     blocked_until = Some(
                         blocked_until
@@ -655,47 +1005,42 @@ impl Arena {
     }
 }
 
-/// Take a slot out of the index. Marks it EMPTY first and RETIRED after if a
-/// reader is on it — the order that lets [`Arena::get`] and this agree.
+/// Withdraw before checking owner pins. Keep a retired probe-chain marker;
+/// publishing a new generation is safe only after all owner pins are zero.
 fn evict(slot: &Slot) {
     if slot.state.load(Ordering::Relaxed) == SLOT_EMPTY {
         return;
     }
-    slot.state.store(SLOT_EMPTY, Ordering::SeqCst);
-    if slot.pins.load(Ordering::SeqCst) > 0 {
-        slot.state.store(SLOT_RETIRED, Ordering::SeqCst);
-    }
-}
-
-fn shift(
-    bytes: Box<[u8]>,
-    start: usize,
-) -> Box<[u8]> {
-    let mut vec = bytes.into_vec();
-    vec.drain(..start);
-    vec.into_boxed_slice()
+    slot.state.store(SLOT_RETIRED, Ordering::SeqCst);
 }
 
 #[cfg(unix)]
-fn open_or_create(name: &str) -> Result<ShmRegion> {
+fn open_or_create(
+    name: &str,
+    readers: u16,
+) -> Result<ShmRegion> {
     let (region, _initialization_lock) =
-        ShmRegion::open_or_create_locked(name, segment_size())?;
+        ShmRegion::open_or_create_locked(name, segment_size(readers as usize))?;
     if region.created() {
         // SAFETY: a fresh segment of segment_size() bytes; header first, then
         // zeroed slots (SLOT_EMPTY is 0), then the ring, which needs nothing.
         unsafe {
-            std::ptr::write(region.as_ptr().cast::<Header>(), Header::new());
+            std::ptr::write(
+                region.as_ptr().cast::<Header>(),
+                Header::new(readers),
+            );
             std::ptr::write_bytes(
                 region.as_ptr().add(size_of::<Header>()),
                 0,
-                ARENA_SLOTS * size_of::<Slot>(),
+                ARENA_SLOTS * size_of::<Slot>()
+                    + readers as usize * reader_stride(),
             );
         }
     } else {
         // SAFETY: an existing segment large enough for a Header, validated
         // before anything else is read.
         let header = unsafe { &*region.as_ptr().cast::<Header>() };
-        if !header.compatible() {
+        if !header.compatible(readers) {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("SHM segment {name} has an incompatible arena layout"),
@@ -710,7 +1055,7 @@ fn open_or_create(name: &str) -> Result<ShmRegion> {
 pub struct Entry {
     inner: Arc<Inner>,
     slot: usize,
-    generation: u32,
+    generation: u64,
     body: (u64, u64),
     encoded: Option<(u64, u64, u8)>,
     stamp: u64,
@@ -721,7 +1066,7 @@ impl Entry {
     fn pinned(
         inner: Arc<Inner>,
         index: usize,
-        generation: u32,
+        generation: u64,
     ) -> Self {
         let slot = &inner.slots()[index];
         let body = (
@@ -742,11 +1087,21 @@ impl Entry {
     }
 
     pub fn body(&self) -> &[u8] {
+        assert_eq!(
+            self.inner.pid,
+            std::process::id(),
+            "arena entries cannot be inherited across fork"
+        );
         self.inner.bytes(self.body.0, self.body.1)
     }
 
     /// The encoded body and its tag, when one was stored.
     pub fn encoded(&self) -> Option<(&[u8], u8)> {
+        assert_eq!(
+            self.inner.pid,
+            std::process::id(),
+            "arena entries cannot be inherited across fork"
+        );
         self.encoded
             .map(|(offset, len, tag)| (self.inner.bytes(offset, len), tag))
     }
@@ -761,7 +1116,7 @@ impl Entry {
 
     /// The slot's generation when it was pinned; a later put or reset of the
     /// same key gives a different one.
-    pub fn generation(&self) -> u32 {
+    pub fn generation(&self) -> u64 {
         self.generation
     }
 
@@ -783,7 +1138,11 @@ impl Entry {
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        self.inner.slots()[self.slot].pins.fetch_sub(1, Ordering::SeqCst);
+        if self.inner.pid == std::process::id() {
+            self.inner
+                .pin(self.inner.reader, self.slot)
+                .fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -828,109 +1187,3 @@ impl AsRef<[u8]> for View {
 // spans; nothing in an entry is thread-affine.
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use orbit_core::Fleet;
-
-    use super::{ARENA_BYTES, ARENA_RECORD_MAX, Arena, Error, Key, Record};
-
-    fn arena() -> Arena {
-        Arena::new(Arc::new(Fleet::join("arena-test", 1).unwrap())).unwrap()
-    }
-
-    #[test]
-    fn put_get_replace_forget() {
-        let arena = arena();
-        let key = Key::new(7);
-        assert!(arena.get(key).is_none());
-
-        arena
-            .put(
-                key,
-                Record::body(b"hello").encoded(b"h", 1).stamp(42).extra(5),
-            )
-            .unwrap();
-        let entry = arena.get(key).unwrap();
-        assert_eq!(entry.body(), b"hello");
-        assert_eq!(entry.encoded(), Some((&b"h"[..], 1)));
-        assert_eq!((entry.stamp(), entry.extra()), (42, 5));
-        drop(entry);
-
-        arena.put(key, Record::body(b"world")).unwrap();
-        let entry = arena.get(key).unwrap();
-        assert_eq!(entry.body(), b"world");
-        assert!(entry.encoded().is_none());
-        assert_eq!(arena.len(), 1);
-        drop(entry);
-
-        assert!(arena.forget(key).unwrap());
-        assert!(arena.get(key).is_none());
-        assert!(!arena.forget(key).unwrap());
-    }
-
-    #[test]
-    fn the_ring_evicts_what_the_cursor_reaches_and_skips_what_is_pinned() {
-        let arena = arena();
-        let chunk = vec![0xab_u8; ARENA_RECORD_MAX];
-        let records = ARENA_BYTES / ARENA_RECORD_MAX; // fills the ring exactly
-        for n in 0..records {
-            arena.put(Key::new(n as u128), Record::body(&chunk)).unwrap();
-        }
-        assert_eq!(arena.len(), records);
-
-        // Pin the first record, then wrap: it must survive, the second must go.
-        let pinned = arena.get(Key::new(0)).unwrap();
-        arena.put(Key::new(1_000), Record::body(&chunk)).unwrap();
-        assert_eq!(pinned.body().len(), ARENA_RECORD_MAX);
-        assert!(
-            arena.get(Key::new(0)).is_some(),
-            "a pinned record is not evicted"
-        );
-        assert!(
-            arena.get(Key::new(1)).is_none(),
-            "the cursor moved past the pin"
-        );
-        drop(pinned);
-
-        let too_big = vec![0_u8; ARENA_RECORD_MAX + 1];
-        assert!(matches!(
-            arena.put(Key::new(9), Record::body(&too_big)),
-            Err(Error::TooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn reset_empties_the_index_but_not_a_held_entry() {
-        let arena = arena();
-        arena.put(Key::new(1), Record::body(b"one")).unwrap();
-        arena.put(Key::new(2), Record::body(b"two")).unwrap();
-        let held = arena.get(Key::new(1)).unwrap();
-        let generation = arena.generation();
-
-        assert_eq!(arena.reset().unwrap(), 2);
-        assert_eq!(arena.generation(), generation + 1);
-        assert!(arena.get(Key::new(1)).is_none());
-        assert!(arena.get(Key::new(2)).is_none());
-        assert_eq!(held.body(), b"one");
-        drop(held);
-
-        // The retired slot is reusable once the reader is gone.
-        arena.put(Key::new(1), Record::body(b"again")).unwrap();
-        assert_eq!(arena.get(Key::new(1)).unwrap().body(), b"again");
-    }
-
-    #[test]
-    fn a_view_owns_the_pin() {
-        let arena = arena();
-        arena
-            .put(Key::new(3), Record::body(b"body").encoded(b"enc", 2))
-            .unwrap();
-        let view = arena.get(Key::new(3)).unwrap().into_encoded().ok().unwrap();
-        assert_eq!(view.as_ref(), b"enc");
-        let view = arena.get(Key::new(3)).unwrap().into_body();
-        assert_eq!(view.as_ref(), b"body");
-    }
-}

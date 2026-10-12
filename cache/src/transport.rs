@@ -12,12 +12,13 @@ use orbit_core::RingEventFd;
 use orbit_core::fleet::FleetLaneCursor;
 use orbit_core::{Fleet, NetId64, RingLoss};
 
-use crate::layout::{CacheLayout, MutationRecord, PayloadRecord};
+use crate::layout::{CacheLayout, MutationRecord};
 use crate::protocol::{
-    self, CacheMutation, CacheRevision, FRAME_KIND_DELETE, FRAME_KIND_PAYLOAD,
-    FRAME_KIND_PUT, FRAME_KIND_RESET, PayloadRef,
+    self, CacheMutation, CacheRevision, FRAME_KIND_DELETE, FRAME_KIND_PUT,
+    FRAME_KIND_RESET, PayloadRef,
 };
 use crate::{Error, Result};
+use orbit_arena::{ARENA_RECORD_MAX, Arena, Record};
 
 /// Caller-owned read positions for every cache-mutation writer lane.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,26 +46,36 @@ impl CacheMutationPoll {
     }
 }
 
-/// Raw mutation and payload transport for one cache layout.
+/// One mutation transport and a handle to the fleet's existing byte arena.
 pub struct CacheTransport<L: CacheLayout = crate::DefaultCacheLayout> {
     fleet: Arc<Fleet>,
+    arena: Arena,
     _layout: PhantomData<L>,
 }
 
 impl<L: CacheLayout> Clone for CacheTransport<L> {
     fn clone(&self) -> Self {
-        Self { fleet: self.fleet.clone(), _layout: PhantomData }
+        Self {
+            fleet: self.fleet.clone(),
+            arena: self.arena.clone(),
+            _layout: PhantomData,
+        }
     }
 }
 
 impl<L: CacheLayout> CacheTransport<L> {
     pub fn new(fleet: Arc<Fleet>) -> Result<Self> {
         crate::layout::validate::<L>()?;
-        Ok(Self { fleet, _layout: PhantomData })
+        let arena = Arena::new(fleet.clone())?;
+        Ok(Self { fleet, arena, _layout: PhantomData })
     }
 
     pub fn fleet(&self) -> &Arc<Fleet> {
         &self.fleet
+    }
+
+    pub fn arena(&self) -> &Arena {
+        &self.arena
     }
 
     pub fn cursor_at_head(&self) -> CacheMutationCursor {
@@ -90,27 +101,23 @@ impl<L: CacheLayout> CacheTransport<L> {
     ) -> Result<CacheMutation> {
         self.validate_put(store, key, value)?;
 
-        let payload_version =
-            self.fleet.next_ring_version::<PayloadRecord<L>>();
-        let chunks = split_payload::<L>(value);
-        let ids = self.fleet.publish_batch::<PayloadRecord<L>>(
-            FRAME_KIND_PAYLOAD,
-            payload_version,
-            chunks,
-        );
-        let payload = PayloadRef {
-            first_id: ids[0],
-            payload_version,
-            chunk_count: ids.len() as u32,
-            value_len: value.len() as u64,
-        };
         let expires_at_ms =
             ttl.map(|ttl| now_ms().saturating_add(duration_ms(ttl)));
+        let address = self
+            .arena
+            .store(Record::body(value).stamp(expires_at_ms.unwrap_or(0)))?;
+        let payload = PayloadRef { address, value_len: value.len() as u64 };
         let encoded =
             protocol::encode_put::<L>(store, key, expires_at_ms, payload)?;
         let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
         let mutation_id =
-            self.publish_mutation(FRAME_KIND_PUT, sequence, encoded)?;
+            match self.publish_mutation(FRAME_KIND_PUT, sequence, encoded) {
+                Ok(id) => id,
+                Err(error) => {
+                    let _ = self.arena.forget_address(address);
+                    return Err(error);
+                }
+            };
 
         Ok(CacheMutation::Put {
             store: Bytes::copy_from_slice(store),
@@ -172,44 +179,16 @@ impl<L: CacheLayout> CacheTransport<L> {
         CacheMutationPoll { mutations, loss: raw.loss, malformed }
     }
 
-    /// Resolve a `Put` descriptor through exact payload-ring ids.
-    ///
-    /// `None` means at least one slot was overwritten, malformed, or did not
-    /// belong to this cache layout. It never returns bytes from a replacement
-    /// frame that merely occupies the same physical slot.
+    /// Pin the exact arena generation. No SHM-to-L1 value copy.
     pub fn read_payload(
         &self,
         payload: PayloadRef,
     ) -> Option<Bytes> {
-        if payload.first_id.kind() != L::PAYLOAD_RING_KIND
-            || payload.chunk_count == 0
-            || payload.chunk_count as usize > L::PAYLOAD_RING_SPEC.capacity
-            || payload.value_len > self.max_value_len() as u64
-        {
+        let entry = self.arena.get_address(payload.address)?;
+        if entry.body().len() as u64 != payload.value_len {
             return None;
         }
-
-        let expected_len = usize::try_from(payload.value_len).ok()?;
-        let mut value = Vec::with_capacity(expected_len);
-        for offset in 0..u64::from(payload.chunk_count) {
-            let counter = payload.first_id.counter().checked_add(offset)?;
-            let id = NetId64::make(
-                L::PAYLOAD_RING_KIND,
-                payload.first_id.node(),
-                counter,
-            );
-            let frame = self.fleet.read(id)?;
-            if frame.kind != FRAME_KIND_PAYLOAD
-                || frame.ver != payload.payload_version
-            {
-                return None;
-            }
-            value.extend_from_slice(&frame.payload);
-            if value.len() > expected_len {
-                return None;
-            }
-        }
-        (value.len() == expected_len).then(|| Bytes::from(value))
+        Some(Bytes::from_owner(entry.into_body()))
     }
 
     pub fn max_store_len(&self) -> usize {
@@ -224,9 +203,7 @@ impl<L: CacheLayout> CacheTransport<L> {
     }
 
     pub fn max_value_len(&self) -> usize {
-        L::PAYLOAD_RING_SPEC
-            .capacity
-            .saturating_mul(L::PAYLOAD_RING_SPEC.payload_capacity)
+        ARENA_RECORD_MAX
     }
 
     pub fn validate_store(
@@ -277,21 +254,18 @@ impl<L: CacheLayout> CacheTransport<L> {
         self.fleet.current_ring_version::<MutationRecord<L>>()
     }
 
-    /// Reset both cache rings during an owner-controlled, quiescent boot.
+    /// Reset mutation history during a caller-owned quiescent boot. The
+    /// arena may also hold non-cache bodies and is deliberately not reset.
     pub fn reset_rings(&self) -> Result<()> {
-        self.fleet.reset_ring::<PayloadRecord<L>>()?;
         self.fleet.reset_ring::<MutationRecord<L>>()?;
         Ok(())
     }
 
-    /// Unlink both SHM objects owned by this cache layout.
+    /// Unlink the mutation ring owned by this layout, never the shared arena.
     #[cfg(unix)]
     pub fn unlink_rings(&self) -> Result<()> {
-        let payload = self.fleet.shm_ring::<PayloadRecord<L>>()?;
         let mutation = self.fleet.shm_ring::<MutationRecord<L>>()?;
-        let payload_result = payload.unlink();
         let mutation_result = mutation.unlink();
-        payload_result?;
         mutation_result?;
         Ok(())
     }
@@ -332,14 +306,6 @@ impl<L: CacheLayout> CacheTransport<L> {
             Ok(self.fleet.publish::<MutationRecord<L>>(kind, version, payload))
         }
     }
-}
-
-fn split_payload<L: CacheLayout>(value: &[u8]) -> Vec<Bytes> {
-    let chunk_len = L::PAYLOAD_RING_SPEC.payload_capacity;
-    if value.is_empty() {
-        return vec![Bytes::new()];
-    }
-    value.chunks(chunk_len).map(Bytes::copy_from_slice).collect()
 }
 
 fn now_ms() -> u64 {

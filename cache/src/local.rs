@@ -4,12 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use lru::LruCache;
+use orbit_arena::Arena;
 
 use crate::layout::CacheLayout;
-use crate::protocol::{CacheMutation, CacheRevision};
+use crate::protocol::{CacheMutation, CacheRevision, PayloadRef};
 use crate::transport::CacheTransport;
 
-/// One worker-local value plus the mutation revision that installed it.
+/// A pinned read snapshot plus its mutation revision. Never retained by L1.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheEntry {
     pub value: Bytes,
@@ -41,6 +42,7 @@ pub enum CacheRead {
 #[derive(Clone)]
 pub struct LocalCache {
     inner: Arc<Mutex<LocalState>>,
+    arena: Arena,
 }
 
 struct LocalState {
@@ -51,14 +53,20 @@ struct LocalState {
 
 #[derive(Clone)]
 enum LocalSlot {
-    Present(CacheEntry),
-    Missing { revision: CacheRevision },
+    Present {
+        payload: PayloadRef,
+        revision: CacheRevision,
+        expires_at_ms: Option<u64>,
+    },
+    Missing {
+        revision: CacheRevision,
+    },
 }
 
 impl LocalSlot {
     fn revision(&self) -> CacheRevision {
         match self {
-            Self::Present(entry) => entry.revision,
+            Self::Present { revision, .. } => *revision,
             Self::Missing { revision } => *revision,
         }
     }
@@ -71,13 +79,17 @@ pub(crate) enum ApplyOutcome {
 }
 
 impl LocalCache {
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    pub fn new(
+        capacity: NonZeroUsize,
+        arena: Arena,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LocalState {
                 slots: LruCache::new(capacity),
                 revision_floor: None,
                 coherent: true,
             })),
+            arena,
         }
     }
 
@@ -102,14 +114,20 @@ impl LocalCache {
             return CacheRead::Miss;
         };
         match slot {
-            LocalSlot::Present(entry) if !entry.is_expired_at(now_ms) => {
-                CacheRead::Hit(entry)
-            }
-            LocalSlot::Present(entry) => {
-                let _ = state.put_slot(
-                    key.to_vec(),
-                    LocalSlot::Missing { revision: entry.revision },
-                );
+            LocalSlot::Present { payload, revision, expires_at_ms } => {
+                if !expires_at_ms.is_some_and(|deadline| deadline <= now_ms)
+                    && let Some(entry) = self.arena.get_address(payload.address)
+                    && entry.body().len() as u64 == payload.value_len
+                {
+                    return CacheRead::Hit(CacheEntry {
+                        value: Bytes::from_owner(entry.into_body()),
+                        revision,
+                        expires_at_ms,
+                    });
+                }
+                // Expiry/eviction is an honest miss; the revision tombstone
+                // still prevents a delayed older Put from resurrecting it.
+                state.slots.put(key.to_vec(), LocalSlot::Missing { revision });
                 CacheRead::Miss
             }
             LocalSlot::Missing { .. } => CacheRead::Miss,
@@ -122,7 +140,7 @@ impl LocalCache {
         state
             .slots
             .iter()
-            .filter(|(_, slot)| matches!(slot, LocalSlot::Present(_)))
+            .filter(|(_, slot)| matches!(slot, LocalSlot::Present { .. }))
             .count()
     }
 
@@ -171,12 +189,14 @@ impl LocalCache {
         transport: &CacheTransport<L>,
         mutation: CacheMutation,
     ) -> ApplyOutcome {
-        // A value may span the complete payload lane. Copy it before taking
-        // the L1 lock so local reads are not blocked on SHM traversal.
+        // Check availability, but do not retain the pin in L1. Readers pin
+        // on demand; idle metadata must never prevent arena eviction.
         let resolved_payload = match &mutation {
-            CacheMutation::Put { payload, .. } => {
-                Some(transport.read_payload(*payload))
-            }
+            CacheMutation::Put { payload, .. } => Some(
+                transport.arena().get_address(payload.address).is_some_and(
+                    |entry| entry.body().len() as u64 == payload.value_len,
+                ),
+            ),
             CacheMutation::Delete { .. } | CacheMutation::Reset { .. } => None,
         };
         let revision = mutation.revision();
@@ -192,19 +212,19 @@ impl LocalCache {
                 key,
                 revision,
                 expires_at_ms,
-                ..
+                payload,
             } => {
                 match resolved_payload
                     .expect("put payload was resolved before L1 lock")
                 {
-                    Some(value) => {
+                    true => {
                         let applied = state.put_slot(
                             key.to_vec(),
-                            LocalSlot::Present(CacheEntry {
-                                value,
+                            LocalSlot::Present {
+                                payload,
                                 revision,
                                 expires_at_ms,
-                            }),
+                            },
                         );
                         if applied {
                             ApplyOutcome::Applied
@@ -212,7 +232,7 @@ impl LocalCache {
                             ApplyOutcome::Ignored
                         }
                     }
-                    None => {
+                    false => {
                         if state.put_slot(
                             key.to_vec(),
                             LocalSlot::Missing { revision },
@@ -242,7 +262,7 @@ impl LocalCache {
     pub(crate) fn install_local(
         &self,
         key: &[u8],
-        value: Bytes,
+        payload: PayloadRef,
         revision: CacheRevision,
         expires_at_ms: Option<u64>,
     ) {
@@ -251,11 +271,7 @@ impl LocalCache {
         if state.accepts(revision) {
             let _ = state.put_slot(
                 key.to_vec(),
-                LocalSlot::Present(CacheEntry {
-                    value,
-                    revision,
-                    expires_at_ms,
-                }),
+                LocalSlot::Present { payload, revision, expires_at_ms },
             );
         }
     }

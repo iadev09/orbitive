@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use orbit_cache::{
     Cache, CacheAddress, CacheLayout, CacheMutation, CacheRead, CacheTransport,
-    Error, PayloadRef, Store,
+    Error, Store,
 };
 use orbit_core::{Fleet, RingSpec};
 
@@ -13,8 +13,6 @@ struct TinyLayout;
 impl CacheLayout for TinyLayout {
     const MUTATION_RING_KIND: u8 = 40;
     const MUTATION_RING_SPEC: RingSpec = RingSpec::per_node(8, 128);
-    const PAYLOAD_RING_KIND: u8 = 41;
-    const PAYLOAD_RING_SPEC: RingSpec = RingSpec::per_node(4, 4);
 }
 
 fn capacity(value: usize) -> NonZeroUsize {
@@ -28,7 +26,7 @@ fn open(cache: &Cache<TinyLayout>) -> Store<TinyLayout> {
 }
 
 #[test]
-fn put_payload_spans_slots_and_peer_applies_the_descriptor() {
+fn put_uses_the_same_arena_body_in_publisher_and_peer() {
     let fleet = Arc::new(Fleet::join("cache_chunks", 1).expect("fleet"));
     let publisher_cache =
         Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
@@ -46,6 +44,14 @@ fn put_payload_spans_slots_and_peer_applies_the_descriptor() {
         panic!("peer must install the put in its local L1");
     };
     assert_eq!(&entry.value[..], b"hello-world");
+    let CacheRead::Hit(published) = publisher.read(b"greeting") else {
+        panic!("publisher hit");
+    };
+    assert_eq!(entry.value.as_ptr(), published.value.as_ptr());
+    let shared = publisher_cache.transport().arena();
+    shared.reset().unwrap();
+    assert_eq!(peer.read(b"greeting"), CacheRead::Miss);
+    assert_eq!(&entry.value[..], b"hello-world");
 }
 
 #[test]
@@ -61,7 +67,7 @@ fn mutation_contains_a_payload_reference_not_the_value_bytes() {
     let [CacheMutation::Put { payload, .. }] = poll.mutations.as_slice() else {
         panic!("one put descriptor expected");
     };
-    assert_eq!(payload.chunk_count, 2);
+    assert!(payload.address.generation > 0);
     assert_eq!(payload.value_len, 8);
     assert_eq!(
         transport.read_payload(*payload).as_deref(),
@@ -104,7 +110,19 @@ fn overwritten_payload_is_reported_and_never_misread() {
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
     let peer = open(&peer_cache);
 
-    publisher.put(b"old", b"abcdefgh", None).expect("old put");
+    let CacheMutation::Put { payload, .. } = publisher_cache
+        .transport()
+        .publish_put(STORE, b"old", b"abcdefgh", None)
+        .expect("old put")
+    else {
+        panic!("put");
+    };
+    // Arena eviction is independent of mutation capacity and L1 residency.
+    publisher_cache
+        .transport()
+        .arena()
+        .forget_address(payload.address)
+        .unwrap();
     publisher.put(b"new-1", b"1111", None).expect("new put 1");
     publisher.put(b"new-2", b"2222", None).expect("new put 2");
     publisher.put(b"new-3", b"3333", None).expect("new put 3");
@@ -169,26 +187,50 @@ fn ttl_expiry_becomes_a_local_miss() {
     let store = open(&cache);
     store.put(b"short", b"value", Some(Duration::from_millis(1))).expect("put");
 
-    std::thread::sleep(Duration::from_millis(3));
-    assert_eq!(store.read(b"short"), CacheRead::Miss);
+    let deadline = u64::MAX;
+    assert_eq!(store.read_at(b"short", deadline), CacheRead::Miss);
 }
 
 #[test]
-fn value_larger_than_the_payload_lane_is_rejected_before_publication() {
+fn resident_l1_metadata_does_not_pin_values_under_arena_pressure() {
+    let fleet = Arc::new(Fleet::join("example", 1).expect("fleet"));
+    let cache = Cache::<TinyLayout>::new(fleet).expect("cache");
+    let store = open(&cache);
+    let value = vec![0x5a; orbit_arena::ARENA_RECORD_MAX];
+    let count = orbit_arena::ARENA_BYTES / value.len();
+    for index in 0..=count {
+        // An idle L1 must not make the fifth full-size publication fail
+        // because the first four values retained its whole byte budget.
+        store.put(format!("key-{index}").as_bytes(), &value, None).unwrap();
+    }
+    assert_eq!(store.read(b"key-0"), CacheRead::Miss);
+    let CacheRead::Hit(latest) = store.read(format!("key-{count}").as_bytes())
+    else {
+        panic!("latest arena body");
+    };
+    assert_eq!(latest.value.as_ref(), value);
+}
+
+#[test]
+fn value_larger_than_the_arena_record_bound_is_rejected_before_publication() {
     let fleet = Arc::new(Fleet::join("cache_large", 1).expect("fleet"));
     let transport =
         CacheTransport::<TinyLayout>::new(fleet).expect("transport");
     let mut cursor = transport.cursor_at_head();
 
+    let max = transport.max_value_len();
+    let value = vec![0; max + 1];
     let error = transport
-        .publish_put(STORE, b"key", &[0; 17], None)
-        .expect_err("value must exceed the four-slot lane");
-    assert!(matches!(error, Error::ValueTooLarge { value_len: 17, max: 16 }));
+        .publish_put(STORE, b"key", &value, None)
+        .expect_err("record bound");
+    assert!(
+        matches!(error, Error::ValueTooLarge { value_len, max: bound } if value_len == max + 1 && bound == max)
+    );
     assert!(transport.poll(&mut cursor).is_empty());
 }
 
 #[test]
-fn empty_values_still_have_one_addressable_payload_frame() {
+fn empty_values_have_an_addressed_arena_record() {
     let fleet = Arc::new(Fleet::join("cache_empty", 1).expect("fleet"));
     let transport =
         CacheTransport::<TinyLayout>::new(fleet).expect("transport");
@@ -198,15 +240,8 @@ fn empty_values_still_have_one_addressable_payload_frame() {
         panic!("put expected");
     };
 
-    assert_eq!(
-        payload,
-        PayloadRef {
-            first_id: payload.first_id,
-            payload_version: payload.payload_version,
-            chunk_count: 1,
-            value_len: 0
-        }
-    );
+    assert_eq!(payload.value_len, 0);
+    assert!(payload.address.generation > 0);
     assert_eq!(transport.read_payload(payload).as_deref(), Some(&b""[..]));
 }
 

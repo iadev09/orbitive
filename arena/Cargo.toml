@@ -13,3 +13,6 @@ exclude.workspace = true
 
 [dependencies]
 orbit-core.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true

@@ -321,6 +321,16 @@ impl Fleet {
         &self.inner.name
     }
 
+    /// Whether these handles share the same process-local fleet state.
+    /// Cloning a handle preserves this identity; joining again does not,
+    /// even when the name matches. SHM namespace equality is separate.
+    pub fn ptr_eq(
+        &self,
+        other: &Self,
+    ) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Number of physical node lanes reserved for this fleet.
     pub fn fleet_capacity(&self) -> u16 {
         self.inner.fleet_capacity

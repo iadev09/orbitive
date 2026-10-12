@@ -1,16 +1,20 @@
-//! Fleet-coherent local cache over Orbit shared-memory rings.
+//! Fleet-coherent cache with one shared arena body and local metadata.
 //!
 //! One [`Cache`] is the process-local handle for one physical Orbit cache
-//! connection: a mutation ring, a payload ring, and one mutation cursor.
+//! connection: the fleet arena, a mutation ring, and one mutation cursor.
 //! Logical [`Store`] handles share that connection while keeping independent,
-//! bounded process-local L1 state. The rings transport cache mutations and
-//! short-lived payload bytes; they are not the cache's durable value store.
+//! bounded process-local L1 metadata. Hits pin immutable arena bytes; no
+//! value is copied into L1. Neither ring nor arena is a durable source.
 
 mod error;
 mod layout;
 mod local;
 mod protocol;
 mod transport;
+
+#[cfg(test)]
+#[path = "../tests/coherence/mod.rs"]
+mod coherence;
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -22,9 +26,7 @@ pub use error::{Error, Result};
 pub use layout::{
     CACHE_MUTATION_RING_CAPACITY, CACHE_MUTATION_RING_KIND,
     CACHE_MUTATION_RING_PAYLOAD_CAPACITY, CACHE_MUTATION_RING_SPEC,
-    CACHE_PAYLOAD_RING_CAPACITY, CACHE_PAYLOAD_RING_KIND,
-    CACHE_PAYLOAD_RING_PAYLOAD_CAPACITY, CACHE_PAYLOAD_RING_SPEC, CacheLayout,
-    DefaultCacheLayout,
+    CacheLayout, DefaultCacheLayout,
 };
 pub use local::{CacheEntry, CacheRead, LocalCache};
 #[cfg(any(
@@ -154,7 +156,9 @@ impl<L: CacheLayout> Cache<L> {
                 self.stores.write().unwrap_or_else(|error| error.into_inner());
             stores
                 .entry(name.to_vec())
-                .or_insert_with(|| LocalCache::new(capacity))
+                .or_insert_with(|| {
+                    LocalCache::new(capacity, self.transport.arena().clone())
+                })
                 .clone()
         });
 
@@ -302,6 +306,16 @@ impl<L: CacheLayout> Store<L> {
         self.local.read(key)
     }
 
+    /// Read at an explicit Unix-millisecond instant (the same TTL boundary
+    /// used by `read`). Useful to exercise expiry without sleeping.
+    pub fn read_at(
+        &self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> CacheRead {
+        self.local.read_at(key, now_ms)
+    }
+
     pub fn validate_put(
         &self,
         key: &[u8],
@@ -325,16 +339,12 @@ impl<L: CacheLayout> Store<L> {
     ) -> Result<CacheRevision> {
         let mutation =
             self.cache.transport.publish_put(&self.name, key, value, ttl)?;
-        let CacheMutation::Put { revision, expires_at_ms, .. } = mutation
+        let CacheMutation::Put { revision, expires_at_ms, payload, .. } =
+            mutation
         else {
             unreachable!("publish_put returned a non-put mutation")
         };
-        self.local.install_local(
-            key,
-            Bytes::copy_from_slice(value),
-            revision,
-            expires_at_ms,
-        );
+        self.local.install_local(key, payload, revision, expires_at_ms);
         Ok(revision)
     }
 

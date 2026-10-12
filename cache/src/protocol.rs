@@ -6,15 +6,13 @@ use orbit_core::{Frame, NetId64};
 use crate::layout::CacheLayout;
 use crate::{Error, Result};
 
-const PROTOCOL_VERSION: u8 = 2;
+const PROTOCOL_VERSION: u8 = 3;
 pub(crate) const FRAME_KIND_PUT: u8 = 1;
 pub(crate) const FRAME_KIND_DELETE: u8 = 2;
 pub(crate) const FRAME_KIND_RESET: u8 = 3;
-pub(crate) const FRAME_KIND_PAYLOAD: u8 = 1;
 
-// version + store_len + key_len + expires_at + first_payload_id +
-// payload_version + chunk_count + value_len
-pub(crate) const MIN_MUTATION_HEADER_LEN: usize = 1 + 2 + 2 + 8 + 8 + 8 + 4 + 8;
+// version + store_len + key_len + expires_at + arena slot + generation + len
+pub(crate) const MIN_MUTATION_HEADER_LEN: usize = 1 + 2 + 2 + 8 + 4 + 8 + 8;
 
 /// Deterministic last-write-wins order for cache mutations from independent
 /// node lanes.
@@ -44,12 +42,10 @@ impl PartialOrd for CacheRevision {
     }
 }
 
-/// Address of one value retained in the payload ring.
+/// Exact immutable body in the fleet arena. This descriptor owns no pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PayloadRef {
-    pub first_id: NetId64,
-    pub payload_version: u64,
-    pub chunk_count: u32,
+    pub address: orbit_arena::Address,
     pub value_len: u64,
 }
 
@@ -124,9 +120,8 @@ pub(crate) fn encode_put<L: CacheLayout>(
     out.put_u16_le(store.len() as u16);
     out.put_u16_le(key.len() as u16);
     out.put_u64_le(expires_at_ms.unwrap_or(0));
-    out.put_u64_le(payload.first_id.raw());
-    out.put_u64_le(payload.payload_version);
-    out.put_u32_le(payload.chunk_count);
+    out.put_u32_le(payload.address.slot);
+    out.put_u64_le(payload.address.generation);
     out.put_u64_le(payload.value_len);
     out.put_slice(store);
     out.put_slice(key);
@@ -146,9 +141,8 @@ pub(crate) fn encode_delete<L: CacheLayout>(
     out.put_u16_le(store.len() as u16);
     out.put_u16_le(key.len() as u16);
     out.put_u64_le(0);
-    out.put_u64_le(0);
-    out.put_u64_le(0);
     out.put_u32_le(0);
+    out.put_u64_le(0);
     out.put_u64_le(0);
     out.put_slice(store);
     out.put_slice(key);
@@ -163,9 +157,8 @@ pub(crate) fn encode_reset<L: CacheLayout>(store: &[u8]) -> Result<Bytes> {
     out.put_u16_le(store.len() as u16);
     out.put_u16_le(0);
     out.put_u64_le(0);
-    out.put_u64_le(0);
-    out.put_u64_le(0);
     out.put_u32_le(0);
+    out.put_u64_le(0);
     out.put_u64_le(0);
     out.put_slice(store);
     Ok(out.freeze())
@@ -184,14 +177,9 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
         u16::from_le_bytes(frame.payload[3..5].try_into().ok()?) as usize;
     let expires_at_ms =
         u64::from_le_bytes(frame.payload[5..13].try_into().ok()?);
-    let first_payload_id = NetId64::from_raw(u64::from_le_bytes(
-        frame.payload[13..21].try_into().ok()?,
-    ));
-    let payload_version =
-        u64::from_le_bytes(frame.payload[21..29].try_into().ok()?);
-    let chunk_count =
-        u32::from_le_bytes(frame.payload[29..33].try_into().ok()?);
-    let value_len = u64::from_le_bytes(frame.payload[33..41].try_into().ok()?);
+    let slot = u32::from_le_bytes(frame.payload[13..17].try_into().ok()?);
+    let generation = u64::from_le_bytes(frame.payload[17..25].try_into().ok()?);
+    let value_len = u64::from_le_bytes(frame.payload[25..33].try_into().ok()?);
     let store_end = MIN_MUTATION_HEADER_LEN.checked_add(store_len)?;
     let key_end = store_end.checked_add(key_len)?;
     if key_end != frame.payload.len() {
@@ -205,8 +193,8 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
         FRAME_KIND_PUT
             if store_len > 0
                 && key_len > 0
-                && first_payload_id.kind() != 0
-                && chunk_count > 0
+                && generation > 0
+                && (slot as usize) < orbit_arena::ARENA_SLOTS
                 && value_len <= usize::MAX as u64 =>
         {
             Some(CacheMutation::Put {
@@ -215,9 +203,7 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
                 revision,
                 expires_at_ms: (expires_at_ms != 0).then_some(expires_at_ms),
                 payload: PayloadRef {
-                    first_id: first_payload_id,
-                    payload_version,
-                    chunk_count,
+                    address: orbit_arena::Address { slot, generation },
                     value_len,
                 },
             })
@@ -226,9 +212,8 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
             if store_len > 0
                 && key_len > 0
                 && expires_at_ms == 0
-                && first_payload_id.raw() == 0
-                && payload_version == 0
-                && chunk_count == 0
+                && slot == 0
+                && generation == 0
                 && value_len == 0 =>
         {
             Some(CacheMutation::Delete { store, key, revision })
@@ -237,9 +222,8 @@ pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
             if store_len > 0
                 && key_len == 0
                 && expires_at_ms == 0
-                && first_payload_id.raw() == 0
-                && payload_version == 0
-                && chunk_count == 0
+                && slot == 0
+                && generation == 0
                 && value_len == 0 =>
         {
             Some(CacheMutation::Reset { store, revision })
