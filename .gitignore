@@ -49,6 +49,7 @@ tmp/
 /tests/result*.txt
 
 # --- Secrets & local config ---
+/.cargo/config.toml
 .env
 .env.*
 !.env.example

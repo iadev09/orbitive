@@ -1,3 +1,0 @@
-# The private registry pre-releases are published to and taken from.
-[registries.de02]
-index = "sparse+https://git.claviron.dev/api/packages/developer/cargo/"
