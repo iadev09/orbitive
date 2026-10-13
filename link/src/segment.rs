@@ -332,7 +332,8 @@ pub fn check_name(
             "'{bad}' is not a letter, a digit, '-', '_' or '.'"
         ));
     }
-    let longest = ring_segment_name(name, spec.inbox_kind)
+    let inbox_segment = ring_segment_name(name, spec.inbox_kind);
+    let longest = inbox_segment
         .len()
         .max(ring_segment_name(name, spec.streams.kind).len());
     if longest > SHM_NAME_MAX {
@@ -341,5 +342,13 @@ pub fn check_name(
             "its segment name is {longest} bytes and this host takes {SHM_NAME_MAX}; at most {room} characters fit"
         ));
     }
+    crate::bell::Bell::validate_address(
+        &inbox_segment,
+        usize::from(spec.fleet_capacity.saturating_sub(1)),
+    )
+    .map_err(|error| Error::InvalidName {
+        name: name.to_owned(),
+        reason: format!("its reactor socket address is invalid: {error}"),
+    })?;
     Ok(())
 }

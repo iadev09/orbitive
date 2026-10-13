@@ -33,10 +33,24 @@ impl Bell {
     pub(crate) fn new(segment: &str) -> io::Result<Self> {
         let sender = UnixDatagram::unbound()?;
         sender.set_nonblocking(true)?;
+        Ok(Self { prefix: Self::prefix(segment), sender })
+    }
+
+    fn prefix(segment: &str) -> String {
         // SAFETY: a plain syscall with no arguments.
         let uid = unsafe { libc::getuid() };
         let segment = segment.trim_start_matches('/');
-        Ok(Self { prefix: format!("orbit-link-{uid}/{segment}"), sender })
+        format!("orbit-link-{uid}/{segment}")
+    }
+
+    /// Check the longest lane or watcher address before creating either SHM
+    /// resource. A watcher suffix is one byte longer than the lane suffix.
+    pub(crate) fn validate_address(
+        segment: &str,
+        last_slot: usize,
+    ) -> io::Result<()> {
+        Self::address_for(&Self::prefix(segment), Doorbell::Watcher(last_slot))
+            .map(|_| ())
     }
 
     #[cfg(target_os = "linux")]
@@ -44,12 +58,16 @@ impl Bell {
         &self,
         door: Doorbell,
     ) -> io::Result<SocketAddr> {
+        Self::address_for(&self.prefix, door)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn address_for(
+        prefix: &str,
+        door: Doorbell,
+    ) -> io::Result<SocketAddr> {
         use std::os::linux::net::SocketAddrExt;
-        SocketAddr::from_abstract_name(format!(
-            "{}.{}",
-            self.prefix,
-            door.suffix()
-        ))
+        SocketAddr::from_abstract_name(format!("{}.{}", prefix, door.suffix()))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -57,11 +75,15 @@ impl Bell {
         &self,
         door: Doorbell,
     ) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!(
-            "/tmp/{}.{}",
-            self.prefix,
-            door.suffix()
-        ))
+        Self::path_for(&self.prefix, door)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn path_for(
+        prefix: &str,
+        door: Doorbell,
+    ) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("/tmp/{}.{}", prefix, door.suffix()))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -69,16 +91,23 @@ impl Bell {
         &self,
         door: Doorbell,
     ) -> io::Result<SocketAddr> {
-        SocketAddr::from_pathname(self.path(door))
+        Self::address_for(&self.prefix, door)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn address_for(
+        prefix: &str,
+        door: Doorbell,
+    ) -> io::Result<SocketAddr> {
+        SocketAddr::from_pathname(Self::path_for(prefix, door))
     }
 
     pub(crate) fn ring(
         &self,
         door: Doorbell,
-    ) {
-        if let Ok(address) = self.address(door) {
-            let _ = self.sender.send_to_addr(&[1], &address);
-        }
+    ) -> io::Result<()> {
+        let address = self.address(door)?;
+        self.sender.send_to_addr(&[1], &address).map(|_| ())
     }
 
     #[cfg(feature = "tokio")]
@@ -100,7 +129,11 @@ impl Bell {
                     _ => {}
                 }
             }
-            let _ = std::fs::remove_file(&path);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
         let socket = UnixDatagram::bind_addr(&self.address(door)?)?;
         socket.set_nonblocking(true)?;

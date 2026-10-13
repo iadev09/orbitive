@@ -23,6 +23,18 @@ fn fleet_name(tag: &str) -> String {
     )
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_abstract_bell_name_must_fit_before_a_link_is_opened() {
+    let name = "a".repeat(96);
+    let error = orbit_link::check_name(&name, SPEC).unwrap_err();
+    assert!(matches!(
+        error,
+        orbit_link::Error::InvalidName { reason, .. }
+            if reason.contains("reactor socket address")
+    ));
+}
+
 struct Scratch {
     segment: LinkSegment,
     bodies: Option<LinkBodies>,

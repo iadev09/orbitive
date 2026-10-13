@@ -35,6 +35,8 @@
 //! the process that created it, and a writer that dies holding one leaves the
 //! lane wedged for every other process. Atomics have no owner.
 
+#[cfg(unix)]
+use std::io;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use super::{Error, Result};
@@ -1037,10 +1039,14 @@ impl Inbox {
         let watcher = self.watcher_header(slot);
         watcher.changes.fetch_add(1, Ordering::SeqCst);
         #[cfg(unix)]
-        if watcher.reactor.swap(0, Ordering::SeqCst) != 0
-            && let Some(bell) = &self.bell
+        if let Some(bell) = &self.bell
+            && let Err(error) = ring_armed(
+                &watcher.reactor,
+                bell,
+                crate::bell::Doorbell::Watcher(slot),
+            )
         {
-            bell.ring(crate::bell::Doorbell::Watcher(slot));
+            tracing::warn!(slot, %error, "Link watcher wake failed");
         }
     }
 
@@ -1059,10 +1065,14 @@ impl Inbox {
             let _ = orbit_core::sync::wake_word(&lane.changes);
         }
         #[cfg(unix)]
-        if lane.reactor.swap(0, Ordering::SeqCst) != 0
-            && let Some(bell) = &self.bell
+        if let Some(bell) = &self.bell
+            && let Err(error) = ring_armed(
+                &lane.reactor,
+                bell,
+                crate::bell::Doorbell::Lane(lane_index),
+            )
         {
-            bell.ring(crate::bell::Doorbell::Lane(lane_index));
+            tracing::warn!(lane = lane_index, %error, "Link lane wake failed");
         }
     }
 
@@ -1408,3 +1418,25 @@ fn check_identity(
     }
     Ok(())
 }
+
+/// Keep the interest visible after a failed send so another writer can retry.
+/// A parked reader may still require an external wake when delivery fails.
+#[cfg(unix)]
+fn ring_armed(
+    reactor: &AtomicU32,
+    bell: &crate::bell::Bell,
+    door: crate::bell::Doorbell,
+) -> io::Result<()> {
+    if reactor.swap(0, Ordering::SeqCst) == 0 {
+        return Ok(());
+    }
+    if let Err(error) = bell.ring(door) {
+        reactor.fetch_or(1, Ordering::SeqCst);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix, feature = "tokio"))]
+#[path = "../tests/unit/bell.rs"]
+mod bell_tests;
