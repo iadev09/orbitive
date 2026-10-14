@@ -201,10 +201,12 @@ impl<L: EventLayout> LinkEvents<L> {
         target_os = "macos"
     ))]
     pub async fn drive(&self) -> Result<()> {
-        let ready = tokio::io::unix::AsyncFd::new(
-            self.bus.event_fd().map_err(Error::Events)?,
-        )
-        .map_err(Error::Io)?;
+        let event_fd = self.bus.event_fd().map_err(Error::Events)?;
+        // SAFETY: RingEventFd owns its stable descriptor until drop. This
+        // bridge only drains it and never replaces the registered inner value.
+        let ready = unsafe { tokio::io::unix::AsyncFd::register(event_fd) }
+            .map_err(std::io::Error::from)
+            .map_err(Error::Io)?;
         loop {
             self.pump()?;
             let mut guard = ready.readable().await.map_err(Error::Io)?;

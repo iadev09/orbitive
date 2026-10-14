@@ -152,10 +152,10 @@ async fn async_reactor_drains_and_rearms_native_fd() {
     let name =
         Box::leak(format!("ar{:x}", std::process::id()).into_boxed_str());
     let fleet = TestFleet(Fleet::join_shm_as(name, 1, NodeId::new(0)).unwrap());
-    let fd = tokio::io::unix::AsyncFd::new(
-        fleet.0.ring_event_fd::<Record>().unwrap(),
-    )
-    .unwrap();
+    let event_fd = fleet.0.ring_event_fd::<Record>().unwrap();
+    // SAFETY: RingEventFd owns its stable descriptor until drop; this test
+    // only drains it and never replaces the registered inner value.
+    let fd = unsafe { tokio::io::unix::AsyncFd::register(event_fd) }.unwrap();
     for round in 0..20 {
         let publisher = fleet.0.clone();
         let task = tokio::spawn(async move {

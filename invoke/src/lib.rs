@@ -238,7 +238,11 @@ impl InvocationBus {
         }
         match self.event_fd() {
             Ok(event_fd) => Ok(Some(
-                tokio::io::unix::AsyncFd::new(event_fd).map_err(Error::Io)?,
+                // SAFETY: RingEventFd owns its stable descriptor until drop;
+                // the subscription only drains it, without replacing it.
+                unsafe { tokio::io::unix::AsyncFd::register(event_fd) }
+                    .map_err(std::io::Error::from)
+                    .map_err(Error::Io)?,
             )),
             #[cfg(target_os = "macos")]
             Err(Error::Io(error))
