@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
-use chacha20poly1305::aead::AeadInPlace;
+use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{KeyInit, Tag, XChaCha20Poly1305, XNonce};
 use orbit_core::Fleet;
 #[cfg(unix)]
@@ -90,10 +90,10 @@ impl<P: StateProtection> RecordProtection<P> {
                 getrandom::fill(&mut nonce).map_err(|_| Error::Randomness)?;
                 let cipher = XChaCha20Poly1305::new((&*self.key).into());
                 let tag = cipher
-                    .encrypt_in_place_detached(
-                        XNonce::from_slice(&nonce),
+                    .encrypt_inout_detached(
+                        &XNonce::from(nonce),
                         &aad,
-                        plaintext.as_mut(),
+                        (&mut plaintext[..]).into(),
                     )
                     .map_err(|_| Error::PolicyUnavailable)?;
                 bytes[..24].copy_from_slice(&nonce);
@@ -136,12 +136,16 @@ impl<P: StateProtection> RecordProtection<P> {
             EncryptedState::ID => {
                 plaintext.copy_from_slice(&bytes[24..120]);
                 let cipher = XChaCha20Poly1305::new((&*self.key).into());
+                let nonce =
+                    XNonce::try_from(&bytes[..24]).expect("fixed nonce length");
+                let tag =
+                    Tag::try_from(&bytes[120..]).expect("fixed tag length");
                 cipher
-                    .decrypt_in_place_detached(
-                        XNonce::from_slice(&bytes[..24]),
+                    .decrypt_inout_detached(
+                        &nonce,
                         &aad,
-                        plaintext.as_mut(),
-                        Tag::from_slice(&bytes[120..]),
+                        (&mut plaintext[..]).into(),
+                        &tag,
                     )
                     .map_err(|_| Error::PolicyUnavailable)?;
             }

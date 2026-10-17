@@ -177,8 +177,8 @@ fn every_record_field_and_tag_is_authenticated_even_without_a_revision_change()
     slots[0].store(first, 0, &mac()).unwrap();
     let original: [u64; BANK_WORDS] =
         std::array::from_fn(|i| slots[0].banks[1][i].load(Ordering::SeqCst));
-    for i in 0..BANK_WORDS {
-        slots[0].banks[1][i].store(original[i] ^ 1, Ordering::SeqCst);
+    for (i, word) in original.iter().enumerate() {
+        slots[0].banks[1][i].store(*word ^ 1, Ordering::SeqCst);
         assert!(
             matches!(
                 find(&slots, first.key, &mac()),
@@ -186,7 +186,7 @@ fn every_record_field_and_tag_is_authenticated_even_without_a_revision_change()
             ),
             "word {i}"
         );
-        slots[0].banks[1][i].store(original[i], Ordering::SeqCst);
+        slots[0].banks[1][i].store(*word, Ordering::SeqCst);
     }
     // Same bank, forged commit revision: the tag must cover the revision too.
     slots[0].revision.store(3, Ordering::SeqCst);
@@ -237,13 +237,13 @@ fn warm_snapshot_comparison_checks_all_bytes_and_rollback_is_not_freshness_proof
     let slot = &table.slots()[0];
     let original: [u64; BANK_WORDS] =
         std::array::from_fn(|i| slot.banks[1][i].load(Ordering::SeqCst));
-    for i in 0..BANK_WORDS {
-        slot.banks[1][i].store(original[i] ^ 1, Ordering::SeqCst);
+    for (i, word) in original.iter().enumerate() {
+        slot.banks[1][i].store(*word ^ 1, Ordering::SeqCst);
         assert!(
             !table.unchanged::<Blake3State>(&snapshot).unwrap_or(false),
             "word {i}"
         );
-        slot.banks[1][i].store(original[i], Ordering::SeqCst);
+        slot.banks[1][i].store(*word, Ordering::SeqCst);
     }
     let mut revoked = first;
     revoked.status = REVOKED;

@@ -46,7 +46,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-orbitive = { version = "0.5.4", features = ["events"] }
+orbitive = { version = "0.5.5", features = ["events"] }
 ```
 
 Replace `src/main.rs` with:
@@ -290,10 +290,6 @@ Linux, FreeBSD and macOS 14.4 or later. On older macOS, constructing a native
 ring readiness bridge returns `Unsupported`; polling remains available where
 the module permits it. SHM support does not imply support for every async or
 platform-specific integration.
-
-**FreeBSD release note:** the published `orbit-core 0.5.3` used by
-`orbitive 0.5.4` has a compile error in the SHM permission argument. The source
-tree contains the fix; it is not yet included in that crates.io release.
 
 ## License
 

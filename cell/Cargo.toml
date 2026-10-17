@@ -1,6 +1,6 @@
 [package]
 name = "orbit-cell"
-version = "0.5.3"
+version = "0.5.4"
 publish.workspace = true
 edition.workspace = true
 authors.workspace = true

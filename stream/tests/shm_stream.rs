@@ -402,7 +402,7 @@ fn a_wait_can_be_bounded_without_losing_the_stream() {
 /// process generations still hold a side here.
 #[test]
 fn the_table_says_which_generations_hold_a_side() {
-    let name = fleet_name("o");
+    let name = fleet_name("v");
     let owner = Streams::new(
         Arc::new(
             Fleet::join_shm_as(name, 2, NodeId::ZERO).expect("owner fleet"),

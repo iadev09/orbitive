@@ -149,7 +149,7 @@ impl Authority {
             .expect("256-bit key");
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload { msg: &plaintext, aad: &info },
             )
             .map_err(|_| Error::InvalidToken)?;
@@ -352,10 +352,12 @@ impl Validator<'_> {
         );
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
             .expect("256-bit key");
+        let nonce = XNonce::try_from(&wire[4..HEADER_LEN])
+            .expect("checked header length");
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
-                    XNonce::from_slice(&wire[4..HEADER_LEN]),
+                    &nonce,
                     Payload { msg: &wire[HEADER_LEN..], aad: &info },
                 )
                 .map_err(|_| Error::InvalidToken)?,
