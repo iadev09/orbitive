@@ -97,7 +97,7 @@ resolver = "3"
 
 
 [workspace.package]
-publish = ["crates-io", "de02"]
+publish = ["crates-io"]
 edition = "2024"
 authors = ["ilker Arabaci <iarabaci@claviron.dev>"]
 license = "MIT OR Apache-2.0"
