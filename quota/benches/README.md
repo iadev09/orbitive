@@ -30,7 +30,7 @@ included. Outcome rates are aggregate counts divided by measured batch wall
 time, including warmup/calibration. Busy is a refusal, not admitted work.
 Amortized time per attempt is not latency per successful admission.
 
-## Measurements — 2026-10-20
+## macOS measurements — 2026-10-20
 
 Apple M3 Max, arm64, macOS 27.0.1; rustc 1.99.1, Cargo 1.99.1, Criterion 0.8.2.
 Release profile: optimization level 3, thin LTO, one codegen unit. Criterion
@@ -89,6 +89,74 @@ These are sequential runs, not confidence intervals or a monotonic tuning
 rule. More attempts do not guarantee higher throughput. Near-equal outcome
 shares are expected when threads make equal attempts and Busy is rare;
 they do not establish scheduler fairness or starvation freedom.
+
+## Linux measurements — 2026-10-20
+
+Two Intel Xeon E5-2680 v2 CPUs at 2.80 GHz, x86_64, 20 physical cores /
+40 logical CPUs, two NUMA nodes; AlmaLinux 8.10, Linux
+5.15.223-1.el8.elrepo.x86_64; rustc 1.99.1, Cargo 1.99.1, Criterion 0.8.2.
+Measured source revision: `9579d01`.
+
+The command, release profile, fixture settings and Criterion defaults above
+were unchanged: 3-second warmup, approximately 5-second measurement and
+100 samples per case. No workspace checks ran concurrently. Existing services
+remained running; no CPU affinity or NUMA placement was set for this run.
+These results describe this machine, not an isolated Linux-versus-macOS
+comparison: CPU architecture, hardware and scheduling differ.
+
+### Serial admission
+
+Values are Criterion slope point estimates, not p95/p99 latency.
+
+| Operation | Slots / probes | Time, ns |
+| --- | ---: | ---: |
+| Existing key allowed | 64 / 4 | 180.76 |
+| Existing key allowed | 4,096 / 4 | 180.99 |
+| Existing key allowed | 65,536 / 4 | 183.48 |
+| Existing key limited | 64 / 4 | 188.15 |
+| Existing key limited | 4,096 / 4 | 188.31 |
+| Existing key limited | 65,536 / 4 | 188.04 |
+| Weighted allowed, cost 32 | 64 / 4 | 185.40 |
+| New key allowed | 64 / 4 | 390.00 |
+| New key refused, full table | 1 / 1 | 182.19 |
+| New key refused, full table | 4 / 4 | 284.15 |
+| New key refused, full table | 16 / 16 | 676.90 |
+| Oversized key refused | 64 / 4 | 3.80 |
+
+### One shared hot key
+
+Rates include warmup/calibration and the timed barrier release and joins, as
+in the macOS run. The Limited workload grants zero admissions.
+
+| Workload | Threads | Outcome/s, millions | Busy |
+| --- | ---: | ---: | ---: |
+| Allowed | 2 | 5.463 | <0.001% |
+| Allowed | 4 | 3.517 | 0.015% |
+| Allowed | 8 | 2.266 | 1.157% |
+| Limited | 2 | 7.244 | 0.000% |
+| Limited | 4 | 7.347 | 0.000% |
+| Limited | 8 | 5.558 | 0.000% |
+
+### CAS budget
+
+| Attempts / call | Threads | Allowed/s, millions | Busy | Per-thread Allowed share, min–max |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 8 | 2.224 | 24.511% | 12.21–13.03% |
+| 32 | 8 | 2.268 | 8.464% | 12.39–12.63% |
+| 64 | 8 | 2.266 | 1.157% | 12.47–12.52% |
+
+These are sequential cases from one run, not repeated-run confidence
+intervals. The 16-attempt case refuses a larger fraction of work; its lower
+amortized attempt time does not mean higher admitted throughput. Equal
+attempt counts and per-thread outcome shares do not establish scheduler
+fairness or starvation freedom.
+
+The Linux quota suite also passed all 61 tests, including cross-process SHM
+admission and SIGKILL recovery. This benchmark still measures process-local
+memory admission only; it supplies no SHM performance measurement.
+
+Raw Linux output: `target/quota-linux-bench.log`; Criterion estimates are
+under `target/criterion/`. These generated artifacts are not published source.
 
 ## Verification and limits
 
