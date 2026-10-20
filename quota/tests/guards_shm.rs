@@ -154,7 +154,13 @@ fn guard_revalidates_charge_and_recency_after_freezing() {
         let _hold = inner.lock_shard(0, &mut work).unwrap();
         let prepared = inner.algorithm.prepare(count(1)).unwrap();
         assert!(matches!(
-            quota.install(0, candidate, other(), &prepared, &mut work),
+            quota.install::<Decision>(
+                0,
+                candidate,
+                other(),
+                &prepared,
+                &mut work
+            ),
             Err(Error::Busy)
         ));
         let pin = inner.pin(0, None, &mut budget()).unwrap().unwrap();

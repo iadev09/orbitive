@@ -91,6 +91,21 @@ match shared.try_consume(key, NonZeroU64::new(1).unwrap())? {
 
 ## Guarantees and boundaries
 
+`try_consume_with_snapshot` performs the same admission once and returns an
+`Admission`. A successful decision includes `Snapshot { limit, remaining }`:
+burst capacity and remaining whole quota units from the clock sample/TAT used
+by that successful commit. Weighted costs consume units, not request counts.
+Limited decisions have no successful-admission snapshot; errors stay errors.
+Reporting adds no storage/clock read, CAS, persisted field or allocation.
+Snapshot arithmetic runs after storage guards are released. `try_consume`
+does not calculate snapshots.
+
+Reports are immutable observations, not reservations. Concurrent requests,
+elapsed time and Guard replacement can change available quota before a response
+reaches a caller. LocalGuard reports process-local capacity; FleetGuard and
+FleetQuota report the shared resource's capacity at admission, not a guaranteed
+remaining fleet balance at delivery. There is no fixed-window reset timestamp.
+
 - Each call consumes the complete positive cost or none of it. Denial does
   not prolong debt. Weighted cost above burst is an error, not a partial grant.
 - The complete table and key backing are allocated during construction.

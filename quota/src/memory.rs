@@ -9,9 +9,11 @@ use portable_atomic::AtomicU128;
 
 use crate::budget::WorkBudget;
 use crate::clock::{Clock, Monotonic};
-use crate::gcra::{Gcra, Outcome, Prepared};
+use crate::gcra::{AdmissionResult, Captured, Gcra, Outcome, Prepared};
 use crate::retention::{Candidate, Observation, Retention, Selection, touch};
-use crate::{CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore};
+use crate::{
+    Admission, CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore,
+};
 
 const WRITER: u64 = 1 << 63;
 const POISONED: u64 = 1 << 62;
@@ -378,13 +380,13 @@ impl MemoryQuota {
         Ok(scaled) // Never clamp the sample forward to a peer's newer time.
     }
 
-    fn consume(
+    fn consume<R: AdmissionResult>(
         &self,
         shard: &Shard,
         pin: Pin<'_>,
         prepared: &Prepared<'_>,
         budget: &mut WorkBudget,
-    ) -> Result<Decision, Error> {
+    ) -> Result<R, Error> {
         loop {
             let previous = pin.slot.tat.load(Ordering::Acquire);
             // Each CAS retry reads state before taking a fresh clock sample.
@@ -395,13 +397,13 @@ impl MemoryQuota {
             match prepared.evaluate(now, Some(previous))? {
                 Outcome::Limited { debt } => {
                     drop(pin);
-                    return Ok(Decision::Limited {
-                        retry_after: self.inner.algorithm.retry_after(debt)?,
-                    });
+                    return Ok(R::limited(
+                        self.inner.algorithm.retry_after(debt)?,
+                    ));
                 }
                 Outcome::Allowed { tat } => {
                     if pin.commit(previous, tat, budget)? {
-                        return Ok(Decision::Allowed);
+                        return Ok(R::allowed(now, tat));
                     }
                 }
             }
@@ -409,14 +411,14 @@ impl MemoryQuota {
     }
 
     // Caller holds shard.structure. This is the sole identity mutation path.
-    fn install(
+    fn install<R: AdmissionResult>(
         &self,
         shard: &Shard,
         candidate: Candidate,
         key: Key<'_>,
         prepared: &Prepared<'_>,
         budget: &mut WorkBudget,
-    ) -> Result<Decision, Error> {
+    ) -> Result<R, Error> {
         let writer = shard.slots[candidate.index].reserve(budget)?;
         if writer.identity().generation != candidate.generation {
             return Err(Error::Busy);
@@ -450,7 +452,7 @@ impl MemoryQuota {
             writer.slot.last_seen.store(now, Ordering::Relaxed);
         }
         writer.install(generation, key, tat);
-        Ok(Decision::Allowed)
+        Ok(R::allowed(now, tat))
     }
 }
 
@@ -467,6 +469,25 @@ impl QuotaStore for MemoryQuota {
         key: Key<'_>,
         cost: NonZeroU64,
     ) -> Result<Decision, Error> {
+        self.admit(key, cost)
+    }
+
+    fn try_consume_with_snapshot(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<Admission, Error> {
+        let captured: Captured = self.admit(key, cost)?;
+        Ok(captured.resolve(&self.inner.algorithm))
+    }
+}
+
+impl MemoryQuota {
+    fn admit<R: AdmissionResult>(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<R, Error> {
         let table = &self.inner;
         let length = key
             .namespace()
@@ -572,6 +593,14 @@ impl QuotaStore for LocalGuard {
         cost: NonZeroU64,
     ) -> Result<Decision, Error> {
         self.quota.try_consume(key, cost)
+    }
+
+    fn try_consume_with_snapshot(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<Admission, Error> {
+        self.quota.try_consume_with_snapshot(key, cost)
     }
 }
 

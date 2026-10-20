@@ -142,6 +142,24 @@ pub enum Decision {
     Limited { retry_after: Duration },
 }
 
+/// Whole quota units available immediately after one committed admission.
+/// This is an admission-time observation, not a reservation or a promise about
+/// response delivery time. Guard replacement can discard the observed debt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Snapshot {
+    /// Maximum immediately available quota units (burst), not sustained rate.
+    pub limit: u64,
+    pub remaining: u64,
+}
+
+/// Optional reporting from the same transition as admission, never a reread.
+/// Refusal has no successful-admission snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Admission {
+    pub decision: Decision,
+    pub snapshot: Option<Snapshot>,
+}
+
 /// The common contract for memory and SHM stores.
 ///
 /// Every call has a bounded work budget and never waits for an owner or budget.
@@ -160,6 +178,14 @@ pub trait QuotaStore: Send + Sync {
         key: Key<'_>,
         cost: NonZeroU64,
     ) -> Result<Decision, Error>;
+
+    /// Consume once and report from the successful commit's time/TAT pair.
+    /// Reporting adds no clock read, storage read, CAS or persisted ABI field.
+    fn try_consume_with_snapshot(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<Admission, Error>;
 }
 
 /// Explicit failure, never an implicit empty bucket or permission to proceed.

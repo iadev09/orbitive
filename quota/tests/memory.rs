@@ -8,10 +8,12 @@ use super::*;
 struct FakeClock {
     now: AtomicU64,
     failed: AtomicBool,
+    reads: AtomicU64,
 }
 
 impl Clock for Arc<FakeClock> {
     fn now(&self) -> Result<u128, Error> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         if self.failed.load(Ordering::Relaxed) {
             return Err(Error::ClockUnavailable);
         }
@@ -63,6 +65,53 @@ fn store(
 
 fn key() -> Key<'static> {
     Key::new(b"test", b"subject").unwrap()
+}
+
+#[test]
+fn snapshots_match_plain_admission_without_extra_clock_samples_or_allocations()
+{
+    for retention in [Retention::Strict, Retention::Guard] {
+        let plain_clock = Arc::new(FakeClock::default());
+        let report_clock = Arc::new(FakeClock::default());
+        let make = |clock: &Arc<FakeClock>| {
+            MemoryQuota::with_retention(
+                geometry(1, 1, 1),
+                Policy::new(count(1), Duration::from_nanos(100), count(4))
+                    .unwrap(),
+                cas_budget(),
+                Box::new(Arc::clone(clock)),
+                retention,
+            )
+            .unwrap()
+        };
+        let plain = make(&plain_clock);
+        let report = make(&report_clock);
+        for (now, cost, remaining) in [
+            (0, 2, Some(2)),
+            (25, 1, Some(1)),
+            (25, 2, None),
+            (1000, 1, Some(3)),
+        ] {
+            plain_clock.now.store(now, Ordering::Relaxed);
+            report_clock.now.store(now, Ordering::Relaxed);
+            let decision = plain.try_consume(key(), count(cost)).unwrap();
+            let (result, allocations) = crate::test_allocator::measured(|| {
+                report.try_consume_with_snapshot(key(), count(cost))
+            });
+            let admission = result.unwrap();
+            assert_eq!(allocations, 0);
+            assert_eq!(admission.decision, decision);
+            assert_eq!(
+                admission.snapshot,
+                remaining
+                    .map(|remaining| crate::Snapshot { limit: 4, remaining })
+            );
+            assert_eq!(
+                plain_clock.reads.load(Ordering::Relaxed),
+                report_clock.reads.load(Ordering::Relaxed)
+            );
+        }
+    }
 }
 
 #[test]

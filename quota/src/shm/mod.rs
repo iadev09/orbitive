@@ -18,9 +18,11 @@ use portable_atomic::AtomicU128;
 
 use crate::budget::WorkBudget;
 use crate::clock::{Clock, Monotonic};
-use crate::gcra::{Gcra, Outcome, Prepared};
+use crate::gcra::{AdmissionResult, Captured, Gcra, Outcome, Prepared};
 use crate::retention::{Candidate, Observation, Retention, Selection, touch};
-use crate::{CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore};
+use crate::{
+    Admission, CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore,
+};
 use layout::{
     Bank, FROZEN, GENERATION, Header, INITIALIZING, Layout, MAGIC, Owner,
     READY, RETIRED, Shard, Slot,
@@ -445,13 +447,13 @@ impl Inner {
         }
         Ok(frozen)
     }
-    fn consume(
+    fn consume<R: AdmissionResult>(
         &self,
         shard: usize,
         pin: Pin<'_>,
         prepared: &Prepared<'_>,
         budget: &mut Budget,
-    ) -> Result<Decision, Error> {
+    ) -> Result<R, Error> {
         let tat =
             &self.slot(pin.index).banks[(pin.generation & 1) as usize].tat;
         loop {
@@ -467,9 +469,7 @@ impl Inner {
             match prepared.evaluate(now, Some(previous))? {
                 Outcome::Limited { debt } => {
                     drop(pin);
-                    return Ok(Decision::Limited {
-                        retry_after: self.algorithm.retry_after(debt)?,
-                    });
+                    return Ok(R::limited(self.algorithm.retry_after(debt)?));
                 }
                 Outcome::Allowed { tat: next } => {
                     budget.cas.take()?;
@@ -484,7 +484,7 @@ impl Inner {
                     {
                         #[cfg(test)]
                         fault(Fault::TatCommitted);
-                        return Ok(Decision::Allowed);
+                        return Ok(R::allowed(now, next));
                     }
                 }
             }
@@ -883,6 +883,25 @@ impl QuotaStore for ShmQuota {
         key: Key<'_>,
         cost: NonZeroU64,
     ) -> Result<Decision, Error> {
+        self.admit(key, cost)
+    }
+
+    fn try_consume_with_snapshot(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<Admission, Error> {
+        let captured: Captured = self.admit(key, cost)?;
+        Ok(captured.resolve(&self.inner.algorithm))
+    }
+}
+
+impl ShmQuota {
+    fn admit<R: AdmissionResult>(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<R, Error> {
         let inner = &self.inner;
         inner.check_process()?;
         let length = key
@@ -944,14 +963,14 @@ impl QuotaStore for ShmQuota {
 
 impl ShmQuota {
     // Caller owns this shard's prepared kernel hold through publication.
-    fn install(
+    fn install<R: AdmissionResult>(
         &self,
         shard: usize,
         candidate: Candidate,
         key: Key<'_>,
         prepared: &Prepared<'_>,
         budget: &mut Budget,
-    ) -> Result<Decision, Error> {
+    ) -> Result<R, Error> {
         let inner = &self.inner;
         let Candidate { index, generation, observed } = candidate;
         let frozen = inner.freeze(index, generation, budget)?;
@@ -983,7 +1002,7 @@ impl ShmQuota {
         } else {
             frozen.publish(key, tat)?;
         }
-        Ok(Decision::Allowed)
+        Ok(R::allowed(now, tat))
     }
 }
 
@@ -1041,6 +1060,14 @@ impl QuotaStore for FleetGuard {
         cost: NonZeroU64,
     ) -> Result<Decision, Error> {
         self.quota.try_consume(key, cost)
+    }
+
+    fn try_consume_with_snapshot(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<Admission, Error> {
+        self.quota.try_consume_with_snapshot(key, cost)
     }
 }
 

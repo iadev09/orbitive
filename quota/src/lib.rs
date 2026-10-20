@@ -16,7 +16,8 @@ mod retention;
 mod shm;
 
 pub use contract::{
-    CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore,
+    Admission, CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore,
+    Snapshot,
 };
 pub use memory::{LocalGuard, MemoryQuota};
 /// Fleet-wide quota with strict live-debt retention; the same store as ShmQuota.

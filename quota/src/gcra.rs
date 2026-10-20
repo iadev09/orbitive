@@ -1,7 +1,64 @@
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-use crate::{Error, Policy};
+use crate::{Admission, Decision, Error, Policy, Snapshot};
+
+/// Internal static dispatch keeps ordinary admission free of snapshot math.
+pub(crate) trait AdmissionResult {
+    fn allowed(
+        now: u128,
+        tat: u128,
+    ) -> Self;
+    fn limited(retry_after: Duration) -> Self;
+}
+
+impl AdmissionResult for Decision {
+    fn allowed(
+        _: u128,
+        _: u128,
+    ) -> Self {
+        Self::Allowed
+    }
+    fn limited(retry_after: Duration) -> Self {
+        Self::Limited { retry_after }
+    }
+}
+
+/// Capture only local scalars under exclusion; resolve after guards are gone.
+pub(crate) enum Captured {
+    Allowed { now: u128, tat: u128 },
+    Limited { retry_after: Duration },
+}
+
+impl AdmissionResult for Captured {
+    fn allowed(
+        now: u128,
+        tat: u128,
+    ) -> Self {
+        Self::Allowed { now, tat }
+    }
+    fn limited(retry_after: Duration) -> Self {
+        Self::Limited { retry_after }
+    }
+}
+
+impl Captured {
+    pub(crate) fn resolve(
+        self,
+        algorithm: &Gcra,
+    ) -> Admission {
+        match self {
+            Self::Allowed { now, tat } => Admission {
+                decision: Decision::Allowed,
+                snapshot: Some(algorithm.snapshot(now, tat)),
+            },
+            Self::Limited { retry_after } => Admission {
+                decision: Decision::Limited { retry_after },
+                snapshot: None,
+            },
+        }
+    }
+}
 
 /// Time is measured in nanoseconds multiplied by the sustained unit count.
 /// A unit therefore costs exactly period_ns, without rounding the interval.
@@ -26,6 +83,20 @@ pub(crate) struct Prepared<'a> {
 }
 
 impl Gcra {
+    /// Called only for a successfully committed evaluate() result. Its checked
+    /// ceiling proves debt <= capacity. Calculation is infallible after charge;
+    /// floor division never advertises a fractional unit as available.
+    fn snapshot(
+        &self,
+        now: u128,
+        tat: u128,
+    ) -> Snapshot {
+        let remaining = (self.capacity - (tat - now)) / self.period;
+        Snapshot {
+            limit: self.policy.burst().get(),
+            remaining: remaining as u64,
+        }
+    }
     pub(crate) fn new(policy: Policy) -> Result<Self, Error> {
         let period = policy.period().as_nanos();
         let capacity = period

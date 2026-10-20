@@ -124,7 +124,13 @@ fn a_charge_after_candidate_selection_prevents_reclamation() {
     let prepared = quota.inner.algorithm.prepare(count(1)).unwrap();
     let other = Key::new(b"other", b"subject").unwrap();
     assert!(matches!(
-        quota.install(shard, candidate, other, &prepared, &mut work(64)),
+        quota.install::<Decision>(
+            shard,
+            candidate,
+            other,
+            &prepared,
+            &mut work(64)
+        ),
         Err(Error::Busy)
     ));
     assert!(held(&quota).matches(key()));

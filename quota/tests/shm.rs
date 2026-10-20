@@ -73,9 +73,10 @@ impl Drop for Fixture {
 }
 
 #[derive(Default)]
-struct TestClock(AtomicU64);
+struct TestClock(AtomicU64, AtomicU64);
 impl Clock for Arc<TestClock> {
     fn now(&self) -> Result<u128, Error> {
+        self.1.fetch_add(1, Ordering::Relaxed);
         Ok(u128::from(self.0.load(Ordering::Relaxed)))
     }
 }
@@ -111,6 +112,77 @@ fn other() -> Key<'static> {
 }
 fn budget() -> Budget {
     Budget::new(attempts(64), 8)
+}
+
+#[test]
+fn fleet_snapshots_use_committed_values_without_additional_clock_or_cas_work() {
+    for retention in [Retention::Guard, Retention::Strict] {
+        let plain_fixture = Fixture::new();
+        let report_fixture = Fixture::new();
+        let plain_clock = Arc::new(TestClock::default());
+        let report_clock = Arc::new(TestClock::default());
+        let open = |fixture: &Fixture, clock: &Arc<TestClock>, budget| {
+            ShmQuota::with_retention(
+                fixture.0,
+                geometry(1),
+                (policy(4), retention),
+                attempts(budget),
+                options(3, 3),
+                Box::new(Arc::clone(clock)),
+                [7; 32],
+            )
+            .unwrap()
+        };
+        let plain = open(&plain_fixture, &plain_clock, 64);
+        let report = open(&report_fixture, &report_clock, 64);
+        // An independent peer must report the debt committed by the first.
+        let peer = open(&report_fixture, &report_clock, 64);
+        for (index, (now, cost, remaining)) in [
+            (0, 2, Some(2)),
+            (25, 1, Some(1)),
+            (25, 2, None),
+            (1000, 1, Some(3)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            plain_clock.0.store(now, Ordering::Relaxed);
+            report_clock.0.store(now, Ordering::Relaxed);
+            // Opening a SHM handle validates its clock once. Compare admission
+            // deltas, not lifetime totals (the reporting resource has a peer).
+            let plain_reads = plain_clock.1.load(Ordering::Relaxed);
+            let report_reads = report_clock.1.load(Ordering::Relaxed);
+            let decision = plain.try_consume(key(), count(cost)).unwrap();
+            let reported = if index % 2 == 0 { &report } else { &peer };
+            let (result, allocations) = crate::test_allocator::measured(|| {
+                reported.try_consume_with_snapshot(key(), count(cost))
+            });
+            let admission = result.unwrap();
+            assert_eq!(allocations, 0);
+            assert_eq!(admission.decision, decision);
+            assert_eq!(
+                admission.snapshot,
+                remaining
+                    .map(|remaining| crate::Snapshot { limit: 4, remaining })
+            );
+            assert_eq!(
+                plain_clock.1.load(Ordering::Relaxed) - plain_reads,
+                report_clock.1.load(Ordering::Relaxed) - report_reads
+            );
+        }
+        // One attempt cannot install a key in either path. Do not assert exact
+        // minimum-success budgets: weak CAS may fail spuriously on native CPUs.
+        let first_fixture = Fixture::new();
+        let second_fixture = Fixture::new();
+        let clock = Arc::new(TestClock::default());
+        let first = open(&first_fixture, &clock, 1);
+        let second = open(&second_fixture, &clock, 1);
+        assert!(matches!(first.try_consume(key(), count(1)), Err(Error::Busy)));
+        assert!(matches!(
+            second.try_consume_with_snapshot(key(), count(1)),
+            Err(Error::Busy)
+        ));
+    }
 }
 
 #[test]

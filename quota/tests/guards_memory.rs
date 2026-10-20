@@ -22,6 +22,70 @@ fn subject(bytes: &[u8]) -> Key<'_> {
 }
 
 #[test]
+fn local_guard_snapshot_is_immutable_and_replacement_starts_a_new_budget() {
+    let (guard, _) = guard(1, 4);
+    let first = guard.try_consume_with_snapshot(key(), count(2)).unwrap();
+    assert_eq!(
+        first.snapshot,
+        Some(crate::Snapshot { limit: 4, remaining: 2 })
+    );
+    let clone = guard.clone();
+    assert_eq!(
+        clone.try_consume_with_snapshot(key(), count(1)).unwrap().snapshot,
+        Some(crate::Snapshot { limit: 4, remaining: 1 })
+    );
+    // A saved report is not updated by later charges or cold replacement.
+    assert_eq!(first.snapshot.unwrap().remaining, 2);
+    assert_eq!(
+        guard
+            .try_consume_with_snapshot(subject(b"new"), count(1))
+            .unwrap()
+            .snapshot,
+        Some(crate::Snapshot { limit: 4, remaining: 3 })
+    );
+}
+
+#[test]
+fn concurrent_guard_snapshots_belong_to_their_own_successful_commit() {
+    let (guard, _) = guard(1, 16);
+    let start = Barrier::new(4);
+    let mut remaining = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let guard = &guard;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    let mut captured = Vec::new();
+                    for _ in 0..4 {
+                        match guard.try_consume_with_snapshot(key(), count(1)) {
+                            Ok(crate::Admission {
+                                decision: Decision::Allowed,
+                                snapshot: Some(snapshot),
+                            }) => {
+                                assert_eq!(snapshot.limit, 16);
+                                captured.push(snapshot.remaining);
+                            }
+                            Err(Error::Busy) => {}
+                            result => panic!("unexpected result: {result:?}"),
+                        }
+                    }
+                    captured
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    remaining.sort_unstable();
+    let accepted = remaining.len() as u64;
+    assert!(accepted > 0);
+    assert_eq!(remaining, (16 - accepted..16).collect::<Vec<_>>());
+}
+
+#[test]
 fn guard_reclaims_live_debt_but_strict_memory_does_not() {
     let (guard, _) = guard(1, 1);
     let (strict, _) = store(geometry(1, 1, 1), 1);
@@ -119,7 +183,7 @@ fn guard_revalidates_recency_and_charge_after_candidate_selection() {
         let _hold = shard.structure.try_lock().unwrap();
         let prepared = quota.inner.algorithm.prepare(count(1)).unwrap();
         assert!(matches!(
-            quota.install(
+            quota.install::<Decision>(
                 shard,
                 candidate,
                 subject(b"new"),

@@ -50,6 +50,37 @@ fn algorithm(
 }
 
 #[test]
+fn committed_snapshot_reports_whole_units_not_a_fixed_window_counter() {
+    let gcra = algorithm(3, 10, 5);
+    let super::Outcome::Allowed { tat } =
+        gcra.prepare(count(2)).unwrap().evaluate(0, None).unwrap()
+    else {
+        panic!("initial charge fits")
+    };
+    assert_eq!(gcra.snapshot(0, tat), Snapshot { limit: 5, remaining: 3 });
+    // Three scaled time units refill 0.3 of a unit; it must not round up.
+    let now = gcra.scale(1).unwrap();
+    let super::Outcome::Allowed { tat } =
+        gcra.prepare(count(1)).unwrap().evaluate(now, Some(tat)).unwrap()
+    else {
+        panic!("charge fits")
+    };
+    assert_eq!(gcra.snapshot(now, tat), Snapshot { limit: 5, remaining: 2 });
+    // Idle time is capped at burst, and maximum u64 capacities stay exact.
+    let large = algorithm(1, 1, u64::MAX);
+    let now = u128::MAX - u128::from(u64::MAX);
+    let super::Outcome::Allowed { tat } =
+        large.prepare(count(1)).unwrap().evaluate(now, None).unwrap()
+    else {
+        panic!("charge fits")
+    };
+    assert_eq!(
+        large.snapshot(now, tat),
+        Snapshot { limit: u64::MAX, remaining: u64::MAX - 1 }
+    );
+}
+
+#[test]
 fn fractional_intervals_are_exact_and_retry_rounds_up() {
     let gcra = algorithm(3, 10, 2);
     assert_eq!(
