@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 
 use portable_atomic::AtomicU128;
 
+use crate::budget::WorkBudget;
 use crate::clock::{Clock, Monotonic};
 use crate::gcra::{Gcra, Outcome, Prepared};
 use crate::{CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore};
@@ -59,21 +60,6 @@ struct Identity {
 // while any pin exists. Release unpins/publication and Acquire acquisition
 // order all identity access. TAT is accessed atomically even while pinned.
 unsafe impl Sync for Slot {}
-
-struct WorkBudget {
-    remaining: usize,
-}
-
-impl WorkBudget {
-    fn new(limit: CasBudget) -> Self {
-        Self { remaining: limit.attempts().get() }
-    }
-
-    fn take(&mut self) -> Result<(), Error> {
-        self.remaining = self.remaining.checked_sub(1).ok_or(Error::Busy)?;
-        Ok(())
-    }
-}
 
 struct Pin<'a> {
     slot: &'a Slot,

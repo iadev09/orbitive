@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 exclude.workspace = true
 autotests = false
-description = "Bounded GCRA quota admission with a nonblocking memory backend."
+description = "Bounded GCRA quota admission with memory and shared-memory backends."
 keywords = ["quota", "rate-limit", "shared-memory", "concurrency"]
 categories = ["concurrency", "data-structures"]
 
@@ -17,6 +17,9 @@ categories = ["concurrency", "data-structures"]
 portable-atomic.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+orbit-core.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
 # Host-monotonic time; admission never accepts caller-provided timestamps.
 libc.workspace = true
 

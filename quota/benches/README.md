@@ -92,8 +92,7 @@ they do not establish scheduler fairness or starvation freedom.
 
 ## Verification and limits
 
-The 37 quota tests and workspace test suite pass, as does workspace/all-features/
-all-targets Clippy with warnings denied. Tests cover:
+Memory/common tests cover:
 
 - Integer GCRA against an independent token-bucket model: fractional refill,
   weighted all-or-nothing cost, retry rounding and arithmetic overflow.
@@ -109,7 +108,8 @@ internal OS allocation. The CAS budget bounds atomic API calls, not scheduling
 time or architecture-specific instruction retries. Lock-free is not wait-free.
 Tests and benchmarks do not prove exhaustive memory-model correctness,
 cross-process crash recovery or protection against volumetric DDoS. No Loom,
-Miri or sanitizer validation is included. SHM is not implemented.
+Miri or sanitizer validation is included. SHM validation and costs are outside
+these recorded memory measurements.
 
 Raw output: `target/quota-cas-tests.log`, `target/quota-cas-clippy.log`,
 `target/quota-cas-bench.log`, `target/quota-cas-repeat.log` and Criterion data

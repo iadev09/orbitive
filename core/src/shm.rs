@@ -42,6 +42,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Namespace used by Orbit POSIX shared-memory objects.
 pub const SHM_NAMESPACE: &str = "orbit";
@@ -869,6 +870,73 @@ pub struct LaneHold {
     lock_fd: OwnedFd,
 }
 
+/// A lane lock prepared at opening, with no path construction or file open
+/// during acquisition. Each opener owns a distinct file description.
+/// Open after fork; inherited instances cannot be used by the child.
+pub struct PreparedLaneLock {
+    fd: OwnedFd,
+    busy: AtomicBool,
+    pid: u32,
+}
+
+impl PreparedLaneLock {
+    pub fn open(
+        shm_name: &str,
+        lane: usize,
+    ) -> io::Result<Self> {
+        let name = format!("{}.lane{lane}", shm_name.trim_start_matches('/'));
+        Ok(Self {
+            fd: open_lock_file(&lock_file_path(&name))?,
+            busy: AtomicBool::new(false),
+            pid: std::process::id(),
+        })
+    }
+
+    /// One local CAS and at most one LOCK_NB syscall. No owner wait or retry.
+    pub fn try_lock(&self) -> io::Result<Option<PreparedLaneGuard<'_>>> {
+        if self.pid != std::process::id() {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        // SAFETY: the local flag excludes overlapping use of this description.
+        if unsafe {
+            libc::flock(self.fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+        } == 0
+        {
+            return Ok(Some(PreparedLaneGuard { lock: self }));
+        }
+        let error = io::Error::last_os_error();
+        self.busy.store(false, Ordering::Release);
+        if error.kind() == io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    }
+}
+
+pub struct PreparedLaneGuard<'a> {
+    lock: &'a PreparedLaneLock,
+}
+
+impl Drop for PreparedLaneGuard<'_> {
+    fn drop(&mut self) {
+        if self.lock.pid == std::process::id() {
+            // SAFETY: this guard owns this file description's exclusive hold.
+            unsafe {
+                libc::flock(self.lock.fd.as_raw_fd(), libc::LOCK_UN);
+            }
+            self.lock.busy.store(false, Ordering::Release);
+        }
+    }
+}
+
 impl Drop for LaneHold {
     fn drop(&mut self) {
         let _ = unsafe { libc::flock(self.lock_fd.as_raw_fd(), libc::LOCK_UN) };
@@ -1083,6 +1151,32 @@ fn ensure_private_dir(
 #[cfg(test)]
 mod fleet_lock_tests {
     use super::{join_fleet_membership, try_lock_fleet_exclusive};
+
+    #[test]
+    fn prepared_lane_excludes_threads_and_distinct_file_descriptions() {
+        let name = format!("prepared-{}", std::process::id());
+        let first = super::PreparedLaneLock::open(&name, 0).unwrap();
+        let second = super::PreparedLaneLock::open(&name, 0).unwrap();
+        let hold = first.try_lock().unwrap().unwrap();
+        assert!(first.try_lock().unwrap().is_none());
+        std::thread::scope(|scope| {
+            assert!(
+                scope
+                    .spawn(|| first.try_lock().unwrap().is_none())
+                    .join()
+                    .unwrap()
+            );
+        });
+        assert!(second.try_lock().unwrap().is_none());
+        drop(hold);
+        let other = second.try_lock().unwrap().unwrap();
+        assert!(first.try_lock().unwrap().is_none());
+        drop(other);
+        drop(first);
+        drop(second);
+        std::fs::remove_file(super::lock_file_path(&format!("{name}.lane0")))
+            .unwrap();
+    }
 
     /// A member alive means the fleet cannot be cleared, and there is no
     /// flag that says otherwise; the member going away is what opens it.

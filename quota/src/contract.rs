@@ -53,7 +53,7 @@ impl Geometry {
     pub const fn key_bytes(self) -> NonZeroUsize {
         self.key_bytes
     }
-    /// Slots inspected per lookup pass. Memory uses at most two passes on a
+    /// Slots inspected per lookup pass. Both backends use at most two passes on a
     /// miss (optimistic lookup, then serialized installation lookup).
     pub const fn probes(self) -> NonZeroUsize {
         self.probes
@@ -141,7 +141,7 @@ pub enum Decision {
     Limited { retry_after: Duration },
 }
 
-/// The common contract for memory and future SHM stores.
+/// The common contract for memory and SHM stores.
 ///
 /// Every call has a bounded work budget and never waits for an owner or budget.
 /// An error grants no permission. The policy and geometry are immutable for
@@ -174,6 +174,7 @@ pub enum Error {
     CorruptState,
     ArithmeticOverflow,
     ClockUnavailable,
+    RandomUnavailable,
     ClockWentBackwards,
     AllocationFailed,
     UnsupportedAtomics,
@@ -201,6 +202,7 @@ impl fmt::Display for Error {
             Self::CorruptState => "corrupt quota state",
             Self::ArithmeticOverflow => "quota arithmetic overflow",
             Self::ClockUnavailable => "quota clock is unavailable",
+            Self::RandomUnavailable => "quota hash seed source is unavailable",
             Self::ClockWentBackwards => "quota clock moved backwards",
             Self::AllocationFailed => "quota backing allocation failed",
             Self::UnsupportedAtomics => {

@@ -7,8 +7,8 @@ keys; HTTP, authentication, sessions and response handling stay outside quota.
 its table and budget. Different stores never share debt, even for identical
 keys. Within a store, identical keys share a budget and different keys have
 separate budgets under the same immutable policy. Applications choose whether
-sites share a store, a key, both or neither. Keep a handle alive while the
-policy must remain in force; dropping every handle destroys the state.
+sites share a store, a key, both or neither. Memory state lasts until its last
+handle drops. SHM state outlives its handles and processes.
 
 ```rust
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -57,11 +57,12 @@ match shared.try_consume(key, NonZeroU64::new(1).unwrap())? {
   mutex. Installation/reuse takes the structural mutex with `try_lock` only.
   Contention or an inaccessible identity returns `Busy`. `CapacityFull`
   can occur even while slots outside the probe range are free. Neither is
-  permission to proceed. A poisoned shard remains unavailable.
+  permission to proceed. A poisoned memory shard remains unavailable.
 - Hashes are keyed per store; full namespace and subject bytes decide identity.
   Pins prevent generation/key replacement while readers consume. Live debt is
   never evicted. A writer rechecks TAT after exclusive reservation before reuse.
-  Generations never wrap; exhausted slots retire. Partial writes stay poisoned.
+  Generations never wrap; exhausted slots retire. Partial memory writes stay
+  poisoned; unpublished SHM banks never replace the committed bank.
 - Integer GCRA preserves fractional refill intervals; retry delays round up
   to nanoseconds. No background refill, timer or implicit duration is used.
 - Time comes from the host's `CLOCK_MONOTONIC` on Unix. Clock failure,
@@ -77,7 +78,62 @@ Quota is an explicit defense at an application-selected boundary, not an
 automatic wrapper around each capability. A rate charge is not a session,
 concurrency lease or authentication proof and is not refunded on caller exit.
 Several policy checks do not form a transaction. Memory storage does not share
-state across processes or survive restart. SHM is not implemented yet.
+state across processes or survive restart.
+
+## Shared memory
+
+`ShmQuota` implements the same `QuotaStore` admission API. Open the same
+uid-scoped resource with matching geometry and policy to share debt:
+
+```rust,ignore
+use orbit_quota::{ShmOptions, ShmQuota, ShmResource};
+
+// All settings are supplied by the application; no kind or capacity default.
+let resource = ShmResource::new("example".parse()?, kind);
+let options = ShmOptions::new(owner_capacity, recovery_attempts);
+let quota = ShmQuota::open(resource, geometry, policy, attempts, options)?;
+```
+
+Each independent open claims one owner row; clones share it. `owner_capacity`
+is a nonzero, persisted bound on simultaneously open owners. Pin backing grows
+with owner capacity times slot capacity. A full owner table is an explicit
+error, never a live-owner takeover.
+
+Owner rows are protected by lifetime kernel holds. Under reuse pressure, pins
+can be cleared only after acquiring the corresponding hold without waiting.
+There is no PID probe, heartbeat expiry or timeout-based reclaim.
+`recovery_attempts` bounds additional kernel-lock attempts per admission;
+zero disables opportunistic recovery. CAS attempts remain separately bounded
+by `CasBudget`. Kernel lock descriptors are prepared at opening, not admission.
+
+Existing-key consumption commits through native atomic u128 TAT CAS. Identity
+replacement freezes the slot, excludes admitted pins, writes an inactive bank
+and publishes its generation and initial charge with one atomic descriptor.
+Death before publication preserves the old bank; death after publication
+preserves the new charge. A dead writer's frozen descriptor can be recovered
+under its shard's kernel lock. Committed charges are not refunded after death.
+
+Opening validates ABI, geometry, policy, hash protocol and boot/clock domain.
+The shared hash seed is generated once; it is not independently randomized by
+each opener. Incompatible state is never reset. Tagged incomplete initialization
+can resume before READY; an untagged or undersized object is refused, not erased.
+Opening may serialize initialization; admission uses nonblocking acquisition.
+
+The native clock-domain provider currently supports macOS boot-session UUIDs
+and Linux boot IDs plus time-namespace identity. FreeBSD uses the kernel's
+16-byte boot ID, shared across jails along with the monotonic clock. Isolation
+belongs to resource identity and OS access permissions, not the clock domain.
+Other Unix targets refuse
+opening with `ClockUnavailable`. All users must share native atomic/layout
+compatibility and the same clock domain. Open after fork; inherited handles
+must not be used. Inherited holds may delay recovery until the child closes
+them or exits/execs; they never justify taking ownership from a live holder.
+No power-loss durability or same-uid hostile-writer isolation
+is provided. Clearing/unlinking requires all users to have stopped.
+
+On FreeBSD ARM64, the quota suite passes, including native clock-domain,
+cross-process debt sharing and SIGKILL recovery tests. SHM performance has not
+been measured.
 
 Bounded memory and bounded probes do not promise fairness, availability for
 new keys under adversarial churn, or protection against volumetric DDoS.
