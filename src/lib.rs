@@ -49,6 +49,11 @@ pub mod counter {
     pub use orbit_counter::*;
 }
 
+#[cfg(feature = "quota")]
+pub mod quota {
+    pub use orbit_quota::*;
+}
+
 #[cfg(feature = "cell")]
 pub mod cell {
     pub use orbit_cell::*;
