@@ -348,6 +348,9 @@ mod allocations;
 #[path = "memory_cas.rs"]
 mod cas;
 
+#[path = "guards_memory.rs"]
+mod guards;
+
 #[cfg(unix)]
 #[test]
 fn public_constructor_uses_a_host_monotonic_clock() {

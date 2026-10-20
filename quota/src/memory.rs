@@ -10,6 +10,7 @@ use portable_atomic::AtomicU128;
 use crate::budget::WorkBudget;
 use crate::clock::{Clock, Monotonic};
 use crate::gcra::{Gcra, Outcome, Prepared};
+use crate::retention::{Candidate, Observation, Retention, Selection, touch};
 use crate::{CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore};
 
 const WRITER: u64 = 1 << 63;
@@ -25,6 +26,7 @@ pub struct MemoryQuota {
 }
 
 struct Table {
+    retention: Retention,
     geometry: Geometry,
     policy: Policy,
     cas_budget: CasBudget,
@@ -45,6 +47,7 @@ struct Slot {
     gate: AtomicU64,
     identity: UnsafeCell<Identity>,
     tat: AtomicU128,
+    last_seen: AtomicU128,
 }
 
 struct Identity {
@@ -230,12 +233,6 @@ impl Slot {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Candidate {
-    index: usize,
-    generation: u64,
-}
-
 impl MemoryQuota {
     /// Allocate fixed backing and require native lock-free u128 operations.
     /// There is no implicit CAS limit or lock-emulated fast path.
@@ -252,6 +249,22 @@ impl MemoryQuota {
         policy: Policy,
         cas_budget: CasBudget,
         clock: Box<dyn Clock>,
+    ) -> Result<Self, Error> {
+        Self::with_retention(
+            geometry,
+            policy,
+            cas_budget,
+            clock,
+            Retention::Strict,
+        )
+    }
+
+    fn with_retention(
+        geometry: Geometry,
+        policy: Policy,
+        cas_budget: CasBudget,
+        clock: Box<dyn Clock>,
+        retention: Retention,
     ) -> Result<Self, Error> {
         if !AtomicU128::is_lock_free() {
             return Err(Error::UnsupportedAtomics);
@@ -292,6 +305,7 @@ impl MemoryQuota {
                         bytes: bytes.into_boxed_slice(),
                     }),
                     tat: AtomicU128::new(0),
+                    last_seen: AtomicU128::new(0),
                 });
             }
             let structure = Mutex::new(());
@@ -304,6 +318,7 @@ impl MemoryQuota {
         }
         Ok(Self {
             inner: Arc::new(Table {
+                retention,
                 geometry,
                 policy,
                 cas_budget,
@@ -374,6 +389,9 @@ impl MemoryQuota {
             let previous = pin.slot.tat.load(Ordering::Acquire);
             // Each CAS retry reads state before taking a fresh clock sample.
             let now = self.sample(shard, budget)?;
+            if self.inner.retention == Retention::Guard {
+                touch(&pin.slot.last_seen, now, budget)?;
+            }
             match prepared.evaluate(now, Some(previous))? {
                 Outcome::Limited { debt } => {
                     drop(pin);
@@ -405,8 +423,19 @@ impl MemoryQuota {
         }
         let previous = writer.slot.tat.load(Ordering::Acquire);
         let now = self.sample(shard, budget)?;
-        if writer.identity().occupied && previous > now {
-            return Err(Error::Busy);
+        if writer.identity().occupied {
+            match candidate.observed {
+                Some(observed) if self.inner.retention == Retention::Guard => {
+                    if previous != observed.tat
+                        || writer.slot.last_seen.load(Ordering::Acquire)
+                            != observed.seen
+                    {
+                        return Err(Error::Busy);
+                    }
+                }
+                _ if previous > now => return Err(Error::Busy),
+                _ => {}
+            }
         }
         let Some(generation) = writer.identity().generation.checked_add(1)
         else {
@@ -416,6 +445,10 @@ impl MemoryQuota {
         let Outcome::Allowed { tat } = prepared.evaluate(now, None)? else {
             return Err(Error::CorruptState);
         };
+        // The writer excludes pins; recency is ready before identity publication.
+        if self.inner.retention == Retention::Guard {
+            writer.slot.last_seen.store(now, Ordering::Relaxed);
+        }
         writer.install(generation, key, tat);
         Ok(Decision::Allowed)
     }
@@ -467,7 +500,7 @@ impl QuotaStore for MemoryQuota {
         // Identity installation is serialized. Re-scan every configured probe
         // before replacement; an earlier empty/expired slot cannot hide a key.
         let now = self.sample(shard, &mut budget)?;
-        let mut candidate = None;
+        let mut selection = Selection::new(table.retention);
         let mut index = start;
         for _ in 0..table.geometry.probes().get() {
             if let Some(pin) = shard.slots[index].pin(None, &mut budget)? {
@@ -476,23 +509,69 @@ impl QuotaStore for MemoryQuota {
                     return self.consume(shard, pin, &prepared, &mut budget);
                 }
                 let id = pin.identity();
-                if candidate.is_none()
-                    && (!id.occupied
-                        || pin.slot.tat.load(Ordering::Acquire) <= now)
-                {
-                    candidate =
-                        Some(Candidate { index, generation: id.generation });
-                }
+                let tat = pin.slot.tat.load(Ordering::Acquire);
+                let seen = if table.retention == Retention::Guard {
+                    pin.slot.last_seen.load(Ordering::Acquire)
+                } else {
+                    0
+                };
+                selection.consider(
+                    index,
+                    id.generation,
+                    !id.occupied || tat <= now,
+                    Observation { tat, seen },
+                );
             }
             index = if index + 1 == shard.slots.len() { 0 } else { index + 1 };
         }
-        self.install(
-            shard,
-            candidate.ok_or(Error::CapacityFull)?,
-            key,
-            &prepared,
-            &mut budget,
-        )
+        self.install(shard, selection.finish()?, key, &prepared, &mut budget)
+    }
+}
+
+/// Process-local traffic protection. Independent constructors own independent
+/// budgets; clones share one store. Under pressure, the least recently touched
+/// key in the bounded probe window may lose live debt. No idle timeout or
+/// fleet-wide limit is implied. Busy/CapacityFull never grant admission.
+#[derive(Clone)]
+pub struct LocalGuard {
+    quota: MemoryQuota,
+}
+
+impl LocalGuard {
+    pub fn new(
+        geometry: Geometry,
+        policy: Policy,
+        cas_budget: CasBudget,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            quota: MemoryQuota::with_retention(
+                geometry,
+                policy,
+                cas_budget,
+                Box::new(Monotonic),
+                Retention::Guard,
+            )?,
+        })
+    }
+
+    pub fn cas_budget(&self) -> CasBudget {
+        self.quota.cas_budget()
+    }
+}
+
+impl QuotaStore for LocalGuard {
+    fn policy(&self) -> Policy {
+        self.quota.policy()
+    }
+    fn geometry(&self) -> Geometry {
+        self.quota.geometry()
+    }
+    fn try_consume(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<Decision, Error> {
+        self.quota.try_consume(key, cost)
     }
 }
 

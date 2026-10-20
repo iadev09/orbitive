@@ -19,6 +19,7 @@ use portable_atomic::AtomicU128;
 use crate::budget::WorkBudget;
 use crate::clock::{Clock, Monotonic};
 use crate::gcra::{Gcra, Outcome, Prepared};
+use crate::retention::{Candidate, Observation, Retention, Selection, touch};
 use crate::{CasBudget, Decision, Error, Geometry, Key, Policy, QuotaStore};
 use layout::{
     Bank, FROZEN, GENERATION, Header, INITIALIZING, Layout, MAGIC, Owner,
@@ -108,6 +109,7 @@ pub struct ShmQuota {
 }
 
 struct Inner {
+    retention: Retention,
     region: ShmRegion,
     layout: Layout,
     resource: ShmResource,
@@ -160,6 +162,28 @@ impl Drop for Inner {
 }
 
 impl Inner {
+    fn last_seen(
+        &self,
+        index: usize,
+        bank: usize,
+    ) -> &AtomicU128 {
+        debug_assert!(self.retention == Retention::Guard);
+        debug_assert!(index < self.geometry.slots().get() && bank < 2);
+        // SAFETY: guard layout reserves two aligned words beyond the key
+        // buffers. The active bank is pinned or exclusively frozen by callers.
+        unsafe {
+            &*self
+                .region
+                .as_ptr()
+                .add(
+                    self.layout.slots
+                        + index * self.layout.slot_stride
+                        + self.layout.recency
+                        + bank * size_of::<AtomicU128>(),
+                )
+                .cast::<AtomicU128>()
+        }
+    }
     fn slot(
         &self,
         index: usize,
@@ -433,6 +457,13 @@ impl Inner {
         loop {
             let previous = tat.load(Ordering::Acquire);
             let now = self.sample(shard, budget)?;
+            if self.retention == Retention::Guard {
+                touch(
+                    self.last_seen(pin.index, (pin.generation & 1) as usize),
+                    now,
+                    &mut budget.cas,
+                )?;
+            }
             match prepared.evaluate(now, Some(previous))? {
                 Outcome::Limited { debt } => {
                     drop(pin);
@@ -529,9 +560,20 @@ struct Frozen<'a> {
 
 impl Frozen<'_> {
     fn publish(
+        self,
+        key: Key<'_>,
+        tat: u128,
+    ) -> Result<(), Error> {
+        // Strict callers have no recency storage. Guard callers supply their
+        // installation time through publish_seen before the commit.
+        self.publish_seen(key, tat, 0)
+    }
+
+    fn publish_seen(
         mut self,
         key: Key<'_>,
         tat: u128,
+        seen: u128,
     ) -> Result<(), Error> {
         let Some(next) =
             self.generation.checked_add(1).filter(|next| *next <= GENERATION)
@@ -569,6 +611,11 @@ impl Frozen<'_> {
         #[cfg(test)]
         fault(Fault::Metadata);
         bank.tat.store(tat, Ordering::Relaxed);
+        if self.inner.retention == Retention::Guard {
+            self.inner
+                .last_seen(self.index, bank_index)
+                .store(seen, Ordering::Relaxed);
+        }
         #[cfg(test)]
         fault(Fault::BeforePublish);
         // No fallible work remains. Arm cleanup before the infallible atomic
@@ -622,10 +669,35 @@ impl ShmQuota {
         clock: Box<dyn Clock>,
         domain: [u8; 32],
     ) -> Result<Self, Error> {
+        Self::with_retention(
+            resource,
+            geometry,
+            (policy, Retention::Strict),
+            cas_budget,
+            options,
+            clock,
+            domain,
+        )
+    }
+
+    fn with_retention(
+        resource: ShmResource,
+        geometry: Geometry,
+        settings: (Policy, Retention),
+        cas_budget: CasBudget,
+        options: ShmOptions,
+        clock: Box<dyn Clock>,
+        domain: [u8; 32],
+    ) -> Result<Self, Error> {
+        let (policy, retention) = settings;
         if !AtomicU128::is_lock_free() {
             return Err(Error::UnsupportedAtomics);
         }
-        let layout = Layout::new(geometry, options.owners.get())?;
+        let layout = if retention == Retention::Strict {
+            Layout::new(geometry, options.owners.get())?
+        } else {
+            Layout::with_retention(geometry, options.owners.get(), retention)?
+        };
         options
             .owners
             .get()
@@ -643,8 +715,13 @@ impl ShmQuota {
         let (region, initialization) =
             ShmRegion::open_or_create_locked(&name, layout.size)
                 .map_err(Error::Io)?;
-        let expected =
-            layout.spec(geometry, policy, options.owners.get(), domain);
+        let expected = layout.spec(
+            geometry,
+            policy,
+            options.owners.get(),
+            domain,
+            retention,
+        );
         // SAFETY: mmap covers the checked header and all aligned fixed rows.
         let header = region.as_ptr().cast::<Header>();
         // Borrow atomic fields separately; no shared Header reference spans
@@ -760,6 +837,7 @@ impl ShmQuota {
         drop(initialization);
         Ok(Self {
             inner: Arc::new(Inner {
+                retention,
                 region,
                 layout,
                 resource,
@@ -834,7 +912,7 @@ impl QuotaStore for ShmQuota {
         }
         let hold = inner.lock_shard(shard, &mut budget)?;
         let now = inner.sample(shard, &mut budget)?;
-        let mut candidate = None;
+        let mut selection = Selection::new(inner.retention);
         // Search the complete bounded range before using an earlier free slot.
         for probe in 0..inner.geometry.probes().get() {
             let index = shard * per_shard + (start + probe) % per_shard;
@@ -844,28 +922,125 @@ impl QuotaStore for ShmQuota {
                     drop(hold);
                     return inner.consume(shard, pin, &prepared, &mut budget);
                 }
-                if candidate.is_none()
-                    && (pin.generation == 0
-                        || pin.bank().tat.load(Ordering::Acquire) <= now)
-                {
-                    candidate = Some((index, pin.generation));
-                }
+                let tat = pin.bank().tat.load(Ordering::Acquire);
+                let seen = if inner.retention == Retention::Guard {
+                    inner
+                        .last_seen(index, (pin.generation & 1) as usize)
+                        .load(Ordering::Acquire)
+                } else {
+                    0
+                };
+                selection.consider(
+                    index,
+                    pin.generation,
+                    pin.generation == 0 || tat <= now,
+                    Observation { tat, seen },
+                );
             }
         }
-        let (index, generation) = candidate.ok_or(Error::CapacityFull)?;
-        let frozen = inner.freeze(index, generation, &mut budget)?;
+        self.install(shard, selection.finish()?, key, &prepared, &mut budget)
+    }
+}
+
+impl ShmQuota {
+    // Caller owns this shard's prepared kernel hold through publication.
+    fn install(
+        &self,
+        shard: usize,
+        candidate: Candidate,
+        key: Key<'_>,
+        prepared: &Prepared<'_>,
+        budget: &mut Budget,
+    ) -> Result<Decision, Error> {
+        let inner = &self.inner;
+        let Candidate { index, generation, observed } = candidate;
+        let frozen = inner.freeze(index, generation, budget)?;
         let previous = inner.slot(index).banks[(generation & 1) as usize]
             .tat
             .load(Ordering::Acquire);
-        let now = inner.sample(shard, &mut budget)?;
-        if generation != 0 && previous > now {
-            return Err(Error::Busy);
+        let now = inner.sample(shard, budget)?;
+        if generation != 0 {
+            match observed {
+                Some(observed) if inner.retention == Retention::Guard => {
+                    if previous != observed.tat
+                        || inner
+                            .last_seen(index, (generation & 1) as usize)
+                            .load(Ordering::Acquire)
+                            != observed.seen
+                    {
+                        return Err(Error::Busy);
+                    }
+                }
+                _ if previous > now => return Err(Error::Busy),
+                _ => {}
+            }
         }
         let Outcome::Allowed { tat } = prepared.evaluate(now, None)? else {
             return Err(Error::CorruptState);
         };
-        frozen.publish(key, tat)?;
+        if inner.retention == Retention::Guard {
+            frozen.publish_seen(key, tat, now)?;
+        } else {
+            frozen.publish(key, tat)?;
+        }
         Ok(Decision::Allowed)
+    }
+}
+
+/// Fleet-shared traffic protection with bounded cold-key replacement. Opens
+/// share one table; eviction can discard live debt and reset that key's future
+/// allowance. This is not strict quota. Recency and mode are persisted, and
+/// quota-mode opens of the same resource are refused rather than resetting it.
+#[derive(Clone)]
+pub struct FleetGuard {
+    quota: ShmQuota,
+}
+
+impl FleetGuard {
+    pub fn open(
+        resource: ShmResource,
+        geometry: Geometry,
+        policy: Policy,
+        cas_budget: CasBudget,
+        options: ShmOptions,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            quota: ShmQuota::with_retention(
+                resource,
+                geometry,
+                (policy, Retention::Guard),
+                cas_budget,
+                options,
+                Box::new(Monotonic),
+                domain::clock_domain()?,
+            )?,
+        })
+    }
+
+    pub fn resource(&self) -> ShmResource {
+        self.quota.resource()
+    }
+    pub fn cas_budget(&self) -> CasBudget {
+        self.quota.cas_budget()
+    }
+    pub fn options(&self) -> ShmOptions {
+        self.quota.options()
+    }
+}
+
+impl QuotaStore for FleetGuard {
+    fn policy(&self) -> Policy {
+        self.quota.policy()
+    }
+    fn geometry(&self) -> Geometry {
+        self.quota.geometry()
+    }
+    fn try_consume(
+        &self,
+        key: Key<'_>,
+        cost: NonZeroU64,
+    ) -> Result<Decision, Error> {
+        self.quota.try_consume(key, cost)
     }
 }
 

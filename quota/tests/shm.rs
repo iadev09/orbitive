@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use super::*;
 
+#[path = "guards_shm.rs"]
+mod guards;
+
 struct Fixture(ShmResource);
 
 impl Fixture {
@@ -555,6 +558,7 @@ fn wait_checkpoint(
 }
 
 fn fault_for_mode(mode: &str) -> Option<Fault> {
+    let mode = mode.strip_prefix("guard-").unwrap_or(mode);
     Some(match mode {
         "race" => return None,
         "init" => Fault::Initializing,
@@ -602,24 +606,33 @@ fn child_process() {
     let point = fault_for_mode(&mode);
     FAULT.with(|selected| selected.set(point));
     let clock = Arc::new(TestClock::default());
+    let retention = if mode.starts_with("guard-") {
+        Retention::Guard
+    } else {
+        Retention::Strict
+    };
+    let checkpoint = mode.strip_prefix("guard-").unwrap_or(&mode);
     if matches!(
-        mode.as_str(),
+        checkpoint,
         "frozen" | "key" | "metadata" | "inactive" | "publish" | "recovery"
     ) {
-        clock.0.store(200, Ordering::Relaxed);
+        clock.0.store(
+            if retention == Retention::Guard { 1 } else { 200 },
+            Ordering::Relaxed,
+        );
     }
     let resource = ShmResource::new(FleetName::new(fleet), 0);
-    let quota = ShmQuota::with_clock(
+    let quota = ShmQuota::with_retention(
         resource,
         geometry(1),
-        policy(2),
+        (policy(2), retention),
         attempts(64),
         options(3, 3),
         Box::new(clock),
         [7; 32],
     )
     .unwrap();
-    match mode.as_str() {
+    match checkpoint {
         "pin" => {
             let _pin =
                 quota.inner.pin(0, None, &mut budget()).unwrap().unwrap();

@@ -101,8 +101,11 @@ fn a_charge_after_candidate_selection_prevents_reclamation() {
     quota.try_consume(key(), count(1)).unwrap();
     clock.now.store(100, Ordering::Relaxed);
     let pin = held(&quota);
-    let candidate =
-        Candidate { index: 0, generation: pin.identity().generation };
+    let candidate = Candidate {
+        index: 0,
+        generation: pin.identity().generation,
+        observed: None,
+    };
     assert_eq!(pin.slot.tat.load(Ordering::Acquire), 100);
     drop(pin);
     let shard = &quota.inner.shards[0];

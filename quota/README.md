@@ -3,6 +3,54 @@
 Bounded, nonblocking GCRA rate admission. Callers supply opaque namespaced
 keys; HTTP, authentication, sessions and response handling stay outside quota.
 
+## Admission policies
+
+| Store | Scope | Capacity pressure |
+| --- | --- | --- |
+| `LocalGuard::new` | Process-local; clones share one store | May replace the coldest key in the bounded probe window, even with live debt |
+| `FleetGuard::open` | One same-host SHM resource | Same bounded cold-key replacement, shared across openers |
+| `FleetQuota::open` | One same-host SHM resource | Preserves live debt; refuses new keys without a replenished slot |
+
+All three implement `QuotaStore`. `Policy` still describes rate, period and
+burst, not HTTP behavior. `MemoryQuota` remains strict process-local admission;
+`FleetQuota` is the policy-facing name for the existing strict `ShmQuota` type.
+The guards are separate types, not a mutable switch on an existing store.
+
+Guard replacement first prefers empty or fully replenished slots. Only if no
+such candidate exists in the configured probe window may it select the oldest
+sampled last-access time. Allowed and Limited attempts both refresh recency
+before returning their decision. Ties use probe order. This is bounded local
+selection, not global LRU, a minimum idle duration or a promise that a hot key
+cannot be evicted. With one candidate, even a recently used key can be replaced.
+No background sweep, per-key timer or implicit expiry duration is used.
+
+Eviction forgets that key's remaining debt: returning keys can receive fresh
+allowance. Guards are traffic protection, not a strict per-key quota across
+evictions. Choose `FleetQuota` when that history must remain charge-bearing.
+Guard key choice and capacity are part of the protection boundary; high-cardinality
+traffic can force resets. No mode promises DDoS immunity.
+
+Every mode keeps the same bounded probes and explicit CAS budget. Guard touch
+CAS attempts share that budget. A candidate touched or charged after selection
+is refused with `Busy` after exclusive revalidation; pins and generations still
+protect identity. Structural holds use only nonblocking acquisition. There is
+no waiting for a key, lock or capacity and no fallback to another mode.
+
+SHM guard recency is stored per bank and published atomically with identity and
+the first charge. Matching opens share recency, including across reopen. Guard
+and strict mappings have different format identities and cannot share one
+resource. Existing strict SHM ABI/geometry remains unchanged; do not resize or
+repurpose a live resource to change policy.
+
+The 83-test quota suite passes on macOS and Linux, including guard replacement,
+recency races, mode mismatch, zero allocations and process-crash recovery.
+The macOS workspace/all-features tests and workspace/all-features/all-targets
+Clippy with warnings denied pass. Guard and quota measurements are recorded
+separately in the [benchmark guide](benches/README.md); historical strict-only
+results do not measure guard recency or live-debt replacement.
+
+## Strict quota example
+
 `MemoryQuota::new` creates an independent process-local store. `clone()` shares
 its table and budget. Different stores never share debt, even for identical
 keys. Within a store, identical keys share a budget and different keys have
@@ -60,7 +108,8 @@ match shared.try_consume(key, NonZeroU64::new(1).unwrap())? {
   permission to proceed. A poisoned memory shard remains unavailable.
 - Hashes are keyed per store; full namespace and subject bytes decide identity.
   Pins prevent generation/key replacement while readers consume. Live debt is
-  never evicted. A writer rechecks TAT after exclusive reservation before reuse.
+  never evicted by strict stores. Guards use the explicit replacement policy
+  above. A writer rechecks state after exclusive reservation before reuse.
   Generations never wrap; exhausted slots retire. Partial memory writes stay
   poisoned; unpublished SHM banks never replace the committed bank.
 - Integer GCRA preserves fractional refill intervals; retry delays round up
@@ -132,8 +181,8 @@ No power-loss durability or same-uid hostile-writer isolation
 is provided. Clearing/unlinking requires all users to have stopped.
 
 On FreeBSD ARM64, the quota suite passes, including native clock-domain,
-cross-process debt sharing and SIGKILL recovery tests. SHM performance has not
-been measured.
+cross-process debt sharing and SIGKILL recovery tests. Initial memory and
+multi-process SHM measurements are recorded in [the benchmark guide](benches/README.md).
 
 Bounded memory and bounded probes do not promise fairness, availability for
 new keys under adversarial churn, or protection against volumetric DDoS.
@@ -150,8 +199,9 @@ overhead; successful and busy attempts are distinct outcomes, not equivalent
 admitted throughput. The recorded baseline is a local measurement, not a
 portable latency or throughput guarantee.
 
-Acceptance targets are bounded key/probe work, no admission-time allocation,
-no debt eviction and no over-admission under contention. Deterministic tests
+Acceptance targets are bounded key/probe work and no admission-time allocation.
+Strict stores additionally require no live-debt eviction or over-admission
+under contention; guard envelopes apply while a key remains retained. Deterministic tests
 cover an independent integer token-bucket model, retry boundaries, weighted
 costs, clock failures, poisoning, capacity pressure, allocation counts and
 repeated reclamation.

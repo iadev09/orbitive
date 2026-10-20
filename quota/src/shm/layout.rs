@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicU64;
 
 use portable_atomic::AtomicU128;
 
+use crate::retention::Retention;
 use crate::{Error, Geometry, Policy};
 
 pub(super) const INITIALIZING: u64 = 1;
@@ -50,6 +51,7 @@ pub(super) struct Layout {
     pub pins: usize,
     pub slots: usize,
     pub slot_stride: usize,
+    pub recency: usize,
     pub size: usize,
 }
 
@@ -79,6 +81,14 @@ impl Layout {
         geometry: Geometry,
         owners: usize,
     ) -> Result<Self, Error> {
+        Self::with_retention(geometry, owners, Retention::Strict)
+    }
+
+    pub fn with_retention(
+        geometry: Geometry,
+        owners: usize,
+        retention: Retention,
+    ) -> Result<Self, Error> {
         let shards = size_of::<Header>();
         let owner_offset =
             add(shards, mul(geometry.shards().get(), size_of::<Shard>())?)?;
@@ -93,10 +103,17 @@ impl Layout {
             )?,
             align_of::<Slot>(),
         )?;
-        let slot_stride = align(
-            add(size_of::<Slot>(), mul(2, geometry.key_bytes().get())?)?,
-            align_of::<Slot>(),
-        )?;
+        let keys_end =
+            add(size_of::<Slot>(), mul(2, geometry.key_bytes().get())?)?;
+        let recency = align(keys_end, align_of::<AtomicU128>())?;
+        // Strict mappings keep ABI v1's exact shape. Guard mappings append
+        // one recency word per bank, committed by the same descriptor.
+        let end = if retention == Retention::Guard {
+            add(recency, mul(2, size_of::<AtomicU128>())?)?
+        } else {
+            keys_end
+        };
+        let slot_stride = align(end, align_of::<Slot>())?;
         let size = add(slots, mul(geometry.slots().get(), slot_stride)?)?;
         if size > isize::MAX as usize || size > i64::MAX as usize {
             return Err(Error::InvalidGeometry);
@@ -107,6 +124,7 @@ impl Layout {
             pins,
             slots,
             slot_stride,
+            recency,
             size,
         })
     }
@@ -117,11 +135,14 @@ impl Layout {
         policy: Policy,
         owners: usize,
         domain: [u8; 32],
+        retention: Retention,
     ) -> [u8; 160] {
         let mut out = [0; 160];
         out[..8].copy_from_slice(b"ORBQUOTA");
         for (index, value) in [
-            1,
+            // Format 1 is strict quota; format 2 adds guard retention and
+            // banked recency. Even equal-sized shapes must never mix modes.
+            if retention == Retention::Strict { 1 } else { 2 },
             geometry.slots().get() as u64,
             geometry.shards().get() as u64,
             geometry.key_bytes().get() as u64,

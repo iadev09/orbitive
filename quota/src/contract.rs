@@ -4,6 +4,7 @@ use std::time::Duration;
 
 /// Total admission CAS attempts per call, including successful attempts.
 /// Pin, clock watermark, writer reservation and TAT updates share this budget.
+/// Guard recency updates spend the same budget, before any charge commits.
 /// Cleanup operations always run and do not consume admission attempts.
 /// This bounds atomic API calls, not CPU instruction retries or scheduling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +149,9 @@ pub enum Decision {
 /// this store; time comes from its trusted clock, not request data. Implementors
 /// must atomically bind key identity, policy, time state and full consumption.
 /// Neither a multi-policy transaction nor idempotent retries are promised.
+/// LocalGuard/FleetGuard may discard a cold key's debt under capacity pressure;
+/// their rate envelope lasts only while that identity is retained. FleetQuota
+/// (also named ShmQuota) and MemoryQuota never evict live debt.
 pub trait QuotaStore: Send + Sync {
     fn policy(&self) -> Policy;
     fn geometry(&self) -> Geometry;
