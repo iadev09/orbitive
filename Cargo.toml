@@ -82,6 +82,7 @@ members = [
     "cli",
     "counter",
     "cell",
+    "quota",
     "events",
     "invoke",
     "link",
@@ -144,6 +145,7 @@ async-trait = "0.1"
 criterion = "0.8.2"
 dashmap = "6.1"
 libc = "0.2"
+portable-atomic = { version = "1.15", default-features = false, features = ["fallback", "require-cas"] }
 lru = "0.18"
 netid64 = "0.1.1"
 nix = { version = "0.31", features = ["process", "signal", "user", "fs"] }

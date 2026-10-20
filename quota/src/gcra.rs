@@ -1,0 +1,102 @@
+use std::num::NonZeroU64;
+use std::time::Duration;
+
+use crate::{Error, Policy};
+
+/// Time is measured in nanoseconds multiplied by the sustained unit count.
+/// A unit therefore costs exactly period_ns, without rounding the interval.
+pub(crate) struct Gcra {
+    policy: Policy,
+    period: u128,
+    units: u128,
+    capacity: u128,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum Outcome {
+    Allowed { tat: u128 },
+    Limited { debt: u128 },
+}
+
+/// Validated request cost bound to its immutable policy. Preparation does not
+/// read a clock or access storage and can precede the shard hold.
+pub(crate) struct Prepared<'a> {
+    algorithm: &'a Gcra,
+    charge: u128,
+}
+
+impl Gcra {
+    pub(crate) fn new(policy: Policy) -> Result<Self, Error> {
+        let period = policy.period().as_nanos();
+        let capacity = period
+            .checked_mul(u128::from(policy.burst().get()))
+            .ok_or(Error::ArithmeticOverflow)?;
+        Ok(Self {
+            policy,
+            period,
+            units: u128::from(policy.units().get()),
+            capacity,
+        })
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        cost: NonZeroU64,
+    ) -> Result<Prepared<'_>, Error> {
+        if cost > self.policy.burst() {
+            return Err(Error::CostExceedsBurst);
+        }
+        let charge = self
+            .period
+            .checked_mul(u128::from(cost.get()))
+            .ok_or(Error::ArithmeticOverflow)?;
+        Ok(Prepared { algorithm: self, charge })
+    }
+
+    pub(crate) fn scale(
+        &self,
+        now: u128,
+    ) -> Result<u128, Error> {
+        now.checked_mul(self.units).ok_or(Error::ArithmeticOverflow)
+    }
+
+    /// Resolve a denied snapshot after releasing storage exclusion. This does
+    /// not re-read or change the record; another request may extend its debt.
+    pub(crate) fn retry_after(
+        &self,
+        debt: u128,
+    ) -> Result<Duration, Error> {
+        let nanos = debt.div_ceil(self.units);
+        let seconds = u64::try_from(nanos / 1_000_000_000)
+            .map_err(|_| Error::ArithmeticOverflow)?;
+        let subsecond = (nanos % 1_000_000_000) as u32;
+        Ok(Duration::new(seconds, subsecond))
+    }
+}
+
+impl Prepared<'_> {
+    /// Pure calculation under backend exclusion: no cost preparation or retry
+    /// division. The backend commits TAT only on Allowed.
+    pub(crate) fn evaluate(
+        &self,
+        now: u128,
+        previous: Option<u128>,
+    ) -> Result<Outcome, Error> {
+        let tat = previous
+            .unwrap_or(now)
+            .max(now)
+            .checked_add(self.charge)
+            .ok_or(Error::ArithmeticOverflow)?;
+        let ceiling = now
+            .checked_add(self.algorithm.capacity)
+            .ok_or(Error::ArithmeticOverflow)?;
+        if tat <= ceiling {
+            return Ok(Outcome::Allowed { tat });
+        }
+        Ok(Outcome::Limited { debt: tat - ceiling })
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/gcra.rs"]
+mod tests;

@@ -172,6 +172,7 @@ your application uses; each linked guide describes its API and limits.
 | Typed rings, cursors, SHM mappings and read-only observers | None | [Core](core/README.md) |
 | Topic and byte-payload events | `events` | [Events](events/README.md) |
 | Keyed shared counters | `counter` | [Counters](counter/README.md) |
+| Bounded GCRA quota admission (memory; SHM not yet implemented) | No facade feature yet | [Quota](quota/README.md) |
 | Typed atomic cells | `cell` | [Cells](cell/README.md) |
 | Per-process caches with shared invalidation | `cache` | [Cache](cache/README.md) |
 | Shared byte storage with pinned reads | `arena` | [Arena](arena/README.md) |

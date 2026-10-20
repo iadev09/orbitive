@@ -1,0 +1,28 @@
+[package]
+name = "orbit-quota"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+exclude.workspace = true
+autotests = false
+description = "Bounded GCRA quota admission with a nonblocking memory backend."
+keywords = ["quota", "rate-limit", "shared-memory", "concurrency"]
+categories = ["concurrency", "data-structures"]
+
+[dependencies]
+# Checked at construction: this backend refuses lock-based atomic emulation.
+portable-atomic.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Host-monotonic time; admission never accepts caller-provided timestamps.
+libc.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "admission"
+harness = false
