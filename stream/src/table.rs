@@ -61,6 +61,8 @@ pub(crate) struct Table {
     /// cannot be reused by another fleet while this table lives.
     _fleet: Arc<Fleet>,
     backing: Backing,
+    #[cfg(unix)]
+    group: Option<orbit_core::shm::GroupAccess>,
     geometry: Geometry,
     /// The segment's kind, from the spec this table was opened with.
     kind: u8,
@@ -569,7 +571,11 @@ impl Table {
                 self.reset_all();
                 Ok(())
             }
-            Backing::Shm(region) => region.unlink().map_err(Error::Io),
+            Backing::Shm(region) => match &self.group {
+                Some(access) => access.unlink_region(region),
+                None => region.unlink(),
+            }
+            .map_err(Error::Io),
         }
     }
 }
@@ -650,6 +656,8 @@ enum Key {
     Memory(usize, u8),
     #[cfg(unix)]
     Shm(String, u16),
+    #[cfg(unix)]
+    Group(String, u16, orbit_core::shm::GroupAccess),
 }
 
 static TABLES: LazyLock<Mutex<HashMap<Key, Weak<Table>>>> =
@@ -694,7 +702,7 @@ pub(crate) fn recover_shm(
                     Error::Io(std::io::Error::other(error.to_string()))
                 })?,
             );
-            open_inner(&fleet, Incarnation::new(0), spec, true)?
+            open_inner(&fleet, Incarnation::new(0), spec, true, None)?
         }
     };
     table.node_dead(node, incarnation);
@@ -709,7 +717,30 @@ pub(crate) fn open(
     incarnation: Incarnation,
     spec: StreamSpec,
 ) -> Result<Arc<Table>> {
-    open_inner(fleet, incarnation, spec, false)
+    open_inner(fleet, incarnation, spec, false, None)
+}
+
+#[cfg(unix)]
+pub(crate) fn open_group(
+    name: &str,
+    capacity: u16,
+    node: orbit_core::NodeId,
+    incarnation: Incarnation,
+    spec: StreamSpec,
+    access: orbit_core::shm::GroupAccess,
+    recovery: bool,
+) -> Result<Arc<Table>> {
+    let fleet = Arc::new(
+        Fleet::join_as(name, capacity, node)
+            .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?,
+    );
+    access.prepare()?;
+    crate::bell::Bell::validate_group_address(
+        &access,
+        &access.segment_name(name, spec.kind),
+        usize::from(capacity - 1),
+    )?;
+    open_inner(&fleet, incarnation, spec, recovery, Some(access))
 }
 
 fn open_inner(
@@ -717,6 +748,8 @@ fn open_inner(
     incarnation: Incarnation,
     spec: StreamSpec,
     recovery: bool,
+    #[cfg(unix)] group: Option<orbit_core::shm::GroupAccess>,
+    #[cfg(not(unix))] _group: Option<()>,
 ) -> Result<Arc<Table>> {
     if !crate::waits_supported() {
         return Err(Error::Io(std::io::Error::new(
@@ -737,6 +770,15 @@ fn open_inner(
     } else {
         Key::Memory(Arc::as_ptr(fleet) as usize, spec.kind)
     };
+    #[cfg(unix)]
+    let key = match &group {
+        Some(access) => Key::Group(
+            access.segment_name(fleet.name(), spec.kind),
+            fleet.node_id().get(),
+            access.clone(),
+        ),
+        None => key,
+    };
     let mut tables = lock_unpoisoned(&TABLES);
     tables.retain(|_, table| table.strong_count() > 0);
     if let Some(table) = tables.get(&key).and_then(Weak::upgrade) {
@@ -748,7 +790,8 @@ fn open_inner(
         }
         // One kind, one geometry: a second spec for the same segment is a
         // mismatch here rather than a silently shared table.
-        if table.geometry.lane_capacity != spec.lane_capacity
+        if table.geometry.fleet_capacity != usize::from(fleet.fleet_capacity())
+            || table.geometry.lane_capacity != spec.lane_capacity
             || table.geometry.buffer_bytes != spec.buffer_bytes
         {
             return Err(Error::Malformed(format!(
@@ -778,13 +821,25 @@ fn open_inner(
             Backing::Memory(bytes)
         }
         #[cfg(unix)]
-        Key::Shm(name, _) => {
-            Backing::Shm(open_shm(name, fleet.fleet_capacity(), &geometry)?)
-        }
+        Key::Shm(name, _) => Backing::Shm(open_shm(
+            name,
+            fleet.fleet_capacity(),
+            &geometry,
+            None,
+        )?),
+        #[cfg(unix)]
+        Key::Group(name, _, access) => Backing::Shm(open_shm(
+            name,
+            fleet.fleet_capacity(),
+            &geometry,
+            Some(access),
+        )?),
     };
     let table = Arc::new(Table {
         _fleet: Arc::clone(fleet),
         backing,
+        #[cfg(unix)]
+        group,
         geometry,
         kind: spec.kind,
         node: fleet.node_id().get(),
@@ -797,6 +852,10 @@ fn open_inner(
             Key::Shm(name, _) => {
                 Some(crate::bell::Bell::new(name).map_err(Error::Io)?)
             }
+            Key::Group(name, _, access) => Some(
+                crate::bell::Bell::with_group(name, access.clone())
+                    .map_err(Error::Io)?,
+            ),
             Key::Memory(..) => None,
         },
         readiness: std::sync::OnceLock::new(),
@@ -812,11 +871,14 @@ fn open_shm(
     name: &str,
     fleet_capacity: u16,
     geometry: &Geometry,
+    group: Option<&orbit_core::shm::GroupAccess>,
 ) -> Result<ShmRegion> {
     use std::io;
 
-    let (region, _initialization_lock) =
-        ShmRegion::open_or_create_locked(name, geometry.segment_size)?;
+    let (region, _initialization_lock) = match group {
+        Some(access) => access.open_region(name, geometry.segment_size)?,
+        None => ShmRegion::open_or_create_locked(name, geometry.segment_size)?,
+    };
     if region.created() {
         // The kernel hands out zero pages; only the header is written, so
         // the buffers stay untouched and unbacked until a stream uses them.

@@ -441,6 +441,81 @@ pub struct Streams {
 }
 
 impl Streams {
+    /// Open only a dedicated group-shared stream table. The supplied identity
+    /// does not change any Fleet policy or publish other shared resources.
+    #[cfg(unix)]
+    pub fn with_group(
+        name: &str,
+        capacity: u16,
+        node: NodeId,
+        incarnation: Incarnation,
+        spec: StreamSpec,
+        access: orbit_core::shm::GroupAccess,
+    ) -> Result<Self> {
+        spec.validate()?;
+        Ok(Self {
+            table: table::open_group(
+                name,
+                capacity,
+                node,
+                incarnation,
+                spec,
+                access,
+                false,
+            )?,
+        })
+    }
+
+    /// Initialize/validate transport before its inbox becomes joinable.
+    #[cfg(unix)]
+    pub fn prepare_group(
+        name: &str,
+        capacity: u16,
+        spec: StreamSpec,
+        access: orbit_core::shm::GroupAccess,
+    ) -> Result<()> {
+        spec.validate()?;
+        table::open_group(
+            name,
+            capacity,
+            NodeId::ZERO,
+            Incarnation::new(0),
+            spec,
+            access,
+            true,
+        )?;
+        Ok(())
+    }
+
+    /// Recover an exact incarnation under its caller-held Link lane lock.
+    #[cfg(unix)]
+    pub fn node_dead_in_group(
+        name: &str,
+        capacity: u16,
+        spec: StreamSpec,
+        node: NodeId,
+        incarnation: Incarnation,
+        access: orbit_core::shm::GroupAccess,
+    ) -> Result<()> {
+        spec.validate()?;
+        if node.get() >= capacity {
+            return Err(Error::Malformed(
+                "recovery node is outside the fleet".into(),
+            ));
+        }
+        let table = table::open_group(
+            name,
+            capacity,
+            NodeId::ZERO,
+            Incarnation::new(0),
+            spec,
+            access,
+            true,
+        )?;
+        table.node_dead(node.get(), incarnation.get());
+        Ok(())
+    }
+
     /// Report one confirmed death to an existing shared table without
     /// claiming an endpoint, superseding a node, or installing a driver.
     /// Returns false when the table does not exist; never creates it then.

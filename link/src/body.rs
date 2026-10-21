@@ -60,6 +60,34 @@ impl LinkBodies {
         Self::open(Arc::new(fleet), incarnation, spec)
     }
 
+    /// Body transport for a dedicated cross-user Link. No shared event rings
+    /// or fleet membership resources are opened by this constructor.
+    #[cfg(unix)]
+    pub fn for_group(
+        name: &str,
+        lane_index: usize,
+        incarnation: u64,
+        spec: LinkSpec,
+        access: orbit_core::shm::GroupAccess,
+    ) -> Result<Self> {
+        spec.validate()?;
+        if lane_index >= usize::from(spec.fleet_capacity) {
+            return Err(super::Error::Malformed(
+                "link lane is outside the fleet capacity",
+            ));
+        }
+        Ok(Self {
+            streams: Streams::with_group(
+                name,
+                spec.fleet_capacity,
+                NodeId::new(lane_index as u16),
+                Incarnation::new(incarnation),
+                spec.streams,
+                access,
+            )?,
+        })
+    }
+
     /// Create side A and the ticket an inbox frame carries to side B.
     pub fn create(&self) -> Result<(Endpoint, Ticket)> {
         Ok(self.streams.create()?)

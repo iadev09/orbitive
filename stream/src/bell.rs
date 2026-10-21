@@ -49,6 +49,7 @@ pub(crate) const ARMED: u32 = 1 << 31;
 pub(crate) struct Bell {
     prefix: String,
     sender: UnixDatagram,
+    group: Option<orbit_core::shm::GroupAccess>,
 }
 
 impl Bell {
@@ -58,7 +59,40 @@ impl Bell {
         // SAFETY: a plain syscall with no arguments.
         let uid = unsafe { libc::getuid() };
         let segment = segment.trim_start_matches('/');
-        Ok(Self { prefix: format!("orbit-bell-{uid}/{segment}"), sender })
+        Ok(Self {
+            prefix: format!("orbit-bell-{uid}/{segment}"),
+            sender,
+            group: None,
+        })
+    }
+
+    pub(crate) fn with_group(
+        segment: &str,
+        access: orbit_core::shm::GroupAccess,
+    ) -> io::Result<Self> {
+        let sender = UnixDatagram::unbound()?;
+        sender.set_nonblocking(true)?;
+        Ok(Self { prefix: segment.to_owned(), sender, group: Some(access) })
+    }
+
+    pub(crate) fn validate_group_address(
+        access: &orbit_core::shm::GroupAccess,
+        segment: &str,
+        last_node: usize,
+    ) -> io::Result<()> {
+        SocketAddr::from_pathname(
+            access.bell_path(segment, &last_node.to_string()),
+        )
+        .map(|_| ())
+    }
+
+    fn group_path(
+        &self,
+        node: usize,
+    ) -> Option<std::path::PathBuf> {
+        self.group
+            .as_ref()
+            .map(|access| access.bell_path(&self.prefix, &node.to_string()))
     }
 
     #[cfg(target_os = "linux")]
@@ -66,6 +100,9 @@ impl Bell {
         &self,
         node: usize,
     ) -> io::Result<SocketAddr> {
+        if let Some(path) = self.group_path(node) {
+            return SocketAddr::from_pathname(path);
+        }
         use std::os::linux::net::SocketAddrExt;
         SocketAddr::from_abstract_name(format!("{}.{node}", self.prefix))
     }
@@ -83,6 +120,9 @@ impl Bell {
         &self,
         node: usize,
     ) -> io::Result<SocketAddr> {
+        if let Some(path) = self.group_path(node) {
+            return SocketAddr::from_pathname(path);
+        }
         SocketAddr::from_pathname(self.path(node))
     }
 
@@ -105,6 +145,9 @@ impl Bell {
         &self,
         node: usize,
     ) -> io::Result<UnixDatagram> {
+        if let Some(access) = &self.group {
+            return access.bind_bell(&self.group_path(node).unwrap());
+        }
         #[cfg(not(target_os = "linux"))]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -131,6 +174,10 @@ impl Bell {
         &self,
         node: usize,
     ) {
+        if let Some(path) = self.group_path(node) {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
         #[cfg(not(target_os = "linux"))]
         let _ = std::fs::remove_file(self.path(node));
         #[cfg(target_os = "linux")]

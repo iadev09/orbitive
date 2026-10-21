@@ -19,6 +19,7 @@ pub struct LinkSegment {
     name: String,
     fleet_name: String,
     spec: LinkSpec,
+    group: Option<orbit_core::shm::GroupAccess>,
     #[cfg(feature = "tokio")]
     receivers: Mutex<HashSet<usize>>,
 }
@@ -44,12 +45,55 @@ impl LinkSegment {
         name: &str,
         spec: LinkSpec,
     ) -> Result<Self> {
+        Self::open_inner(name, spec, None)
+    }
+
+    /// Open a dedicated group-shared Link, without sharing any fleet rings.
+    /// The configured owner creates resources; other users attach existing ones.
+    pub fn open_group(
+        name: &str,
+        spec: LinkSpec,
+        access: orbit_core::shm::GroupAccess,
+    ) -> Result<Self> {
+        Self::open_inner(name, spec, Some(access))
+    }
+
+    fn open_inner(
+        name: &str,
+        spec: LinkSpec,
+        group: Option<orbit_core::shm::GroupAccess>,
+    ) -> Result<Self> {
         spec.validate()?;
-        check_name(name, spec)?;
-        let segment_name = ring_segment_name(name, spec.inbox_kind);
+        let segment_name = if let Some(access) = &group {
+            validate_name(name)?;
+            let segment = access.segment_name(name, spec.inbox_kind);
+            crate::bell::Bell::validate_group_address(
+                access,
+                &segment,
+                usize::from(spec.fleet_capacity - 1),
+            )
+            .map_err(Error::Io)?;
+            access
+                .prepare_locks(&segment, usize::from(spec.fleet_capacity))
+                .map_err(Error::Io)?;
+            // Provision streams before publishing a joinable inbox. Recovery
+            // and body handles must use this exact access scope as well.
+            orbit_stream::Streams::prepare_group(
+                name,
+                spec.fleet_capacity,
+                spec.streams,
+                access.clone(),
+            )?;
+            segment
+        } else {
+            check_name(name, spec)?;
+            ring_segment_name(name, spec.inbox_kind)
+        };
         let bytes = spec.inbox_segment_bytes();
-        let (region, lock) =
-            ShmRegion::open_or_create_locked(&segment_name, bytes)?;
+        let (region, lock) = match &group {
+            Some(access) => access.open_region(&segment_name, bytes)?,
+            None => ShmRegion::open_or_create_locked(&segment_name, bytes)?,
+        };
         let mut inbox = if region.created() {
             unsafe {
                 Inbox::initialize(
@@ -67,7 +111,7 @@ impl LinkSegment {
                 )?
             }
         };
-        inbox.install_bell(&segment_name)?;
+        inbox.install_bell_with_group(&segment_name, group.clone())?;
         drop(lock);
         Ok(Self {
             region,
@@ -75,6 +119,7 @@ impl LinkSegment {
             name: segment_name,
             fleet_name: name.to_owned(),
             spec,
+            group,
             #[cfg(feature = "tokio")]
             receivers: Mutex::new(HashSet::new()),
         })
@@ -116,6 +161,17 @@ impl LinkSegment {
         lane: usize,
         incarnation: u64,
     ) -> Result<()> {
+        if let Some(access) = &self.group {
+            return orbit_stream::Streams::node_dead_in_group(
+                &self.fleet_name,
+                self.spec.fleet_capacity,
+                self.spec.streams,
+                orbit_core::NodeId::new(lane as u16),
+                orbit_stream::Incarnation::new(incarnation),
+                access.clone(),
+            )
+            .map_err(Error::Stream);
+        }
         orbit_stream::Streams::node_dead_in_shm(
             &self.fleet_name,
             self.spec.fleet_capacity,
@@ -198,7 +254,11 @@ impl LinkSegment {
         &self,
         lane: usize,
     ) -> Result<Option<LaneHold>> {
-        try_hold_lane(&self.name, lane).map_err(Error::Io)
+        match &self.group {
+            Some(access) => access.try_hold_lane(&self.name, lane),
+            None => try_hold_lane(&self.name, lane),
+        }
+        .map_err(Error::Io)
     }
 
     pub fn inbox(&self) -> &Inbox {
@@ -252,8 +312,11 @@ impl LinkSegment {
         role: &str,
     ) -> Result<crate::DirectoryWatcher> {
         for slot in 0..self.inbox.lanes() {
-            let Some(hold) =
-                try_hold_watcher(&self.name, slot).map_err(Error::Io)?
+            let Some(hold) = match &self.group {
+                Some(access) => access.try_hold_watcher(&self.name, slot),
+                None => try_hold_watcher(&self.name, slot),
+            }
+            .map_err(Error::Io)?
             else {
                 continue;
             };
@@ -281,6 +344,29 @@ impl LinkSegment {
         self.spec
     }
 
+    /// Open body streams in this Link's exact IPC scope, not its caller's UID.
+    pub fn bodies(
+        &self,
+        lane: usize,
+        incarnation: u64,
+    ) -> Result<super::LinkBodies> {
+        match &self.group {
+            Some(access) => super::LinkBodies::for_group(
+                &self.fleet_name,
+                lane,
+                incarnation,
+                self.spec,
+                access.clone(),
+            ),
+            None => super::LinkBodies::for_name(
+                &self.fleet_name,
+                lane,
+                incarnation,
+                self.spec,
+            ),
+        }
+    }
+
     pub fn created(&self) -> bool {
         self.region.created()
     }
@@ -291,6 +377,9 @@ impl LinkSegment {
 
     /// Remove the inbox name. Existing mappings remain valid.
     pub fn unlink(&self) -> Result<()> {
+        if let Some(access) = &self.group {
+            return access.unlink_region(&self.region).map_err(Error::Io);
+        }
         self.region.unlink().map_err(Error::Io)
     }
 }
@@ -318,20 +407,10 @@ pub fn check_name(
     name: &str,
     spec: LinkSpec,
 ) -> Result<()> {
+    validate_name(name)?;
     let invalid = |reason: String| {
         Err(Error::InvalidName { name: name.to_owned(), reason })
     };
-    if name.is_empty() {
-        return invalid("it is empty".into());
-    }
-    if let Some(bad) = name.chars().find(|character| {
-        !(character.is_ascii_alphanumeric()
-            || matches!(character, '-' | '_' | '.'))
-    }) {
-        return invalid(format!(
-            "'{bad}' is not a letter, a digit, '-', '_' or '.'"
-        ));
-    }
     let inbox_segment = ring_segment_name(name, spec.inbox_kind);
     let longest = inbox_segment
         .len()
@@ -350,5 +429,23 @@ pub fn check_name(
         name: name.to_owned(),
         reason: format!("its reactor socket address is invalid: {error}"),
     })?;
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    let invalid = |reason: String| {
+        Err(Error::InvalidName { name: name.to_owned(), reason })
+    };
+    if name.is_empty() {
+        return invalid("it is empty".into());
+    }
+    if let Some(bad) = name.chars().find(|character| {
+        !(character.is_ascii_alphanumeric()
+            || matches!(character, '-' | '_' | '.'))
+    }) {
+        return invalid(format!(
+            "'{bad}' is not a letter, a digit, '-', '_' or '.'"
+        ));
+    }
     Ok(())
 }

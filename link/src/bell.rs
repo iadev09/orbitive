@@ -27,13 +27,46 @@ impl Doorbell {
 pub(crate) struct Bell {
     prefix: String,
     sender: UnixDatagram,
+    group: Option<orbit_core::shm::GroupAccess>,
 }
 
 impl Bell {
+    #[cfg(test)]
     pub(crate) fn new(segment: &str) -> io::Result<Self> {
+        Self::with_group(segment, None)
+    }
+    pub(crate) fn with_group(
+        segment: &str,
+        group: Option<orbit_core::shm::GroupAccess>,
+    ) -> io::Result<Self> {
         let sender = UnixDatagram::unbound()?;
         sender.set_nonblocking(true)?;
-        Ok(Self { prefix: Self::prefix(segment), sender })
+        let prefix = if group.is_some() {
+            segment.to_owned()
+        } else {
+            Self::prefix(segment)
+        };
+        Ok(Self { prefix, sender, group })
+    }
+
+    pub(crate) fn validate_group_address(
+        access: &orbit_core::shm::GroupAccess,
+        segment: &str,
+        last_slot: usize,
+    ) -> io::Result<()> {
+        SocketAddr::from_pathname(
+            access.bell_path(segment, &Doorbell::Watcher(last_slot).suffix()),
+        )
+        .map(|_| ())
+    }
+
+    fn group_path(
+        &self,
+        door: Doorbell,
+    ) -> Option<std::path::PathBuf> {
+        self.group
+            .as_ref()
+            .map(|access| access.bell_path(&self.prefix, &door.suffix()))
     }
 
     fn prefix(segment: &str) -> String {
@@ -58,6 +91,9 @@ impl Bell {
         &self,
         door: Doorbell,
     ) -> io::Result<SocketAddr> {
+        if let Some(path) = self.group_path(door) {
+            return SocketAddr::from_pathname(path);
+        }
         Self::address_for(&self.prefix, door)
     }
 
@@ -91,6 +127,9 @@ impl Bell {
         &self,
         door: Doorbell,
     ) -> io::Result<SocketAddr> {
+        if let Some(path) = self.group_path(door) {
+            return SocketAddr::from_pathname(path);
+        }
         Self::address_for(&self.prefix, door)
     }
 
@@ -115,6 +154,9 @@ impl Bell {
         &self,
         door: Doorbell,
     ) -> io::Result<UnixDatagram> {
+        if let Some(access) = &self.group {
+            return access.bind_bell(&self.group_path(door).unwrap());
+        }
         #[cfg(not(target_os = "linux"))]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -145,6 +187,10 @@ impl Bell {
         &self,
         door: Doorbell,
     ) {
+        if let Some(path) = self.group_path(door) {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
         #[cfg(not(target_os = "linux"))]
         let _ = std::fs::remove_file(self.path(door));
         #[cfg(target_os = "linux")]

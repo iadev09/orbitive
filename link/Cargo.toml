@@ -27,7 +27,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

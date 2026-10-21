@@ -1077,11 +1077,14 @@ impl Inbox {
     }
 
     #[cfg(unix)]
-    pub(crate) fn install_bell(
+    pub(crate) fn install_bell_with_group(
         &mut self,
         segment: &str,
+        group: Option<orbit_core::shm::GroupAccess>,
     ) -> Result<()> {
-        self.bell = Some(crate::bell::Bell::new(segment).map_err(Error::Io)?);
+        self.bell = Some(
+            crate::bell::Bell::with_group(segment, group).map_err(Error::Io)?,
+        );
         Ok(())
     }
 

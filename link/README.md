@@ -55,6 +55,69 @@ only move forward, so this ordering may conservatively overstate a concurrent
 producer but cannot pair an old reservation with a newer read and underflow
 into a false `Full`. Admission and write reservation use the same ordering.
 
+## Dedicated cross-user Links
+
+`LinkSegment::open` remains owner-only. To connect trusted processes running
+as different OS users, explicitly select `GroupAccess` for one dedicated Link:
+
+```rust,no_run
+use orbit_link::{GroupAccess, LinkSegment};
+# fn example(spec: orbit_link::LinkSpec) -> orbit_link::Result<()> {
+// Operator-provisioned parent, explicit resource owner and shared OS group.
+let access = GroupAccess::new(1001, 2000, "/run/example/ipc")?;
+let link = LinkSegment::open_group("example", spec, access)?;
+let joined = link.join("example-service", "worker", 1)?;
+let bodies = link.bodies(joined.lane, 1)?;
+# let _ = bodies;
+# Ok(())
+# }
+```
+
+The owner starts first and creates the inbox, duplex stream table, lock files
+and wake directories. Other users attach existing resources only; a missing
+owner resource is an error, not permission to create it under another UID.
+Use `link.bodies(...)` so body streams and crash recovery inherit the same
+access scope; the owner-only `LinkBodies::for_name` is not interchangeable.
+No HTTP or event schema is required. Event bridges can retain private event
+rings in their respective fleets while sharing only this Link.
+
+This policy does **not** alter Fleet constructors, unrelated SHM kinds, account
+credentials, process umask or existing resource permissions. The SHM namespace
+includes the configured owner, group, canonical parent/directory, fleet name
+and kind. Different IPC directories cannot supply competing lane locks for
+the same group-shared segment. These names differ from owner-only names.
+
+Deployment requirements:
+
+- Provision the parent directory on a trusted path, traversable by every peer
+  but not replaceable by untrusted users. All peers use the same path and GID.
+- The resource owner must be allowed to assign the selected group. On macOS
+  it must be the owner's effective group because POSIX SHM permissions cannot
+  be repaired with `fchown`/`fchmod` after creation.
+- Run participants with a creation mask preserving group write, for example
+  `0007`. The library never changes it. Inadequate permissions are rejected.
+- The owner creates a `0750` IPC directory containing `0660` lock files and a
+  separate setgid `2770` `bells` directory. Group members can lock but cannot
+  replace lock inodes. Wake sockets use that directory on every Unix platform,
+  including Linux; they carry readiness only, not application data.
+- Keep lock files for the lifetime of the deployment. Do not remove or replace
+  them on restart: death proof depends on all peers locking the same inode.
+  Only the owner removes SHM names, after every participant has stopped.
+
+Every group writer is trusted with this Link's shared state. Role/service
+names are routing declarations, not authenticated user identities. Group
+sharing is not a sandbox between malicious peers and does not grant kernel
+capabilities, access to other fleets or access to a consumer's private files.
+Applications must still validate every requested operation.
+
+The test suite covers group-scoped inbox/stream wakes, owner-only isolation,
+permissions, symlink refusal, scope separation and killed-owner reclamation.
+`cross_uid_group_transport` is an explicitly ignored privileged test: on an
+authorized isolated host, run it as root with the test-name filter and
+`--ignored`. It adopts numeric UIDs/GIDs in child processes only, creates no
+accounts and changes no host services. This test must pass on a target OS
+before declaring cross-user deployment validated.
+
 ## Benchmark
 
 `cargo bench -p orbit-link --bench dispatch` compares a complete small

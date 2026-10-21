@@ -44,6 +44,9 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod group;
+pub use group::GroupAccess;
+
 /// Namespace used by Orbit POSIX shared-memory objects.
 pub const SHM_NAMESPACE: &str = "orbit";
 

@@ -42,6 +42,8 @@ pub use frame::{EVENT_FRAME_TAG, RESERVED_FRAME_TAGS, is_reserved};
 pub use inbox::{
     Admission, Inbox, InboxGeometry, LANE_NAME_MAX, LANE_ROLE_MAX, Reclaimed,
 };
+#[cfg(unix)]
+pub use orbit_core::shm::GroupAccess;
 #[cfg(all(unix, feature = "tokio"))]
 pub use receiver::{InboxReceiver, Received};
 #[cfg(unix)]
