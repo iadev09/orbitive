@@ -1,6 +1,6 @@
 [package]
 name = "orbitive"
-version = "0.5.7"
+version = "0.5.8"
 publish.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -118,9 +118,9 @@ exclude = [
 
 [workspace.dependencies]
 blake3 = { version = "1.8", features = ["zeroize"] }
-orbit-auth = { version = "0.5.5", path = "auth", default-features = false }
+orbit-auth = { version = "0.5.6", path = "auth", default-features = false }
 orbit-core = { version = "0.5.6", path = "core", default-features = false }
-orbit-cache = { version = "0.5.4", path = "cache", default-features = false }
+orbit-cache = { version = "0.5.5", path = "cache", default-features = false }
 orbit-lock = { version = "0.5.4", path = "lock", default-features = false }
 orbit-events = { version = "0.5.4", path = "events", default-features = false }
 orbit-counter = { version = "0.5.4", path = "counter", default-features = false }
@@ -128,11 +128,11 @@ orbit-quota = { version = "0.1.0", path = "quota", default-features = false }
 orbit-cell = { version = "0.5.4", path = "cell", default-features = false }
 orbit-arena = { version = "0.5.4", path = "arena", default-features = false }
 orbit-invoke = { version = "0.5.4", path = "invoke", default-features = false }
-orbit-link = { version = "0.5.5", path = "link", default-features = false }
+orbit-link = { version = "0.5.6", path = "link", default-features = false }
 orbit-metrics = { version = "0.5.4", path = "metrics", default-features = false }
 orbit-pool = { version = "0.5.4", path = "pool", default-features = false }
 orbit-client-pool = { version = "0.5.4", path = "client-pool", default-features = false }
-orbit-stream = { version = "0.5.5", path = "stream", default-features = false }
+orbit-stream = { version = "0.5.6", path = "stream", default-features = false }
 orbit-rustls = { version = "0.5.4", path = "rustls", default-features = false }
 
 bytes = "1.12.1"
