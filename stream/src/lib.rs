@@ -1575,7 +1575,39 @@ pub struct ReadHalf {
     handle: Arc<Handle>,
 }
 
+/// A reset-only observation of a reading direction, without consuming bytes
+/// or treating a clean FIN as failure. One reset observer per direction has a
+/// separate bounded local waker; it cannot replace the body reader's waker.
+pub struct ResetSignal {
+    handle: Arc<Handle>,
+}
+
+impl ResetSignal {
+    /// Await only RESET (or an invalidated stream generation). Buffered data
+    /// and FIN do not complete this observation. No timer or new driver is used.
+    pub fn poll_reset(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+        self.handle.poll_ready(
+            Interest {
+                direction: self.handle.side.read_direction(),
+                writer: false,
+                reset: true,
+            },
+            |direction| direction.flags() & FLAG_RESET != 0,
+            cx,
+        )
+    }
+}
+
 impl ReadHalf {
+    /// Observe an aborted response while another channel carries its metadata.
+    /// The signal owns no reader role and does not stop reading when dropped.
+    pub fn reset_signal(&self) -> ResetSignal {
+        ResetSignal { handle: Arc::clone(&self.handle) }
+    }
+
     pub fn id(&self) -> StreamId {
         self.handle.id
     }
@@ -1669,6 +1701,7 @@ impl ReadHalf {
             Interest {
                 direction: self.handle.side.read_direction(),
                 writer: false,
+                reset: false,
             },
             readable,
             cx,
@@ -1711,6 +1744,7 @@ impl WriteHalf {
         let interest = Interest {
             direction: self.handle.side.write_direction(),
             writer: true,
+            reset: false,
         };
         if let Err(error) =
             self.handle.table.register(self.handle.index, interest, cx.waker())
@@ -1848,6 +1882,7 @@ impl WriteHalf {
             Interest {
                 direction: self.handle.side.write_direction(),
                 writer: true,
+                reset: false,
             },
             |direction| writable(direction, buffer_bytes),
             cx,
@@ -1870,6 +1905,7 @@ impl WriteHalf {
             Interest {
                 direction: self.handle.side.write_direction(),
                 writer: true,
+                reset: false,
             },
             |direction| writable_exact(direction, buffer_bytes, needed),
             cx,

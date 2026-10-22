@@ -55,6 +55,34 @@ only move forward, so this ordering may conservatively overstate a concurrent
 producer but cannot pair an old reservation with a newer read and underflow
 into a false `Full`. Admission and write reservation use the same ordering.
 
+## Interrupted producers
+
+Opening a `LinkSegment` also holds a producer registration, including for a
+publisher that serves no lane. Each mapping has `inbox.capacity` intent records;
+the table admits at most twice `fleet_capacity` registrations. Capacity or
+exhausted contention budget returns `InboxFull`. Claim races help the winner
+and try another turn, with at most `inbox.capacity` attempts; no attempt waits
+for another producer to complete. A retry requires observed cursor progress;
+a stalled claim is refused without polling it. There is no parking or
+unbounded spin loop.
+Reuse mappings rather than opening a new one per frame. Open them after fork.
+
+Intent records publish atomic, version-checked snapshots. Slot turns and owner
+generations remain full-width; exhausted counters refuse rather than wrap.
+Consumer replacement keeps queue positions monotonic, and old destination work
+is discarded without taking payload ownership away from a live producer.
+
+After a native process-exit notification, call
+`LinkSegment::recover_producers(Some(pid))` (also done by `reclaim_process`).
+Cold joins scan dead registrations too. Recovery takes the registration's
+kernel hold, cancels unfinished claims, preserves committed frames and repeats
+their wake. It is idempotent if its own actor dies. There is no automatic timed
+recovery scan, PID liveness probe or timeout-based cancellation of live writers.
+
+This is inbox layout version 7. Existing segments are not converted in place:
+use a new kind for coexistence, or stop all users before removing the old named
+resources. Neither opening nor recovery unlinks a running fleet's resources.
+
 ## Dedicated cross-user Links
 
 `LinkSegment::open` remains owner-only. To connect trusted processes running

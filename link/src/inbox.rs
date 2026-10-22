@@ -14,30 +14,26 @@
 //! while its caller waited. A writer that finds this lane full gets
 //! [`Error::InboxFull`] and the caller answers 503.
 //!
-//! ## Why a sequence per slot rather than one commit counter
+//! ## Producer-owned admission and publication
 //!
-//! Writers reserve in order and finish out of order: a long header block
-//! commits after a short one that started later. A single `commit` counter
-//! would make the reader wait for the slowest writer before it could see
-//! anything behind it, so one slow producer would stall every producer after
-//! it.
+//! A full-width turn identifies each physical slot's reuse. Its claim names
+//! one bounded producer intent and moves FREE -> RESERVED -> COMMITTED or
+//! CANCELLED. Helpers may admit a reservation but never read partial bytes.
+//! The FIFO reader acquires COMMITTED before copying, skips CANCELLED, then
+//! publishes next turn, FREE and head in that order. A slow live producer can
+//! still hold the FIFO head; recovery never infers death from elapsed time.
 //!
-//! Each slot carries its own sequence instead, and the reader looks only at
-//! the slot it is waiting for:
-//!
-//! ```text
-//! seq == position              the slot is free for this round
-//! seq == position + 1          a writer has filled it
-//! seq == position + capacity   consumed; free for the next round
-//! ```
-//!
-//! Nothing here takes a lock. A `std::sync::Mutex` in shared memory belongs to
-//! the process that created it, and a writer that dies holding one leaves the
-//! lane wedged for every other process. Atomics have no owner.
+//! Writes contain no ownership lock, new syscall or polling wait. Segment
+//! lifecycle code holds producer registrations with kernel locks and performs
+//! exact-generation recovery only after those holds can be acquired.
 
 #[cfg(unix)]
 use std::io;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+
+#[path = "inbox/claims.rs"]
+mod claims;
+use claims::{CANCELLED, COMMITTED};
 
 use super::{Error, Result};
 
@@ -48,6 +44,8 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// The layout's own version, separate from the geometry. Geometry changes are
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
+///
+/// 7: producer registry, owned claims and monotonic consumer handoff.
 ///
 /// 6: an interest table follows the watchers, one entry per lane and per
 /// watcher slot, and a watcher carries a role.
@@ -62,7 +60,7 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 6;
+pub(crate) const INBOX_VERSION: u32 = 7;
 
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +108,9 @@ pub(crate) struct LaneHeader {
     /// A writer clears it before ringing that socket, so concurrent writes
     /// coalesce into one reactor wake.
     pub(crate) reactor: AtomicU32,
-    _padding: [u8; 16],
+    pub(crate) epoch: AtomicU64,
+    initialized: AtomicU32,
+    _padding: [u8; 4],
 
     // ── second line: identity, written once per claim ──────────────────
     /// Which service this lane serves.
@@ -213,13 +213,14 @@ pub(crate) struct InterestEntry {
 
 const _: () = assert!(size_of::<InterestEntry>() == 64);
 
-/// One frame's slot. `seq` is the whole protocol; `len` and the payload are
-/// only read once `seq` says the slot is filled.
+/// One frame's slot. `seq` is its full turn; `claim` has two state bits and
+/// a producer-record index. Only an acquired COMMITTED claim publishes bytes.
 #[repr(C, align(64))]
 pub(crate) struct SlotHeader {
     pub(crate) seq: AtomicU64,
+    pub(crate) claim: AtomicU64,
     pub(crate) len: AtomicU32,
-    _padding: [u8; 52],
+    _padding: [u8; 44],
 }
 
 /// What a writer must know to refuse correctly.
@@ -252,8 +253,13 @@ impl InboxGeometry {
     /// Bytes one lane occupies: its header, then a slot header and payload for
     /// every position.
     pub const fn lane_bytes(&self) -> usize {
-        size_of::<LaneHeader>()
-            + self.capacity * (size_of::<SlotHeader>() + self.payload_capacity)
+        size_of::<LaneHeader>() + self.capacity * self.slot_bytes()
+    }
+
+    const fn slot_bytes(&self) -> usize {
+        // Every SlotHeader (and the following lane/registry) requires 64-byte
+        // alignment, even for a caller-selected odd payload capacity.
+        (size_of::<SlotHeader>() + self.payload_capacity + 63) & !63
     }
 
     /// What a fleet's whole table occupies: the header, every lane, one
@@ -269,6 +275,7 @@ impl InboxGeometry {
                 * (self.lane_bytes()
                     + size_of::<WatcherHeader>()
                     + 2 * size_of::<InterestEntry>())
+            + claims::registry_bytes(fleet_capacity, self.capacity)
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -280,6 +287,13 @@ impl InboxGeometry {
         if self.payload_capacity == 0 {
             return Err(Error::Malformed(
                 "inbox payload capacity must not be zero",
+            ));
+        }
+        if self.capacity > u32::MAX as usize
+            || self.payload_capacity > u32::MAX as usize
+        {
+            return Err(Error::Malformed(
+                "inbox geometry exceeds its wire fields",
             ));
         }
         Ok(())
@@ -323,6 +337,8 @@ pub struct Inbox {
     /// that change would not reach the edge.
     lanes: usize,
     geometry: InboxGeometry,
+    /// Installed once, before this mapping is exposed to SHM publishers.
+    producer: Option<claims::Producer>,
     /// Named descriptor wake used by a Tokio receiver. Memory-backed tables
     /// keep using their process-local path.
     #[cfg(unix)]
@@ -349,6 +365,9 @@ impl Inbox {
     /// bytes, all zero, that stay mapped for as long as this `Inbox` lives. A
     /// newly created shared-memory object is: `ftruncate` extends it with
     /// zeros.
+    /// Raw constructors do not install a producer death hold. Use
+    /// `LinkSegment` for interprocess publishing; a raw mapping alone is not
+    /// a registered SHM producer. Direct use is for process-local storage.
     pub unsafe fn initialize(
         base: *mut u8,
         fleet_capacity: usize,
@@ -359,6 +378,7 @@ impl Inbox {
             base,
             lanes: fleet_capacity,
             geometry,
+            producer: None,
             #[cfg(unix)]
             bell: None,
         };
@@ -391,6 +411,7 @@ impl Inbox {
             base,
             lanes: fleet_capacity,
             geometry,
+            producer: None,
             #[cfg(unix)]
             bell: None,
         };
@@ -427,16 +448,10 @@ impl Inbox {
         self.lanes
     }
 
-    /// Clear one lane and claim it for this incarnation.
-    ///
-    /// The owner calls this at boot. Its lane has one reader — itself — so
-    /// nothing anyone else is reading is destroyed, and what it discards is
-    /// work addressed to an incarnation that is gone: every writer waiting on
-    /// those frames has a caller that gave up long ago.
-    ///
-    /// This is not the `ExistingBootPolicy::Reuse` that protects cells and
-    /// counters. Those are shared state; a mailbox is single-owner and its
-    /// contents are in flight, not accumulated.
+    /// Claim a lane after fencing out its previous reader. Discard completed
+    /// old work without resetting full queue positions. In-flight live writers
+    /// retain ownership; their eventual frames are skipped by destination epoch.
+    /// Named SHM users should use `LinkSegment::join`, which takes the hold.
     pub fn claim_lane(
         &self,
         lane_index: usize,
@@ -446,7 +461,7 @@ impl Inbox {
     ) -> Result<()> {
         self.check_lane(lane_index)?;
         check_identity(service, role)?;
-        self.reset_lane(lane_index);
+        self.reset_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
         lane.consumers.store(1, Ordering::Release);
         self.publish_identity(lane, service, role, incarnation);
@@ -509,7 +524,7 @@ impl Inbox {
             {
                 continue;
             }
-            self.reset_lane(lane_index);
+            self.reset_lane(lane_index)?;
             self.publish_identity(lane, service, role, incarnation);
             if let Err(conflict) =
                 self.refuse_other_role(service, role, Some(lane_index))
@@ -839,10 +854,10 @@ impl Inbox {
 
     /// Put one frame in a node's lane.
     ///
-    /// Reserves a position with a compare-and-swap that only succeeds while
-    /// there is room, so a full lane is refused without having mutated
-    /// anything. A plain `fetch_add` would have to be undone, and undoing a
-    /// reservation that other writers have already passed is not possible.
+    /// Bounded admission: claim races help the winner and try a later turn,
+    /// with at most `capacity` attempts. Full capacity, producer-record pressure
+    /// or exhausted contention budget returns `InboxFull`; callers own any
+    /// further retry. Helpers never commit another producer's bytes.
     pub fn write(
         &self,
         lane_index: usize,
@@ -852,42 +867,8 @@ impl Inbox {
         if payload.len() > self.geometry.payload_capacity {
             return Err(Error::FrameTooLarge);
         }
-        let lane = self.lane_header(lane_index);
-        let capacity = self.geometry.capacity as u64;
-
-        let position = loop {
-            if lane.consumers.load(Ordering::Acquire) == 0 {
-                return Err(Error::InboxFull);
-            }
-            let read = lane.read.load(Ordering::Acquire);
-            // See `admits`: an old read with a new reserve is a safe upper
-            // bound; an old reserve with a new read underflows.
-            let reserve = lane.reserve.load(Ordering::Acquire);
-            if reserve.wrapping_sub(read) >= capacity {
-                return Err(Error::InboxFull);
-            }
-            let slot = self.slot_header(lane_index, reserve);
-            // The owner may not have released the previous round of this slot
-            // yet even though its read position has moved past it.
-            if slot.seq.load(Ordering::Acquire) != reserve {
-                std::hint::spin_loop();
-                continue;
-            }
-            if lane
-                .reserve
-                .compare_exchange_weak(
-                    reserve,
-                    reserve + 1,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                break reserve;
-            }
-            std::hint::spin_loop();
-        };
-
+        let mut reservation = self.reserve_frame(lane_index)?;
+        let position = reservation.position;
         let slot = self.slot_header(lane_index, position);
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -896,11 +877,15 @@ impl Inbox {
                 payload.len(),
             );
         }
+        #[cfg(test)]
+        claims::checkpoint("payload");
         slot.len.store(payload.len() as u32, Ordering::Relaxed);
-        // Publishes the payload: a reader that sees this sequence sees the
-        // bytes written before it.
-        slot.seq.store(position + 1, Ordering::Release);
-        self.wake(lane_index, lane);
+        // Admission is not publication: only COMMITTED releases these bytes.
+        slot.claim.store(reservation.claim(COMMITTED), Ordering::Release);
+        #[cfg(test)]
+        claims::checkpoint("committed");
+        reservation.committed = true;
+        self.wake(lane_index, self.lane_header(lane_index));
         Ok(position)
     }
 
@@ -916,35 +901,56 @@ impl Inbox {
     ) -> Result<bool> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
-        let position = lane.read.load(Ordering::Relaxed);
-        let slot = self.slot_header(lane_index, position);
-        if slot.seq.load(Ordering::Acquire) != position + 1 {
-            return Ok(false);
+        for _ in 0..self.geometry.capacity {
+            let position = lane.read.load(Ordering::Relaxed);
+            if position >= lane.reserve.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            let slot = self.slot_header(lane_index, position);
+            let claim = slot.claim.load(Ordering::Acquire);
+            if slot.seq.load(Ordering::Acquire) != position
+                || !matches!(claim & 3, COMMITTED | CANCELLED)
+            {
+                return Ok(false);
+            }
+            let intent = self.intent_for_claim(claim)?;
+            if intent.position != position || intent.lane != lane_index {
+                return Err(Error::Malformed(
+                    "committed inbox intent has the wrong turn",
+                ));
+            }
+            let deliver = claim & 3 == COMMITTED
+                && intent.incarnation == lane.epoch.load(Ordering::Acquire);
+            if deliver {
+                let len = slot.len.load(Ordering::Relaxed) as usize;
+                if len > self.geometry.payload_capacity {
+                    return Err(Error::Malformed(
+                        "committed inbox length is invalid",
+                    ));
+                }
+                out.clear();
+                out.reserve(len);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        self.payload_ptr(lane_index, position),
+                        out.spare_capacity_mut().as_mut_ptr().cast::<u8>(),
+                        len,
+                    );
+                    out.set_len(len);
+                }
+            }
+            self.consume_frame(lane_index, position, claim)?;
+            if deliver {
+                return Ok(true);
+            }
         }
-
-        let len = slot.len.load(Ordering::Relaxed) as usize;
-        out.clear();
-        out.reserve(len);
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                self.payload_ptr(lane_index, position),
-                out.spare_capacity_mut().as_mut_ptr().cast::<u8>(),
-                len,
-            );
-            out.set_len(len);
-        }
-
-        lane.read.store(position + 1, Ordering::Release);
-        // Free for the round `capacity` positions from now.
-        slot.seq
-            .store(position + self.geometry.capacity as u64, Ordering::Release);
         // No wake. Nobody waits on a consume — a writer that finds the lane
         // full is refused, never parked — and the only waiter there is, the
         // owner, is the one reading. Bumping the word here spoiled its own
         // token: every drain moved `changes` past the value it would park on,
         // so each wake-up paid a park that returned at once before the one
         // that waited.
-        Ok(true)
+        Ok(false)
     }
 
     /// The word a parked reader waits on, and its current value.
@@ -960,23 +966,68 @@ impl Inbox {
     fn reset_lane(
         &self,
         lane_index: usize,
-    ) {
+    ) -> Result<()> {
         let lane = self.lane_header(lane_index);
-        lane.reserve.store(0, Ordering::Relaxed);
-        lane.read.store(0, Ordering::Relaxed);
+        // The initial all-zero lane has no published incarnation. Thereafter
+        // full positions never reset, including after a consumer replacement.
+        let next_epoch = lane
+            .epoch
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or(Error::Malformed("inbox lane generation exhausted"))?;
+        if lane.initialized.load(Ordering::Acquire) == 0 {
+            for position in 0..self.geometry.capacity {
+                let slot = self.slot_header(lane_index, position as u64);
+                slot.seq.store(position as u64, Ordering::Release);
+            }
+            lane.initialized.store(1, Ordering::Release);
+        } else {
+            for _ in 0..self.geometry.capacity {
+                let position = lane.read.load(Ordering::Relaxed);
+                if position >= lane.reserve.load(Ordering::Acquire) {
+                    break;
+                }
+                if self
+                    .slot_header(lane_index, position)
+                    .seq
+                    .load(Ordering::Acquire)
+                    > position
+                {
+                    // The previous reader released this turn but died before
+                    // publishing head. Never reset the monotonic cursor.
+                    let claim = self
+                        .slot_header(lane_index, position)
+                        .claim
+                        .load(Ordering::Acquire);
+                    if matches!(claim & 3, COMMITTED | CANCELLED)
+                        && self.intent_for_claim(claim)?.position == position
+                    {
+                        self.consume_frame(lane_index, position, claim)?;
+                    } else {
+                        lane.read.store(position + 1, Ordering::Release);
+                    }
+                    continue;
+                }
+                let claim = self
+                    .slot_header(lane_index, position)
+                    .claim
+                    .load(Ordering::Acquire);
+                if !matches!(claim & 3, COMMITTED | CANCELLED) {
+                    break;
+                }
+                self.consume_frame(lane_index, position, claim)?;
+            }
+        }
         // Not `consumers`: presence is how a lane is won, and clearing it here
         // would hand a just-claimed lane back to the next process looking for
         // a free one. `claim_lane` sets it after this; `join` set it before.
         lane.service_len.store(0, Ordering::Relaxed);
+        lane.epoch.store(next_epoch, Ordering::Release);
         lane.role_len.store(0, Ordering::Relaxed);
         lane.waiters.store(0, Ordering::Relaxed);
         lane.reactor.store(0, Ordering::Relaxed);
         self.clear_interest(lane_index);
-        for position in 0..self.geometry.capacity {
-            let slot = self.slot_header(lane_index, position as u64);
-            slot.len.store(0, Ordering::Relaxed);
-            slot.seq.store(position as u64, Ordering::Release);
-        }
+        Ok(())
     }
 
     /// Write a lane's identity: the bytes first, the length last, so a reader
@@ -1381,7 +1432,7 @@ impl Inbox {
         position: u64,
     ) -> *mut u8 {
         let index = (position as usize) & (self.geometry.capacity - 1);
-        let stride = size_of::<SlotHeader>() + self.geometry.payload_capacity;
+        let stride = self.geometry.slot_bytes();
         unsafe {
             self.lane_base(lane_index)
                 .add(size_of::<LaneHeader>() + index * stride)

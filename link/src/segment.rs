@@ -74,7 +74,7 @@ impl LinkSegment {
             )
             .map_err(Error::Io)?;
             access
-                .prepare_locks(&segment, usize::from(spec.fleet_capacity))
+                .prepare_locks(&segment, 3 * usize::from(spec.fleet_capacity))
                 .map_err(Error::Io)?;
             // Provision streams before publishing a joinable inbox. Recovery
             // and body handles must use this exact access scope as well.
@@ -112,6 +112,16 @@ impl LinkSegment {
             }
         };
         inbox.install_bell_with_group(&segment_name, group.clone())?;
+        // Producer registrations do not consume a routing lane. Their holds
+        // use a disjoint, bounded suffix of the same protected lock namespace.
+        inbox.register_producer(|index| {
+            let slot = usize::from(spec.fleet_capacity) + index;
+            match &group {
+                Some(access) => access.try_hold_lane(&segment_name, slot),
+                None => try_hold_lane(&segment_name, slot),
+            }
+            .map_err(Error::Io)
+        })?;
         drop(lock);
         Ok(Self {
             region,
@@ -133,6 +143,7 @@ impl LinkSegment {
         role: &str,
         incarnation: u64,
     ) -> Result<Joined> {
+        self.recover_producers(None)?;
         let mut reclaimed = Vec::new();
         for lane in 0..self.inbox.lanes() {
             let mut recovery = Ok(());
@@ -231,6 +242,7 @@ impl LinkSegment {
         incarnation: u64,
         mut recover: impl FnMut(&Reclaimed),
     ) -> Result<Vec<Reclaimed>> {
+        self.recover_producers(Some(pid))?;
         let mut reclaimed = Vec::new();
         for lane in 0..self.inbox.lanes() {
             if self.inbox.last_owner(lane)? != Some((pid, incarnation)) {
@@ -248,6 +260,17 @@ impl LinkSegment {
             reclaimed.push(gone);
         }
         Ok(reclaimed)
+    }
+
+    /// Recover producer reservations after a native exit notification, or on
+    /// a cold join. No PID liveness probe, timed scan or write-path lock.
+    pub fn recover_producers(
+        &self,
+        pid: Option<u32>,
+    ) -> Result<()> {
+        self.inbox.recover_producers(pid, |index| {
+            self.hold(self.inbox.lanes() + index)
+        })
     }
 
     fn hold(

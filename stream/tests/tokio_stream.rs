@@ -18,6 +18,82 @@ fn fleet_name(tag: &str) -> &'static str {
     Box::leak(format!("sk{tag}{:x}", std::process::id()).into_boxed_str())
 }
 
+#[tokio::test]
+async fn reset_signal_ignores_buffered_fin_and_wakes_after_reset() {
+    use std::future::poll_fn;
+
+    let streams = Streams::new(
+        Arc::new(Fleet::join("reset-signal", 2).unwrap()),
+        Incarnation::new(1),
+    )
+    .unwrap();
+    let (origin, ticket) = streams.create().unwrap();
+    let mut peer = streams.open(ticket).unwrap();
+    let (read, _write) = origin.split();
+    let reset = read.reset_signal();
+    peer.write_all(b"body before head").await.unwrap();
+    peer.finish().unwrap();
+
+    let (parked, ready) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn(async move {
+        let mut parked = Some(parked);
+        poll_fn(|cx| {
+            let result = reset.poll_reset(cx);
+            if result.is_pending()
+                && let Some(parked) = parked.take()
+            {
+                parked.send(()).unwrap();
+            }
+            result
+        })
+        .await
+    });
+    ready.await.unwrap();
+    peer.reset();
+    waiter.await.unwrap().unwrap();
+    assert!(matches!(
+        read.try_read(&mut [0; 1]),
+        Err(orbit_stream::Error::Reset)
+    ));
+}
+
+#[test]
+fn reset_observer_does_not_replace_a_concurrent_body_reader_waker() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+
+    #[derive(Default)]
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let streams = Streams::new(
+        Arc::new(Fleet::join("reset-wakers", 2).unwrap()),
+        Incarnation::new(1),
+    )
+    .unwrap();
+    let (origin, ticket) = streams.create().unwrap();
+    let mut peer = streams.open(ticket).unwrap();
+    let (read, _write) = origin.split();
+    let reset = read.reset_signal();
+    let body_count = Arc::new(Count::default());
+    let reset_count = Arc::new(Count::default());
+    let body_waker = Waker::from(Arc::clone(&body_count));
+    let reset_waker = Waker::from(Arc::clone(&reset_count));
+    assert!(
+        read.poll_readable(&mut Context::from_waker(&body_waker)).is_pending()
+    );
+    assert!(
+        reset.poll_reset(&mut Context::from_waker(&reset_waker)).is_pending()
+    );
+    peer.reset();
+    assert!(body_count.0.load(Ordering::Relaxed) > 0);
+    assert!(reset_count.0.load(Ordering::Relaxed) > 0);
+}
+
 fn pattern(
     len: usize,
     seed: u32,

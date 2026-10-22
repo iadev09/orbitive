@@ -103,6 +103,15 @@ directions, including an empty ring. Check/register/check prevents a lost
 death wake without a timer. This interest belongs to the writer's task, not
 to a concurrent second writer.
 
+`ReadHalf::reset_signal` observes only RESET or an invalidated generation using
+the existing readiness driver. It consumes no bytes and ignores
+buffered data and FIN. The signal owns no reader role; dropping it does not set
+READER_GONE. A protocol waiting for metadata on another channel can therefore
+observe failed publication without polling or treating a completed body as an
+error. One reset observer per direction has a separate bounded process-local
+waker entry, so a concurrent body reader cannot replace its registration. The
+shared-memory layout and notification words are unchanged.
+
 `Streams::node_dead_in_shm` is management recovery without endpoint ownership.
 It validates an existing segment, reuses a compatible local mapping when one
 exists, otherwise opens an uncached temporary view with no readiness driver.

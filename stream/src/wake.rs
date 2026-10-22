@@ -22,22 +22,25 @@ use std::thread::JoinHandle;
 
 use crate::lock_unpoisoned;
 
-/// Which task on a slot a waker belongs to: reader or writer of one direction.
+/// Reader, writer or reset observer of one direction. Reset observation must
+/// not replace a body reader's waker when metadata and body are driven apart.
 #[derive(Clone, Copy)]
 pub(crate) struct Interest {
     pub(crate) direction: usize,
     pub(crate) writer: bool,
+    pub(crate) reset: bool,
 }
 
 impl Interest {
     fn index(self) -> usize {
-        self.direction * 2 + usize::from(self.writer)
+        self.direction * 3
+            + if self.reset { 2 } else { usize::from(self.writer) }
     }
 }
 
 #[derive(Default)]
 struct SlotWakers {
-    wakers: [Option<Waker>; 4],
+    wakers: [Option<Waker>; 6],
 }
 
 /// One entry per slot in the table, sized once at open, plus the one task
