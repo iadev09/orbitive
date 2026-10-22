@@ -150,7 +150,7 @@ criterion = "0.8.2"
 dashmap = "6.1"
 libc = "0.2"
 portable-atomic = { version = "1.15", default-features = false, features = ["fallback", "require-cas"] }
-lru = "0.18"
+lru = "0.19.0"
 netid64 = "0.1.1"
 nix = { version = "0.31", features = ["process", "signal", "user", "fs"] }
 rustls_0_23 = { package = "rustls", version = "0.23", default-features = false, features = ["std"] }
