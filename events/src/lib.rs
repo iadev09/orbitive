@@ -92,14 +92,32 @@ impl FleetEventCursor {
         Self { inner: FleetLaneCursor::from_counter(0) }
     }
 
-    /// Start from a known next counter.
+    /// Start every node lane at the same lane-local next counter.
+    ///
+    /// This does not restore independently advanced lane positions. Retain or
+    /// clone the cursor to preserve them; a numerical minimum is not a checkpoint.
     pub const fn from_counter(next_counter: u64) -> Self {
         Self { inner: FleetLaneCursor::from_counter(next_counter) }
     }
 
-    /// The lowest next counter among the node lanes.
+    /// Numerical minimum of the lane-local next counters, including idle lanes.
+    ///
+    /// Each physical node lane advances independently. This is not a global
+    /// event cursor, event order, completion watermark, or multi-lane checkpoint.
+    /// An idle lane at zero keeps this value at zero even when all available
+    /// events have been consumed. Retain or clone this cursor to preserve each
+    /// lane's position; passing the minimum to [`Self::from_counter`] can replay
+    /// already consumed events. This reads only caller-owned cursor memory.
+    pub fn minimum_lane_next_counter(&self) -> u64 {
+        self.inner.minimum_lane_next_counter()
+    }
+
+    /// Numerical minimum of independent lane-local counters, not a global cursor.
+    #[deprecated(
+        note = "use minimum_lane_next_counter; this is not a global cursor or checkpoint"
+    )]
     pub fn next_counter(&self) -> u64 {
-        self.inner.minimum_next_counter()
+        self.minimum_lane_next_counter()
     }
 }
 
@@ -374,6 +392,30 @@ mod tests {
         assert_eq!(poll.events[1].payload, b"all");
 
         assert!(bus.poll(&mut cursor).is_empty());
+    }
+
+    #[test]
+    fn minimum_lane_next_counter_can_stay_zero_after_all_events_are_read() {
+        let fleet = Arc::new(Fleet::join("event_lane_min", 2).expect("fleet"));
+        let bus = FleetEventBus::new(fleet);
+        let mut cursor = bus.cursor_from_start();
+
+        for _ in 0..3 {
+            bus.publish("test.event", b"payload").expect("publish");
+        }
+
+        let poll = bus.poll(&mut cursor);
+        assert_eq!(poll.events.len(), 3);
+        assert_eq!(poll.lagged, 0);
+        assert_eq!(cursor.minimum_lane_next_counter(), 0);
+        assert!(bus.poll(&mut cursor).is_empty());
+
+        bus.publish("test.event", b"next").expect("publish");
+        let poll = bus.poll(&mut cursor);
+        assert_eq!(poll.events.len(), 1);
+        assert_eq!(poll.events[0].payload, b"next");
+        assert_eq!(poll.lagged, 0);
+        assert_eq!(cursor.minimum_lane_next_counter(), 0);
     }
 
     #[test]

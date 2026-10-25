@@ -63,16 +63,39 @@ pub struct FleetLaneCursor {
 }
 
 impl FleetLaneCursor {
+    /// Start every physical lane at the same lane-local counter.
+    ///
+    /// This does not restore a multi-lane checkpoint: independently advanced
+    /// lane positions must be preserved by retaining or cloning the cursor.
     pub const fn from_counter(initial_counter: u64) -> Self {
         Self { lanes: Vec::new(), initial_counter }
     }
 
-    pub fn minimum_next_counter(&self) -> u64 {
+    /// Numerical minimum of the lane-local next counters, including idle lanes.
+    ///
+    /// Counters belong to independent physical lanes. This value is not a global
+    /// cursor, event order, completion watermark, or multi-lane checkpoint. An
+    /// idle lane at zero keeps the minimum at zero even after all available
+    /// frames in other lanes have been read. Retain or clone this cursor to
+    /// preserve each lane's position; passing this minimum to
+    /// [`Self::from_counter`] can replay already consumed frames.
+    ///
+    /// Before lanes are initialized, returns the initial counter. Computing the
+    /// minimum scans only caller-owned memory and does not poll the rings.
+    pub fn minimum_lane_next_counter(&self) -> u64 {
         self.lanes
             .iter()
             .map(|cursor| cursor.next_counter())
             .min()
             .unwrap_or(self.initial_counter)
+    }
+
+    /// Numerical minimum of independent lane-local counters, not a global cursor.
+    #[deprecated(
+        note = "use minimum_lane_next_counter; this is not a global cursor or checkpoint"
+    )]
+    pub fn minimum_next_counter(&self) -> u64 {
+        self.minimum_lane_next_counter()
     }
 }
 

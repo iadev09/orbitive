@@ -223,3 +223,42 @@ fn per_node_ring_versions_share_one_semantic_sequence() {
     assert_eq!(fleet.next_ring_version::<BatchRecord>(), 2);
     assert_eq!(fleet.current_ring_version::<BatchRecord>(), 2);
 }
+
+#[test]
+fn minimum_lane_next_counter_tracks_independent_lane_positions() {
+    let fleet = Fleet::join("cursor_lane_min", 2).expect("fleet");
+    let ring = fleet.ring::<BatchRecord>();
+    let mut cursor = fleet.lane_cursor_from_start::<BatchRecord>();
+
+    for _ in 0..3 {
+        ring.write(NodeId::ZERO, 0, 0, Bytes::from_static(b"a"));
+    }
+
+    let poll = fleet.poll_lanes::<BatchRecord>(&mut cursor);
+    assert_eq!(poll.frames.len(), 3);
+    assert_eq!(poll.loss.total(), 0);
+    assert_eq!(cursor.minimum_lane_next_counter(), 0);
+    assert!(fleet.poll_lanes::<BatchRecord>(&mut cursor).frames.is_empty());
+
+    ring.write(NodeId::new(1), 0, 0, Bytes::from_static(b"b"));
+    let poll = fleet.poll_lanes::<BatchRecord>(&mut cursor);
+    assert_eq!(poll.frames.len(), 1);
+    assert_eq!(poll.frames[0].id.node(), 1);
+    assert_eq!(poll.frames[0].id.counter(), 0);
+    assert_eq!(poll.loss.total(), 0);
+    assert_eq!(cursor.minimum_lane_next_counter(), 1);
+
+    ring.write(NodeId::ZERO, 0, 0, Bytes::from_static(b"a-next"));
+    let poll = fleet.poll_lanes::<BatchRecord>(&mut cursor);
+    assert_eq!(poll.frames.len(), 1);
+    assert_eq!(poll.frames[0].id.counter(), 3);
+    assert_eq!(poll.loss.total(), 0);
+    assert_eq!(cursor.minimum_lane_next_counter(), 1);
+
+    ring.write(NodeId::new(1), 0, 0, Bytes::from_static(b"b-next"));
+    let poll = fleet.poll_lanes::<BatchRecord>(&mut cursor);
+    assert_eq!(poll.frames.len(), 1);
+    assert_eq!(poll.frames[0].id.counter(), 1);
+    assert_eq!(poll.loss.total(), 0);
+    assert_eq!(cursor.minimum_lane_next_counter(), 2);
+}
