@@ -2,9 +2,7 @@
 
 #[cfg(feature = "tokio")]
 use std::collections::HashSet;
-use std::sync::Arc;
-#[cfg(feature = "tokio")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "tokio")]
 use orbit_core::shm::try_hold_watcher;
@@ -20,6 +18,8 @@ pub struct LinkSegment {
     fleet_name: String,
     spec: LinkSpec,
     group: Option<orbit_core::shm::GroupAccess>,
+    /// Cold-open recovery is reported by the next successful join too.
+    reclaimed: Mutex<Vec<Reclaimed>>,
     #[cfg(feature = "tokio")]
     receivers: Mutex<HashSet<usize>>,
 }
@@ -112,48 +112,58 @@ impl LinkSegment {
             }
         };
         inbox.install_bell_with_group(&segment_name, group.clone())?;
-        // Producer registrations do not consume a routing lane. Their holds
-        // use a disjoint, bounded suffix of the same protected lock namespace.
-        inbox.register_producer(|index| {
-            let slot = usize::from(spec.fleet_capacity) + index;
-            match &group {
-                Some(access) => access.try_hold_lane(&segment_name, slot),
-                None => try_hold_lane(&segment_name, slot),
-            }
-            .map_err(Error::Io)
-        })?;
-        drop(lock);
-        Ok(Self {
+        let mut segment = Self {
             region,
             inbox,
             name: segment_name,
             fleet_name: name.to_owned(),
             spec,
             group,
+            reclaimed: Mutex::new(Vec::new()),
             #[cfg(feature = "tokio")]
             receivers: Mutex::new(HashSet::new()),
+        };
+        if let Err(error) = segment.register_producer() {
+            if !matches!(error, Error::InboxFull) {
+                return Err(error);
+            }
+            // No registration is needed to retire an abandoned inbox. Do
+            // this before one bounded retry, otherwise retained references
+            // can prevent the mapping needed to reach join-time recovery.
+            let reclaimed = segment.recover_abandoned()?;
+            *segment.reclaimed.get_mut().map_err(|_| {
+                Error::Malformed("Link recovery observations are poisoned")
+            })? = reclaimed;
+            segment.register_producer()?;
+        }
+        drop(lock);
+        Ok(segment)
+    }
+
+    fn register_producer(&mut self) -> Result<()> {
+        // Producer holds use a disjoint suffix of the lane-lock namespace.
+        let lanes = usize::from(self.spec.fleet_capacity);
+        let name = &self.name;
+        let group = &self.group;
+        self.inbox.register_producer(|index| {
+            match group {
+                Some(access) => access.try_hold_lane(name, lanes + index),
+                None => try_hold_lane(name, lanes + index),
+            }
+            .map_err(Error::Io)
         })
     }
 
-    /// Take a lane after reclaiming every claimed lane whose kernel hold is
-    /// no longer owned by a live process.
+    /// Take a lane after reclaiming abandoned readers and queued work.
+    /// Includes recovery performed while opening this mapping under producer
+    /// registration pressure.
     pub fn join(
         &self,
         service: &str,
         role: &str,
         incarnation: u64,
     ) -> Result<Joined> {
-        self.recover_producers(None)?;
-        let mut reclaimed = Vec::new();
-        for lane in 0..self.inbox.lanes() {
-            let mut recovery = Ok(());
-            if let Some(lane) = self.reclaim_if_gone_with(lane, |gone| {
-                recovery = self.recover_streams(gone.lane, gone.incarnation);
-            })? {
-                recovery?;
-                reclaimed.push(lane);
-            }
-        }
+        let recovered = self.recover_abandoned()?;
         let (lane, hold) =
             self.inbox.join(service, role, incarnation, |lane| {
                 let Some(hold) = self.hold(lane)? else { return Ok(None) };
@@ -164,7 +174,29 @@ impl LinkSegment {
                 }
                 Ok(Some(hold))
             })?;
+        let mut reclaimed =
+            std::mem::take(&mut *self.reclaimed.lock().map_err(|_| {
+                Error::Malformed("Link recovery observations are poisoned")
+            })?);
+        for gone in recovered {
+            if !reclaimed.contains(&gone) {
+                reclaimed.push(gone);
+            }
+        }
         Ok(Joined { lane, hold, reclaimed })
+    }
+
+    fn recover_abandoned(&self) -> Result<Vec<Reclaimed>> {
+        self.recover_producers(None)?;
+        let mut reclaimed = Vec::new();
+        for lane in 0..self.inbox.lanes() {
+            if let Some(gone) = self.recover_lane(lane, |gone| {
+                self.recover_streams(gone.lane, gone.incarnation)
+            })? {
+                reclaimed.push(gone);
+            }
+        }
+        Ok(reclaimed)
     }
 
     fn recover_streams(
@@ -194,9 +226,9 @@ impl LinkSegment {
         .map_err(Error::Stream)
     }
 
-    /// Take back `lane` if it is claimed and its kernel hold is free: its
-    /// owner died without releasing it. `None` when the lane is free or its
-    /// owner is alive.
+    /// Take back `lane` if its kernel hold is free and it is still claimed or
+    /// retains queued work after withdrawal. `None` when there is nothing to
+    /// retire or its reader is still alive, including during graceful drain.
     ///
     /// A join does this for every lane. A writer refused by a lane asks it
     /// for that lane: a process killed outright leaves its lane claimed and
@@ -217,15 +249,39 @@ impl LinkSegment {
         lane: usize,
         recover: impl FnOnce(&Reclaimed),
     ) -> Result<Option<Reclaimed>> {
-        if self.inbox.consumers(lane)? == 0 {
+        self.recover_lane(lane, |gone| {
+            recover(gone);
+            Ok(())
+        })
+    }
+
+    fn recover_lane(
+        &self,
+        lane: usize,
+        recover: impl FnOnce(&Reclaimed) -> Result<()>,
+    ) -> Result<Option<Reclaimed>> {
+        if self.inbox.consumers(lane)? == 0 && self.inbox.depth(lane)? == 0 {
             return Ok(None);
         }
         match self.hold(lane)? {
             Some(_gone) => {
-                let gone = self.inbox.reclaim(lane)?;
+                let gone = match self.inbox.reclaim(lane)? {
+                    Some(gone) => Some(gone),
+                    None => self.inbox.last_owner(lane)?.map(
+                        |(pid, incarnation)| Reclaimed {
+                            lane,
+                            pid,
+                            incarnation,
+                        },
+                    ),
+                };
                 if let Some(gone) = &gone {
-                    recover(gone);
+                    recover(gone)?;
                 }
+                // The hold proves reader quiescence even for a lane already
+                // withdrawn from routing. Retirement frees committed slot
+                // references; it never cancels a still-live writer borrow.
+                self.inbox.retire_lane(lane)?;
                 Ok(gone)
             }
             None => Ok(None),
@@ -257,6 +313,7 @@ impl LinkSegment {
             }
             let gone = Reclaimed { lane, pid, incarnation };
             recover(&gone);
+            self.inbox.retire_lane(lane)?;
             reclaimed.push(gone);
         }
         Ok(reclaimed)

@@ -963,6 +963,19 @@ impl Inbox {
         Ok((&lane.changes, lane.changes.load(Ordering::Acquire)))
     }
 
+    /// Retire queued work only after the caller has acquired the consumer's
+    /// kernel hold and withdrawn the lane. No live reader may still use it.
+    pub(crate) fn retire_lane(
+        &self,
+        lane_index: usize,
+    ) -> Result<()> {
+        self.check_lane(lane_index)?;
+        if self.consumers(lane_index)? != 0 {
+            return Err(Error::Malformed("retiring an advertised inbox lane"));
+        }
+        self.reset_lane(lane_index)
+    }
+
     fn reset_lane(
         &self,
         lane_index: usize,

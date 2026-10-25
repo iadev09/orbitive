@@ -67,10 +67,19 @@ a stalled claim is refused without polling it. There is no parking or
 unbounded spin loop.
 Reuse mappings rather than opening a new one per frame. Open them after fork.
 
+If retained work exhausts producer registrations, opening performs a bounded
+recovery pass before retrying registration once. A reader's free kernel hold
+proves it can no longer consume its queue: recovery retires its queued frames
+and ends its exact stream incarnation, including when it withdrew before exit.
+A live reader's queued work and a draining reader's held lane are preserved.
+True live-capacity pressure still returns `InboxFull`.
+
 Intent records publish atomic, version-checked snapshots. Slot turns and owner
 generations remain full-width; exhausted counters refuse rather than wrap.
 Consumer replacement keeps queue positions monotonic, and old destination work
 is discarded without taking payload ownership away from a live producer.
+Retirement uses the same handoff rules and never waits for a live producer to
+finish a reservation. Incomplete work stays fenced by its old destination epoch.
 
 After a native process-exit notification, call
 `LinkSegment::recover_producers(Some(pid))` (also done by `reclaim_process`).

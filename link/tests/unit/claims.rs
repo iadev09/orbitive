@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{InboxGeometry, LinkSegment, LinkSpec};
 use orbit_stream::StreamSpec;
 
+use super::{REFERENCED, RESERVED, WRITING, checkpoint};
+
 const SPEC: LinkSpec = LinkSpec::new(
     2,
     194,
@@ -59,6 +61,22 @@ fn receiver_crash_child() {
     panic!("reader checkpoint was not reached");
 }
 
+#[test]
+fn abandoned_consumer_crash_child() {
+    let Ok(name) = std::env::var("ORBIT_LINK_CRASH_FLEET") else {
+        return;
+    };
+    let link = LinkSegment::open(&name, SPEC).unwrap();
+    let joined = link.join("example-client", "client", 2).unwrap();
+    link.inbox().write(joined.lane, b"own pending frame").unwrap();
+    for _ in 0..2 * SPEC.fleet_capacity - 2 {
+        let publisher = LinkSegment::open(&name, SPEC).unwrap();
+        publisher.inbox().write(joined.lane, b"pending reply").unwrap();
+    }
+    checkpoint("consumer-abandoned");
+    panic!("abandoned-consumer checkpoint was not reached");
+}
+
 fn kill_at(
     name: &str,
     test: &str,
@@ -94,6 +112,85 @@ fn recovery_actor_can_die_without_losing_cancellation_or_wake() {
         inbox.write(0, b"after recovery crash").unwrap();
         assert!(inbox.read(0, &mut Vec::new()).unwrap());
     }
+}
+
+#[test]
+fn registration_recovers_killed_consumers_and_interrupted_orphan_retirement() {
+    for phase in
+        [None, Some("reader-turn"), Some("reader-free"), Some("reader-head")]
+    {
+        let name = name();
+        let scratch = Scratch(LinkSegment::open(&name, SPEC).unwrap());
+        let live = scratch.0.join("example-source", "source", 1).unwrap();
+        scratch.0.inbox().write(live.lane, b"live queue").unwrap();
+        kill_at(
+            &name,
+            "inbox::claims::tests::abandoned_consumer_crash_child",
+            "consumer-abandoned",
+        );
+        let previous = scratch.0.inbox().last_owner(1).unwrap().unwrap();
+        if let Some(phase) = phase {
+            kill_at(&name, "inbox::claims::tests::recovery_crash_child", phase);
+        }
+        let next = LinkSegment::open(&name, SPEC).unwrap();
+        let replacement = next.join("example-client", "client", 3).unwrap();
+        assert!(
+            replacement.reclaimed.iter().any(|gone| {
+                gone.lane == replacement.lane
+                    && (gone.pid, gone.incarnation) == previous
+            }),
+            "{phase:?}"
+        );
+        assert_eq!(next.inbox().depth(replacement.lane).unwrap(), 0);
+        assert_eq!(
+            next.inbox().write(replacement.lane, b"replacement").unwrap(),
+            3
+        );
+        let mut frame = Vec::new();
+        assert!(next.inbox().read(replacement.lane, &mut frame).unwrap());
+        assert_eq!(frame, b"replacement");
+        assert!(scratch.0.inbox().read(live.lane, &mut frame).unwrap());
+        assert_eq!(frame, b"live queue");
+        scratch.0.inbox().release_lane(live.lane).unwrap();
+        next.inbox().release_lane(replacement.lane).unwrap();
+    }
+}
+
+#[test]
+fn dead_consumer_retirement_preserves_a_live_writer_reservation() {
+    let name = name();
+    let scratch = Scratch(LinkSegment::open(&name, SPEC).unwrap());
+    let live = scratch.0.join("example-source", "source", 1).unwrap();
+    let destination = scratch.0.join("example-client", "client", 2).unwrap();
+    let reservation =
+        scratch.0.inbox().reserve_frame(destination.lane).unwrap();
+    let position = reservation.position;
+    drop(destination.hold);
+    assert!(scratch.0.reclaim_if_gone(destination.lane).unwrap().is_some());
+    let slot = scratch.0.inbox().slot_header(destination.lane, position);
+    assert_eq!(slot.claim.load(Ordering::Acquire), reservation.claim(RESERVED));
+    assert_eq!(
+        scratch
+            .0
+            .inbox()
+            .record(reservation.record)
+            .flags
+            .load(Ordering::Acquire),
+        WRITING | REFERENCED
+    );
+    drop(reservation);
+
+    let replacement = scratch.0.join("example-client", "client", 3).unwrap();
+    assert_eq!(scratch.0.inbox().depth(replacement.lane).unwrap(), 0);
+    assert_eq!(
+        scratch.0.inbox().write(replacement.lane, b"new epoch").unwrap(),
+        position + 1
+    );
+    let mut frame = Vec::new();
+    assert!(scratch.0.inbox().read(replacement.lane, &mut frame).unwrap());
+    assert_eq!(frame, b"new epoch");
+    scratch.0.inbox().release_lane(live.lane).unwrap();
+    scratch.0.inbox().release_lane(replacement.lane).unwrap();
 }
 
 #[test]
