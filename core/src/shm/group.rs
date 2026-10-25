@@ -273,9 +273,7 @@ impl GroupAccess {
         use std::os::fd::{FromRawFd, OwnedFd};
         let name = std::ffi::CString::new(name)
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        let raw = unsafe {
-            libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0 as libc::c_uint)
-        };
+        let raw = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }

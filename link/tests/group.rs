@@ -137,7 +137,7 @@ fn group_link_inbox_stream_wakes_and_private_resources() {
             libc::shm_open(
                 std::ffi::CString::new(private_name).unwrap().as_ptr(),
                 libc::O_RDONLY,
-                0 as libc::c_uint,
+                0,
             )
         };
         assert!(fd >= 0);
