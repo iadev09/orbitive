@@ -31,6 +31,9 @@ pub(crate) const FLAG_FIN: u8 = 1;
 pub(crate) const FLAG_RESET: u8 = 2;
 /// The reader is gone; nothing written here will ever be read.
 pub(crate) const FLAG_READER_GONE: u8 = 4;
+/// The writer is awaiting reader departure even when its ring is empty.
+/// Scoped to that wait; ordinary completed exchanges need no departure wake.
+pub(crate) const FLAG_CLOSE_WATCH: u8 = 8;
 
 /// Bits of the 40-bit `NetId64` counter that name the slot inside its lane;
 /// the rest is the slot generation. The counter is a packed allocation

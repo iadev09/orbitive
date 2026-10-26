@@ -103,6 +103,17 @@ directions, including an empty ring. Check/register/check prevents a lost
 death wake without a timer. This interest belongs to the writer's task, not
 to a concurrent second writer.
 
+`WriteHalf::peer_closed` observes RESET or READER_GONE while an adapter awaits
+work before writing. A scoped CLOSE_WATCH flag arms reader-departure notification
+even on an empty ring. The reader sets READER_GONE before testing that flag;
+the writer arms it before check/register/check, using sequentially consistent
+flag updates so cancellation cannot miss the registration race. Dropping the
+future clears CLOSE_WATCH without closing the stream. Completed exchanges do
+not retain this extra wake requirement. FIN alone is not cancellation. The flag
+uses a spare bit in the existing direction word; geometry, generation validation,
+death recovery and readiness registrations are unchanged. Both peers need this
+notification behavior for an idle reader-departure wait.
+
 `ReadHalf::reset_signal` observes only RESET or an invalidated generation using
 the existing readiness driver. It consumes no bytes and ignores
 buffered data and FIN. The signal owns no reader role; dropping it does not set

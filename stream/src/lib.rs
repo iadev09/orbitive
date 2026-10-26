@@ -52,9 +52,9 @@ mod table;
 mod wake;
 
 use layout::{
-    Direction, FLAG_FIN, FLAG_READER_GONE, FLAG_RESET, GENERATION_MASK,
-    SIDE_CLAIMED, SIDE_DEAD, SIDE_FREE, SIDE_RELEASED, SLOT_BITS, SLOT_EMPTY,
-    SLOT_LIVE, SLOT_MASK, Slot,
+    Direction, FLAG_CLOSE_WATCH, FLAG_FIN, FLAG_READER_GONE, FLAG_RESET,
+    GENERATION_MASK, SIDE_CLAIMED, SIDE_DEAD, SIDE_FREE, SIDE_RELEASED,
+    SLOT_BITS, SLOT_EMPTY, SLOT_LIVE, SLOT_MASK, Slot,
 };
 use orbit_core::NodeId;
 #[cfg(any(
@@ -1225,6 +1225,7 @@ impl Handle {
             let before = direction.flags.fetch_or(flag, Ordering::SeqCst);
             if before & flag == 0 {
                 let ring = flag != FLAG_READER_GONE
+                    || before & FLAG_CLOSE_WATCH != 0
                     || writer_may_park(direction, before);
                 self.table.notify(
                     self.index,
@@ -1333,7 +1334,7 @@ impl Handle {
 }
 
 /// Whether a task could be parked writing into `direction` as its reader
-/// goes — the only case in which the reader going has to ring a doorbell.
+/// goes, apart from an explicit reader-departure watch on an idle writer.
 ///
 /// Not a writer that has finished: it will never write or wait again. And not
 /// while nothing is queued: with the ring empty every write fits, so nobody is
@@ -1723,7 +1724,47 @@ pub struct WriteHalf {
     shut: bool,
 }
 
+/// Arms reader-departure notification only while its writer is awaiting it.
+struct CloseWatch<'a>(&'a Handle);
+
+impl Drop for CloseWatch<'_> {
+    fn drop(&mut self) {
+        if let Ok(slot) = self.0.slot() {
+            Handle::direction(slot, self.0.side.write_direction())
+                .flags
+                .fetch_and(!FLAG_CLOSE_WATCH, Ordering::SeqCst);
+        }
+    }
+}
+
 impl WriteHalf {
+    /// Wait until this direction is reset or its reader stops reading,
+    /// releases its half, or is reported dead. A clean FIN is not cancellation.
+    ///
+    /// Uses the writer's existing readiness registration. Dropping this future
+    /// disarms the extra departure wake; it does not close the direction.
+    pub async fn peer_closed(&mut self) -> Result<()> {
+        let slot = self.handle.slot()?;
+        let direction =
+            Handle::direction(slot, self.handle.side.write_direction());
+        direction.flags.fetch_or(FLAG_CLOSE_WATCH, Ordering::SeqCst);
+        let _watch = CloseWatch(&self.handle);
+        std::future::poll_fn(|cx| {
+            self.handle.poll_ready(
+                Interest {
+                    direction: self.handle.side.write_direction(),
+                    writer: true,
+                    reset: false,
+                },
+                |direction| {
+                    direction.flags() & (FLAG_RESET | FLAG_READER_GONE) != 0
+                },
+                cx,
+            )
+        })
+        .await
+    }
+
     /// Wait for the peer's confirmed node death, even while no bytes are
     /// being produced. Ordinary FIN and endpoint release are not death.
     ///

@@ -18,6 +18,85 @@ fn fleet_name(tag: &str) -> &'static str {
     Box::leak(format!("sk{tag}{:x}", std::process::id()).into_boxed_str())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_closed_wakes_on_reader_departure_from_an_empty_shared_ring() {
+    use std::future::{Future, poll_fn};
+
+    let name = fleet_name("close");
+    let table = |node| {
+        Streams::new(
+            Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(node)).unwrap()),
+            Incarnation::new(1),
+        )
+        .unwrap()
+    };
+    let owner = table(0);
+    let peer = table(1);
+    let (origin, ticket) = owner.create().unwrap();
+    let remote = peer.open(ticket).unwrap();
+    let (_incoming, mut outgoing) = origin.split();
+    let (reader, _writer) = remote.split();
+    let (parked, ready) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn(async move {
+        let mut closed = std::pin::pin!(outgoing.peer_closed());
+        let mut parked = Some(parked);
+        poll_fn(|cx| {
+            let result = closed.as_mut().poll(cx);
+            if result.is_pending()
+                && let Some(parked) = parked.take()
+            {
+                parked.send(()).unwrap();
+            }
+            result
+        })
+        .await
+    });
+    ready.await.unwrap();
+    // No bytes, FIN, reset or process death: the reader alone cancels.
+    reader.stop_reading();
+    waiter.await.unwrap().unwrap();
+    owner.unlink().unwrap();
+}
+
+#[test]
+fn peer_closed_disarms_departure_wakes_and_ignores_fin() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+
+    #[derive(Default)]
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let streams = Streams::new(
+        Arc::new(Fleet::join("close-disarm", 2).unwrap()),
+        Incarnation::new(1),
+    )
+    .unwrap();
+    let (origin, ticket) = streams.create().unwrap();
+    let remote = streams.open(ticket).unwrap();
+    let (reader, mut writer) = remote.split();
+    let (_incoming, mut outgoing) = origin.split();
+    let count = Arc::new(Count::default());
+    let waker = Waker::from(Arc::clone(&count));
+    let mut cx = Context::from_waker(&waker);
+    writer.finish().unwrap();
+    {
+        let mut closed = std::pin::pin!(outgoing.peer_closed());
+        assert!(closed.as_mut().poll(&mut cx).is_pending());
+    }
+    reader.stop_reading();
+    assert_eq!(count.0.load(Ordering::Relaxed), 0);
+    let mut closed = std::pin::pin!(outgoing.peer_closed());
+    assert!(matches!(
+        closed.as_mut().poll(&mut cx),
+        std::task::Poll::Ready(Ok(()))
+    ));
+}
+
 #[tokio::test]
 async fn reset_signal_ignores_buffered_fin_and_wakes_after_reset() {
     use std::future::poll_fn;
