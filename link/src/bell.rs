@@ -7,6 +7,50 @@
 use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
 
+/// Empty obsolete bells only when the receiver has no shared work left.
+/// Callers disarm first and recheck the shared generation after rearming.
+#[cfg(feature = "tokio")]
+pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut scratch = [0u8; 64];
+    loop {
+        // Tokio may not have observed readiness yet when the generation
+        // recheck avoided parking. Drain the kernel queue in that case too.
+        // SAFETY: the socket owns this fd and scratch is writable for len bytes.
+        let read = unsafe {
+            libc::recv(
+                socket.as_raw_fd(),
+                scratch.as_mut_ptr().cast(),
+                scratch.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if read >= 0 {
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => {
+                // Let Tokio clear a cached readiness bit with its own IO
+                // attempt. A late bell is harmless; consume it and finish
+                // draining before rearming.
+                match socket.try_recv(&mut scratch) {
+                    Ok(_) => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        return Ok(());
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            _ => return Err(error),
+        }
+    }
+}
+
 /// Who a datagram wakes. Lanes and watchers have separate addresses because a
 /// named socket has exactly one binder.
 #[derive(Clone, Copy)]

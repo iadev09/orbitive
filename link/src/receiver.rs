@@ -86,6 +86,11 @@ impl InboxReceiver {
                 });
             }
 
+            // Only the empty-to-wait transition touches the socket. A wake
+            // sent during an earlier arm/recheck race must be acknowledged
+            // before another arm can enqueue a second obsolete datagram.
+            inbox.disarm_receiver(self.lane);
+            crate::bell::drain(&self.socket)?;
             inbox.arm_receiver(self.lane)?;
             if inbox.receiver_generation(self.lane)? != seen
                 || inbox.directory() != self.directory
@@ -104,6 +109,10 @@ impl InboxReceiver {
         self.lane
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/receiver.rs"]
+mod tests;
 
 impl Drop for InboxReceiver {
     fn drop(&mut self) {

@@ -45,6 +45,8 @@ impl DirectoryWatcher {
                 return Ok(directory);
             }
 
+            inbox.disarm_watcher(self.slot);
+            crate::bell::drain(&self.socket)?;
             inbox.arm_watcher(self.slot)?;
             if inbox.watcher_generation(self.slot)? != seen
                 || inbox.directory() != self.directory
