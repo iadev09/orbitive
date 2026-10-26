@@ -19,9 +19,8 @@
 //! supported across the Unix targets Orbit serves. An unlocked stale
 //! companion file is safe to reuse.
 //!
-//! Those files live in a per-uid directory — `$XDG_RUNTIME_DIR/orbit-{uid}`
-//! where the session provides one, `/tmp/orbit-{uid}` otherwise — created
-//! `0700` and checked on every lock. They were once in `/tmp` directly, which
+//! Those files live in `/tmp/orbit-{uid}`, independent of process environment,
+//! created `0700` and checked on every lock. They were once in `/tmp` directly, which
 //! made them squattable: see [`lock_dir`].
 //!
 //! ## Lifetime
@@ -1070,10 +1069,9 @@ fn lock_file_path(shm_name: &str) -> PathBuf {
 /// private, fails the open with the path in the message instead of parking the
 /// process on a lock.
 ///
-/// `XDG_RUNTIME_DIR` is preferred where the session provides one, because it is
-/// already per-user and `0700` and so is not inside a world-writable directory
-/// at all. macOS has no such variable but gives each user a private `TMPDIR`;
-/// `/tmp` is the fallback, with the checks above carrying the weight.
+/// The root is part of the owner-only SHM namespace, not a session preference.
+/// Every process addressing the same SHM name must open the same lock inode,
+/// including after environment scrubbing and from another login session.
 fn lock_dir() -> PathBuf {
     let uid = unsafe { libc::geteuid() };
     lock_dir_for_uid(uid)
@@ -1081,13 +1079,9 @@ fn lock_dir() -> PathBuf {
 
 /// Locate the existing per-user companion lock directory without creating it.
 /// Tools can use its filenames as discovery hints, but must verify SHM objects.
+/// `XDG_RUNTIME_DIR` and temporary-directory variables never change this identity.
 pub fn lock_dir_for_uid(uid: u32) -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-
-    base.join(format!("{SHM_NAMESPACE}-{uid}"))
+    Path::new("/tmp").join(format!("{SHM_NAMESPACE}-{uid}"))
 }
 
 /// Creates the lock directory if it is missing and refuses it if it is not
@@ -1150,6 +1144,10 @@ fn ensure_private_dir(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/shm/identity.rs"]
+mod lock_identity_tests;
 
 #[cfg(test)]
 mod fleet_lock_tests {

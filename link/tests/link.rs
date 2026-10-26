@@ -67,6 +67,62 @@ impl Drop for Scratch {
 }
 
 #[test]
+fn live_link_ownership_ignores_the_runtime_environment() {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::process::Command;
+
+    const CHILD: &str = "ORBIT_LINK_ENVIRONMENT_TEST";
+    if let Ok(name) = std::env::var(CHILD) {
+        let peer = LinkSegment::open(&name, SPEC).unwrap();
+        assert!(peer.reclaim_if_gone(0).unwrap().is_none());
+        let joined = peer.join("example-peer", "native", 20).unwrap();
+        assert_ne!(joined.lane, 0, "a live owner's lane was stolen");
+        assert!(joined.reclaimed.iter().all(|gone| gone.lane != 0));
+        peer.inbox().write(0, b"still owned").unwrap();
+        peer.inbox().release_lane(joined.lane).unwrap();
+        return;
+    }
+
+    let name = fleet_name("env");
+    let owner = Scratch::segment(&name);
+    let joined = owner.segment.join("example-owner", "native", 10).unwrap();
+    assert_eq!(joined.lane, 0);
+    struct RuntimeDirectory(std::path::PathBuf);
+    impl Drop for RuntimeDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let runtime = RuntimeDirectory(std::env::temp_dir().join(&name));
+    std::fs::DirBuilder::new().mode(0o700).create(&runtime.0).unwrap();
+    for configured in [true, false] {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "live_link_ownership_ignores_the_runtime_environment",
+                "--nocapture",
+            ])
+            .env(CHILD, &name);
+        if configured {
+            command.env("XDG_RUNTIME_DIR", &runtime.0);
+        } else {
+            command.env_remove("XDG_RUNTIME_DIR");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut frame = Vec::new();
+        assert!(owner.segment.inbox().read(joined.lane, &mut frame).unwrap());
+        assert_eq!(frame, b"still owned");
+    }
+}
+
+#[test]
 fn a_named_inbox_is_shared_and_refuses_a_different_shape() {
     let name = fleet_name("map");
     let owner = Scratch::segment(&name);
