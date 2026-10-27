@@ -239,7 +239,13 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
                     slot.clear();
                     return None;
                 }
-                let value = slot.value().to_vec();
+                let Some(value) = slot.value() else {
+                    // Retained slot metadata can be corrupt even when the
+                    // table header is valid. Repair only this locked slot.
+                    slot.clear();
+                    return None;
+                };
+                let value = value.to_vec();
                 if consume {
                     slot.clear();
                 }
@@ -423,8 +429,11 @@ impl<const KEY_CAPACITY: usize> SessionSlot<KEY_CAPACITY> {
             && &self.key[..key.len()] == key
     }
 
-    fn value(&self) -> &[u8] {
-        &self.value[..self.value_len as usize]
+    fn value(&self) -> Option<&[u8]> {
+        if self.value_len == 0 {
+            return None;
+        }
+        self.value.get(..self.value_len as usize)
     }
 
     fn write(
@@ -591,6 +600,93 @@ mod tests {
         let fleet =
             Arc::new(Fleet::join("tls-primitive-unit", 1).expect("fleet"));
         SessionPrimitive::open(&fleet).expect("primitive")
+    }
+
+    #[test]
+    fn malformed_retained_session_get_is_a_miss() {
+        malformed_retained_session(false);
+    }
+
+    #[test]
+    fn malformed_retained_session_take_is_a_miss() {
+        malformed_retained_session(true);
+    }
+
+    fn malformed_retained_session(consume: bool) {
+        use std::sync::atomic::AtomicU64;
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "/rtls-{:x}-{:x}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        struct Cleanup(ShmTable<SERVER_KEY_MAX>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.region.unlink();
+            }
+        }
+        let _cleanup = Cleanup(ShmTable::open_or_create(&name).expect("table"));
+        let open = || ServerSessionPrimitive {
+            backing: Backing::Shm(
+                ShmTable::open_or_create(&name).expect("table"),
+            ),
+        };
+        let domain = b"public";
+        let key = 0_u64.to_le_bytes();
+        let hash = entry_hash(domain, &key);
+        let other = (1_u64..)
+            .map(u64::to_le_bytes)
+            .find(|candidate| {
+                set_index(entry_hash(domain, candidate)) == set_index(hash)
+            })
+            .expect("another key in the same set");
+        let ttl = super::super::DEFAULT_SESSION_TTL;
+
+        for length in [0, VALUE_MAX as u32 + 1, u32::MAX] {
+            let primitive = open();
+            assert!(primitive.put(domain, &key, b"damaged", ttl).unwrap());
+            assert!(primitive.put(domain, &other, b"preserved", ttl).unwrap());
+            primitive
+                .with_slots(|slots| {
+                    let slot = set_slots_mut(slots, hash)
+                        .iter_mut()
+                        .find(|slot| slot.matches(hash, domain, &key))
+                        .expect("stored slot");
+                    slot.value_len = length;
+                })
+                .unwrap();
+            drop(primitive);
+
+            let primitive = open();
+            let result = if consume {
+                primitive.take(domain, &key)
+            } else {
+                primitive.get(domain, &key)
+            };
+            assert_eq!(result.unwrap(), None, "malformed length {length}");
+            assert_eq!(primitive.get(domain, &key).unwrap(), None);
+            assert_eq!(
+                primitive.get(domain, &other).unwrap(),
+                Some(b"preserved".to_vec())
+            );
+            let replacement = vec![7; VALUE_MAX];
+            assert!(primitive.put(domain, &key, &replacement, ttl).unwrap());
+            assert_eq!(
+                primitive.get(domain, &key).unwrap(),
+                Some(replacement.clone())
+            );
+            assert_eq!(
+                primitive.take(domain, &key).unwrap(),
+                Some(replacement)
+            );
+            assert_eq!(primitive.take(domain, &key).unwrap(), None);
+            assert_eq!(
+                primitive.take(domain, &other).unwrap(),
+                Some(b"preserved".to_vec())
+            );
+        }
     }
 
     #[test]
