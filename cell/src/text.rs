@@ -16,10 +16,13 @@ use orbit_core::Fleet;
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
-use crate::{Error, Result, SLOT_EMPTY, SLOT_OCCUPIED, lock_unpoisoned};
+use crate::lifetime::{self, Lease, Owners};
+use crate::{
+    Error, Result, SLOT_EMPTY, SLOT_OCCUPIED, SLOT_RETIRED, lock_unpoisoned,
+};
 
 /// Reserved Orbit SHM kind for the text cell table.
-pub const CELL_TEXT_KIND: u8 = 227;
+pub const CELL_TEXT_KIND: u8 = 190;
 /// Number of text cells one fleet generation can hold at once.
 ///
 /// Compile-time geometry: `ORBIT_CELL_TEXT_CAPACITY`. Must be a power of two.
@@ -39,7 +42,7 @@ pub const CELL_TEXT_MAX: usize = orbit_core::compile::usize_from_env(
 #[cfg(unix)]
 const TEXT_MAGIC: u32 = 0x43_54_58_54; // "CTXT"
 #[cfg(unix)]
-const TEXT_VERSION: u16 = 2;
+const TEXT_VERSION: u16 = 3;
 
 /// The address of one text cell; prints as `text:<slot>:<generation>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,6 +97,7 @@ impl FromStr for TextId {
 pub struct Text {
     table: TextBackend,
     id: TextId,
+    _lease: Arc<Lease>,
 }
 
 impl Text {
@@ -166,7 +170,8 @@ impl Text {
         Ok(total)
     }
 
-    /// Give the cell back; this and every other handle to it go stale.
+    /// Retire this generation immediately. The physical slot remains pinned
+    /// until every handle to the old generation has been dropped.
     pub fn release(self) -> Result<()> {
         self.table.release(self.id)
     }
@@ -273,9 +278,10 @@ impl TextBackend {
         Ok(if fleet.is_shm() {
             #[cfg(unix)]
             {
-                Self::Shm(Arc::new(ShmTextTable::open_or_create(
+                Self::Shm(shm_table(
                     &ring_segment_name(fleet.name(), CELL_TEXT_KIND),
-                )?))
+                    lifetime::owner_capacity(fleet),
+                )?)
             }
             #[cfg(not(unix))]
             unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -291,44 +297,70 @@ impl TextBackend {
         if text.len() > CELL_TEXT_MAX {
             return Err(Error::TooLong { len: text.len(), max: CELL_TEXT_MAX });
         }
-        let id = self.with_structure(|slots, hint| {
+        let (id, lease) = self.with_structure(|slots, hint, owners| {
             let capacity = slots.len();
             let start = hint.load(Ordering::Relaxed) as usize;
-            for offset in 0..capacity {
-                let index = (start + offset) & (capacity - 1);
-                let slot = &slots[index];
-                if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
-                    let generation = slot.install(text.as_bytes());
-                    hint.store(
-                        ((index + 1) & (capacity - 1)) as u32,
-                        Ordering::Relaxed,
-                    );
-                    return Ok(TextId { index: index as u32, generation });
+            let allocate = || -> Result<Option<(TextId, Arc<Lease>)>> {
+                for offset in 0..capacity {
+                    let index = (start + offset) & (capacity - 1);
+                    let slot = &slots[index];
+                    if matches!(
+                        slot.state.load(Ordering::Acquire),
+                        SLOT_EMPTY | SLOT_RETIRED
+                    ) && slot.generation.load(Ordering::Relaxed) != u32::MAX
+                        && !owners.pinned(index)
+                    {
+                        let lease = owners.lease(index)?;
+                        let generation = slot.install(text.as_bytes());
+                        hint.store(
+                            ((index + 1) & (capacity - 1)) as u32,
+                            Ordering::Relaxed,
+                        );
+                        return Ok(Some((
+                            TextId { index: index as u32, generation },
+                            lease,
+                        )));
+                    }
                 }
+                Ok(None)
+            };
+            if let Some(allocated) = allocate()? {
+                return Ok(allocated);
+            }
+            if owners.reclaim_dead()?
+                && let Some(allocated) = allocate()?
+            {
+                return Ok(allocated);
             }
             Err(Error::Full { capacity })
         })?;
-        Ok(Text { table: self.clone(), id })
+        Ok(Text { table: self.clone(), id, _lease: lease })
     }
 
     pub(crate) fn open(
         &self,
         id: TextId,
     ) -> Result<Text> {
-        self.slot(id)?;
-        Ok(Text { table: self.clone(), id })
+        let lease = self.with_structure(|slots, _, owners| {
+            slots
+                .get(id.index as usize)
+                .filter(|slot| slot.is(id))
+                .ok_or(Error::StaleText(id))?;
+            owners.lease(id.index as usize)
+        })?;
+        Ok(Text { table: self.clone(), id, _lease: lease })
     }
 
     pub(crate) fn release(
         &self,
         id: TextId,
     ) -> Result<()> {
-        self.with_structure(|slots, _| {
+        self.with_structure(|slots, _, _| {
             let slot = slots
                 .get(id.index as usize)
                 .filter(|slot| slot.is(id))
                 .ok_or(Error::StaleText(id))?;
-            slot.state.store(SLOT_EMPTY, Ordering::Release);
+            slot.state.store(SLOT_RETIRED, Ordering::Release);
             // An even step keeps the seqlock at rest; waiters find it gone.
             slot.version.fetch_add(2, Ordering::SeqCst);
             slot.wake_waiters();
@@ -344,9 +376,9 @@ impl TextBackend {
     }
 
     pub(crate) fn reset_all(&self) -> Result<()> {
-        self.with_structure(|slots, hint| {
+        self.with_structure(|slots, hint, _| {
             for slot in slots {
-                slot.state.store(SLOT_EMPTY, Ordering::Release);
+                slot.state.store(SLOT_RETIRED, Ordering::Release);
                 slot.version.fetch_add(2, Ordering::SeqCst);
                 slot.wake_waiters();
             }
@@ -359,7 +391,7 @@ impl TextBackend {
     pub(crate) fn unlink(&self) -> Result<()> {
         match self {
             Self::InMemory(_) => self.reset_all(),
-            Self::Shm(table) => table.region.unlink().map_err(Error::Io),
+            Self::Shm(table) => table.shared.region.unlink().map_err(Error::Io),
         }
     }
 
@@ -383,12 +415,12 @@ impl TextBackend {
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[TextSlot], &AtomicU32) -> Result<T>,
+        operation: impl FnOnce(&[TextSlot], &AtomicU32, &Owners) -> Result<T>,
     ) -> Result<T> {
         match self {
             Self::InMemory(table) => {
                 let _local = lock_unpoisoned(&table.structural_lock);
-                operation(&table.slots, &table.hint)
+                operation(&table.slots, &table.hint, &table.owners)
             }
             #[cfg(unix)]
             Self::Shm(table) => table.with_structure(operation),
@@ -410,11 +442,12 @@ struct TextStateHeader {
     capacity: u32,
     slot_size: u32,
     hint: AtomicU32,
-    _reserved: [u8; 44],
+    owners: u32,
+    _reserved: [u8; 40],
 }
 
 impl TextStateHeader {
-    fn new() -> Self {
+    fn new(owners: usize) -> Self {
         Self {
             #[cfg(unix)]
             magic: TEXT_MAGIC,
@@ -428,7 +461,8 @@ impl TextStateHeader {
             capacity: CELL_TEXT_CAPACITY as u32,
             slot_size: size_of::<TextSlot>() as u32,
             hint: AtomicU32::new(0),
-            _reserved: [0; 44],
+            owners: owners as u32,
+            _reserved: [0; 40],
         }
     }
 }
@@ -475,8 +509,11 @@ impl TextSlot {
         &self,
         text: &[u8],
     ) -> u32 {
-        let generation =
-            self.generation.load(Ordering::Relaxed).wrapping_add(1).max(1);
+        let generation = self
+            .generation
+            .load(Ordering::Relaxed)
+            .checked_add(1)
+            .expect("exhausted generations are never reused");
         for (index, byte) in self.bytes.iter().enumerate() {
             byte.store(
                 text.get(index).copied().unwrap_or(0),
@@ -546,6 +583,7 @@ pub(crate) struct MemoryTextTable {
     slots: Vec<TextSlot>,
     hint: AtomicU32,
     structural_lock: Mutex<()>,
+    owners: Owners,
 }
 
 impl MemoryTextTable {
@@ -555,6 +593,7 @@ impl MemoryTextTable {
             slots: (0..CELL_TEXT_CAPACITY).map(|_| TextSlot::empty()).collect(),
             hint: AtomicU32::new(0),
             structural_lock: Mutex::new(()),
+            owners: Owners::memory(CELL_TEXT_CAPACITY),
         }
     }
 }
@@ -578,28 +617,31 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryTextTable> {
 
 #[cfg(unix)]
 pub(crate) struct ShmTextTable {
-    region: ShmRegion,
+    shared: Arc<lifetime::Shared>,
     structural_lock: Mutex<()>,
 }
 
 #[cfg(unix)]
 impl ShmTextTable {
-    fn open_or_create(name: &str) -> Result<Self> {
+    fn open_or_create(
+        name: &str,
+        owners: usize,
+    ) -> Result<Self> {
         use std::{io, ptr};
 
         let (region, _initialization_lock) =
-            ShmRegion::open_or_create_locked(name, shm_segment_size())?;
+            ShmRegion::open_or_create_locked(name, shm_segment_size(owners)?)?;
         if region.created() {
             unsafe {
                 ptr::write(
                     region.as_ptr().cast::<TextStateHeader>(),
-                    TextStateHeader::new(),
+                    TextStateHeader::new(owners),
                 );
                 let slots = region.as_ptr().add(size_of::<TextStateHeader>());
                 ptr::write_bytes(
                     slots,
                     0,
-                    CELL_TEXT_CAPACITY * size_of::<TextSlot>(),
+                    shm_segment_size(owners)? - size_of::<TextStateHeader>(),
                 );
             }
         } else {
@@ -618,6 +660,7 @@ impl ShmTextTable {
                     != size_of::<TextStateHeader>()
                 || header.capacity as usize != CELL_TEXT_CAPACITY
                 || header.slot_size as usize != size_of::<TextSlot>()
+                || header.owners as usize != owners
             {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -627,17 +670,25 @@ impl ShmTextTable {
                 )));
             }
         }
-        Ok(Self { region, structural_lock: Mutex::new(()) })
+        let shared = lifetime::Shared::claim_locked(
+            region,
+            name,
+            owners,
+            CELL_TEXT_CAPACITY,
+            owner_offset(),
+        )?;
+        Ok(Self { shared, structural_lock: Mutex::new(()) })
     }
 
     fn header(&self) -> &TextStateHeader {
-        unsafe { &*self.region.as_ptr().cast::<TextStateHeader>() }
+        unsafe { &*self.shared.region.as_ptr().cast::<TextStateHeader>() }
     }
 
     fn slots(&self) -> &[TextSlot] {
         unsafe {
             std::slice::from_raw_parts(
-                self.region
+                self.shared
+                    .region
                     .as_ptr()
                     .add(size_of::<TextStateHeader>())
                     .cast::<TextSlot>(),
@@ -648,17 +699,43 @@ impl ShmTextTable {
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[TextSlot], &AtomicU32) -> Result<T>,
+        operation: impl FnOnce(&[TextSlot], &AtomicU32, &Owners) -> Result<T>,
     ) -> Result<T> {
+        let owners = Owners::Shared(self.shared.clone());
+        owners.check_process()?;
         let _local = lock_unpoisoned(&self.structural_lock);
-        let _process = self.region.lock_exclusive()?;
-        operation(self.slots(), &self.header().hint)
+        let _process = self.shared.region.lock_exclusive()?;
+        operation(self.slots(), &self.header().hint, &owners)
     }
 }
 
 #[cfg(unix)]
-fn shm_segment_size() -> usize {
+fn owner_offset() -> usize {
     size_of::<TextStateHeader>() + CELL_TEXT_CAPACITY * size_of::<TextSlot>()
+}
+
+#[cfg(unix)]
+fn shm_segment_size(owners: usize) -> Result<usize> {
+    lifetime::segment_size(owner_offset(), CELL_TEXT_CAPACITY, owners)
+}
+
+#[cfg(unix)]
+fn shm_table(
+    name: &str,
+    owners: usize,
+) -> Result<Arc<ShmTextTable>> {
+    static TABLES: LazyLock<Mutex<HashMap<String, Weak<ShmTextTable>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut tables = lock_unpoisoned(&TABLES);
+    tables.retain(|_, table| table.strong_count() != 0);
+    if let Some(table) = tables.get(name).and_then(Weak::upgrade)
+        && table.shared.is_current(owners)
+    {
+        return Ok(table);
+    }
+    let table = Arc::new(ShmTextTable::open_or_create(name, owners)?);
+    tables.insert(name.to_owned(), Arc::downgrade(&table));
+    Ok(table)
 }
 
 const _: () = assert!(CELL_TEXT_CAPACITY.is_power_of_two());
@@ -667,3 +744,49 @@ const _: () = assert!(size_of::<TextStateHeader>() == 64);
 // 16 bytes of fixed fields, then the text, padded to the cache line.
 const _: () =
     assert!(size_of::<TextSlot>() == (16 + CELL_TEXT_MAX).next_multiple_of(64));
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn a_retired_text_writer_cannot_cross_into_a_new_generation() {
+        let fleet = Arc::new(Fleet::join("example", 1).unwrap());
+        let table = TextBackend::new(&fleet).unwrap();
+        let old = table.allocate("old").unwrap();
+        let id = old.id();
+        let held: Vec<_> = (1..CELL_TEXT_CAPACITY)
+            .map(|_| table.allocate("held").unwrap())
+            .collect();
+        let slot = old.slot().unwrap();
+        let write = slot.writer();
+        slot.waiters.fetch_add(1, Ordering::SeqCst);
+        table.release(id).unwrap();
+        assert!(matches!(table.allocate("new"), Err(Error::Full { .. })));
+        slot.write(0, b"late");
+        assert_eq!(slot.waiters.fetch_sub(1, Ordering::SeqCst), 1);
+        drop(write);
+        drop(old);
+        let fresh = table.allocate("new").unwrap();
+        assert_eq!(fresh.id().index(), id.index());
+        assert_ne!(fresh.id().generation(), id.generation());
+        assert_eq!(fresh.slot().unwrap().waiters.load(Ordering::Acquire), 0);
+        assert_eq!(fresh.load().unwrap(), "new");
+        drop(held);
+    }
+
+    #[test]
+    fn exhausted_text_generations_are_never_reissued() {
+        let fleet = Arc::new(Fleet::join("example", 1).unwrap());
+        let table = TextBackend::new(&fleet).unwrap();
+        table
+            .with_structure(|slots, _, _| {
+                for slot in slots {
+                    slot.generation.store(u32::MAX, Ordering::Relaxed);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(table.allocate("new"), Err(Error::Full { .. })));
+    }
+}

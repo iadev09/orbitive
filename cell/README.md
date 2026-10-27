@@ -160,6 +160,34 @@ instead of reaching whoever took the slot next. Cells have no lifetime of
 their own; what allocates one is expected to release it, and the table
 reports `Error::Full` rather than evicting.
 
+Release is logical retirement, not immediate physical reuse. Each allocated or
+opened handle pins its generation; clones share that pin. Operations that
+already passed validation may finish on the retired generation, but a new
+generation cannot occupy its slot until the last old handle drops. Keep handles
+for repeated operations, and drop stale handles when finished. `reset_all`
+retires generations by the same rule. A slot whose generation reaches
+`u32::MAX` is never reused.
+
+Value operations do not acquire pins, locks or owner holds. Opening a handle
+uses the table's structural lock; the last clone's drop releases its pin.
+In SHM, each process holds one kernel lock per table, with bounded owner rows
+recording its pins. A full allocation scan can reclaim a dead owner's row only
+while holding that owner's kernel lock. A live process's pins are preserved,
+even after release. No PID probe, timeout or periodic recovery poll is used.
+Owner death removes abandoned pins, not unreleased values. Open tables and
+handles again after `fork`; inherited SHM handles must not be used in the child.
+
+`ORBIT_CELL_OWNER_CAPACITY` selects the number of SHM owner rows; when omitted,
+the fleet capacity is used. All processes attaching to a table must agree on
+this value. Repeated opens of the same table within one process share its owner
+row. Each row uses one `u32` counter per slot, rounded to a cache-line stride;
+owner capacity exhaustion returns an IO error with `WouldBlock`.
+
+The handle-pinned protocol uses SHM kinds `189` (scalar) and `190` (text), with
+version 3 headers. Earlier kinds `233` and `227` are left untouched. Old and
+new binaries do not share cell tables; applications must coordinate the change
+of protocol. There is no automatic migration, reset or unlink of old tables.
+
 Geometry is compile-time: `ORBIT_CELL_CAPACITY` (a power of two, default
 4096) sizes the table for every binary that opens the fleet. The table is
 current state, not history: the fleet owner clears it with `reset_all` during

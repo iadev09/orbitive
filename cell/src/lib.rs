@@ -7,7 +7,7 @@
 //! without a lock and without publishing a frame. `orbit-counter` is the
 //! keyed sibling; this is memory rather than a dictionary.
 //!
-//! Every id carries the slot's generation. [`Cells::release`] bumps it, so a
+//! Every id carries the slot's generation. [`Cells::release`] retires it, so a
 //! handle kept past a release answers [`Error::Stale`] instead of touching
 //! whoever took the slot next. Cells have no lifetime of their own: what
 //! allocates one is expected to release it.
@@ -23,14 +23,17 @@ use orbit_core::Fleet;
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
+mod lifetime;
 mod text;
+
+use lifetime::{Lease, Owners};
 
 pub use text::{
     CELL_TEXT_CAPACITY, CELL_TEXT_KIND, CELL_TEXT_MAX, Text, TextId,
 };
 
 /// Reserved Orbit SHM kind for the cell table.
-pub const CELL_STATE_KIND: u8 = 233;
+pub const CELL_STATE_KIND: u8 = 189;
 /// Number of cells one fleet generation can hold at once.
 ///
 /// Compile-time geometry: `ORBIT_CELL_CAPACITY` in the application's
@@ -43,6 +46,7 @@ pub const CELL_CAPACITY: usize = orbit_core::compile::usize_from_env(
 
 pub(crate) const SLOT_EMPTY: u8 = 0;
 pub(crate) const SLOT_OCCUPIED: u8 = 1;
+pub(crate) const SLOT_RETIRED: u8 = 2;
 
 /// Whether this build can park on a shared word. A table refuses to open
 /// where it cannot: a sleep loop wearing the shape of a wait is worse
@@ -106,7 +110,7 @@ pub(crate) fn wake_on(word: &AtomicU32) {
 #[cfg(unix)]
 const STATE_MAGIC: u32 = 0x43_45_4c_4c; // "CELL"
 #[cfg(unix)]
-const STATE_VERSION: u16 = 2;
+const STATE_VERSION: u16 = 3;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -137,7 +141,8 @@ pub enum Error {
     },
     /// The update would leave the integer range.
     Overflow,
-    /// Every slot is occupied.
+    /// No slot is reusable: slots may be live, pinned after release, or have
+    /// exhausted their generation range.
     Full {
         capacity: usize,
     },
@@ -169,7 +174,10 @@ impl fmt::Display for Error {
                 f.write_str("cell value is outside the integer range")
             }
             Self::Full { capacity } => {
-                write!(f, "cell table is full: capacity={capacity}")
+                write!(
+                    f,
+                    "cell table has no reusable slot: capacity={capacity}"
+                )
             }
             Self::Malformed(text) => write!(f, "not a cell id: {text:?}"),
             Self::Io(error) => write!(f, "Orbit cell io error: {error}"),
@@ -341,9 +349,10 @@ impl Cells {
         let backend = if fleet.is_shm() {
             #[cfg(unix)]
             {
-                CellBackend::Shm(Arc::new(ShmCellTable::open_or_create(
+                CellBackend::Shm(shm_table(
                     &ring_segment_name(fleet.name(), CELL_STATE_KIND),
-                )?))
+                    lifetime::owner_capacity(&fleet),
+                )?)
             }
             #[cfg(not(unix))]
             unreachable!("non-Unix fleets cannot use POSIX SHM")
@@ -390,24 +399,50 @@ impl Cells {
         &self,
         initial: T,
     ) -> Result<Orbital<T>> {
-        let id = self.with_structure(|slots, hint| {
+        let bits = initial.to_bits();
+        let (id, lease) = self.with_structure(|slots, hint, owners| {
             let capacity = slots.len();
             let start = hint.load(Ordering::Relaxed) as usize;
-            for offset in 0..capacity {
-                let index = (start + offset) & (capacity - 1);
-                let slot = &slots[index];
-                if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
-                    let generation = slot.install(T::TAG, initial.to_bits());
-                    hint.store(
-                        ((index + 1) & (capacity - 1)) as u32,
-                        Ordering::Relaxed,
-                    );
-                    return Ok(CellId { index: index as u32, generation });
+            let allocate = || -> Result<Option<(CellId, Arc<Lease>)>> {
+                for offset in 0..capacity {
+                    let index = (start + offset) & (capacity - 1);
+                    let slot = &slots[index];
+                    if matches!(
+                        slot.state.load(Ordering::Acquire),
+                        SLOT_EMPTY | SLOT_RETIRED
+                    ) && slot.generation.load(Ordering::Relaxed) != u32::MAX
+                        && !owners.pinned(index)
+                    {
+                        let lease = owners.lease(index)?;
+                        let generation = slot.install(T::TAG, bits);
+                        hint.store(
+                            ((index + 1) & (capacity - 1)) as u32,
+                            Ordering::Relaxed,
+                        );
+                        return Ok(Some((
+                            CellId { index: index as u32, generation },
+                            lease,
+                        )));
+                    }
                 }
+                Ok(None)
+            };
+            if let Some(allocated) = allocate()? {
+                return Ok(allocated);
+            }
+            if owners.reclaim_dead()?
+                && let Some(allocated) = allocate()?
+            {
+                return Ok(allocated);
             }
             Err(Error::Full { capacity })
         })?;
-        Ok(Orbital { cells: self.clone(), id, _type: PhantomData })
+        Ok(Orbital {
+            cells: self.clone(),
+            id,
+            _type: PhantomData,
+            _lease: lease,
+        })
     }
 
     /// A handle to a live cell of type `T`.
@@ -415,29 +450,41 @@ impl Cells {
         &self,
         id: CellId,
     ) -> Result<Orbital<T>> {
-        let slot = self.slot(id)?;
-        let found = slot.tag.load(Ordering::Relaxed);
-        if found != T::TAG {
-            return Err(Error::TypeMismatch {
-                id,
-                expected: T::NAME,
-                found: type_name(found),
-            });
-        }
-        Ok(Orbital { cells: self.clone(), id, _type: PhantomData })
-    }
-
-    /// Give the slot back. Every handle to this generation goes stale.
-    pub fn release(
-        &self,
-        id: CellId,
-    ) -> Result<()> {
-        self.with_structure(|slots, _| {
+        let lease = self.with_structure(|slots, _, owners| {
             let slot = slots
                 .get(id.index as usize)
                 .filter(|slot| slot.is(id))
                 .ok_or(Error::Stale(id))?;
-            slot.state.store(SLOT_EMPTY, Ordering::Release);
+            let found = slot.tag.load(Ordering::Relaxed);
+            if found != T::TAG {
+                return Err(Error::TypeMismatch {
+                    id,
+                    expected: T::NAME,
+                    found: type_name(found),
+                });
+            }
+            owners.lease(id.index as usize)
+        })?;
+        Ok(Orbital {
+            cells: self.clone(),
+            id,
+            _type: PhantomData,
+            _lease: lease,
+        })
+    }
+
+    /// Retire this generation immediately. Existing handles go stale, but
+    /// keep its physical slot pinned until their last clone is dropped.
+    pub fn release(
+        &self,
+        id: CellId,
+    ) -> Result<()> {
+        self.with_structure(|slots, _, _| {
+            let slot = slots
+                .get(id.index as usize)
+                .filter(|slot| slot.is(id))
+                .ok_or(Error::Stale(id))?;
+            slot.state.store(SLOT_RETIRED, Ordering::Release);
             // Whoever is parked on it finds the slot gone and answers Stale.
             slot.changed();
             Ok(())
@@ -454,9 +501,9 @@ impl Cells {
 
     /// Clear both tables during quiescent owner boot.
     pub fn reset_all(&self) -> Result<()> {
-        self.with_structure(|slots, hint| {
+        self.with_structure(|slots, hint, _| {
             for slot in slots {
-                slot.state.store(SLOT_EMPTY, Ordering::Release);
+                slot.state.store(SLOT_RETIRED, Ordering::Release);
                 slot.changed();
             }
             hint.store(0, Ordering::Relaxed);
@@ -472,7 +519,7 @@ impl Cells {
         match &self.backend {
             CellBackend::InMemory(_) => self.reset_all()?,
             CellBackend::Shm(table) => {
-                table.region.unlink().map_err(Error::Io)?
+                table.shared.region.unlink().map_err(Error::Io)?
             }
         }
         self.text.unlink()
@@ -498,12 +545,12 @@ impl Cells {
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[CellSlot], &AtomicU32) -> Result<T>,
+        operation: impl FnOnce(&[CellSlot], &AtomicU32, &Owners) -> Result<T>,
     ) -> Result<T> {
         match &self.backend {
             CellBackend::InMemory(table) => {
                 let _local = lock_unpoisoned(&table.structural_lock);
-                operation(&table.slots, &table.hint)
+                operation(&table.slots, &table.hint, &table.owners)
             }
             #[cfg(unix)]
             CellBackend::Shm(table) => table.with_structure(operation),
@@ -529,6 +576,7 @@ pub struct Orbital<T: CellType> {
     cells: Cells,
     id: CellId,
     _type: PhantomData<T>,
+    _lease: Arc<Lease>,
 }
 
 impl<T: CellType> Orbital<T> {
@@ -665,7 +713,8 @@ impl<T: CellType> Orbital<T> {
         Ok(())
     }
 
-    /// Give the cell back; this and every other handle to it go stale.
+    /// Retire the generation. Other handles go stale immediately; the slot
+    /// becomes reusable only when the last old handle is dropped.
     pub fn release(self) -> Result<()> {
         self.cells.release(self.id)
     }
@@ -843,11 +892,12 @@ struct CellStateHeader {
     slot_size: u32,
     /// Where the next allocation starts looking; a hint, never a promise.
     hint: AtomicU32,
-    _reserved: [u8; 44],
+    owners: u32,
+    _reserved: [u8; 40],
 }
 
 impl CellStateHeader {
-    fn new() -> Self {
+    fn new(owners: usize) -> Self {
         Self {
             #[cfg(unix)]
             magic: STATE_MAGIC,
@@ -861,7 +911,8 @@ impl CellStateHeader {
             capacity: CELL_CAPACITY as u32,
             slot_size: size_of::<CellSlot>() as u32,
             hint: AtomicU32::new(0),
-            _reserved: [0; 44],
+            owners: owners as u32,
+            _reserved: [0; 40],
         }
     }
 }
@@ -926,8 +977,11 @@ impl CellSlot {
         tag: u8,
         value: u64,
     ) -> u32 {
-        let generation =
-            self.generation.load(Ordering::Relaxed).wrapping_add(1).max(1);
+        let generation = self
+            .generation
+            .load(Ordering::Relaxed)
+            .checked_add(1)
+            .expect("exhausted generations are never reused");
         self.tag.store(tag, Ordering::Relaxed);
         self.value.store(value, Ordering::Relaxed);
         self.changes.store(0, Ordering::Relaxed);
@@ -949,6 +1003,7 @@ struct MemoryCellTable {
     slots: Vec<CellSlot>,
     hint: AtomicU32,
     structural_lock: Mutex<()>,
+    owners: Owners,
 }
 
 impl MemoryCellTable {
@@ -958,6 +1013,7 @@ impl MemoryCellTable {
             slots: (0..CELL_CAPACITY).map(|_| CellSlot::empty()).collect(),
             hint: AtomicU32::new(0),
             structural_lock: Mutex::new(()),
+            owners: Owners::memory(CELL_CAPACITY),
         }
     }
 }
@@ -981,28 +1037,31 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryCellTable> {
 
 #[cfg(unix)]
 struct ShmCellTable {
-    region: ShmRegion,
+    shared: Arc<lifetime::Shared>,
     structural_lock: Mutex<()>,
 }
 
 #[cfg(unix)]
 impl ShmCellTable {
-    fn open_or_create(name: &str) -> Result<Self> {
+    fn open_or_create(
+        name: &str,
+        owners: usize,
+    ) -> Result<Self> {
         use std::{io, ptr};
 
         let (region, _initialization_lock) =
-            ShmRegion::open_or_create_locked(name, shm_segment_size())?;
+            ShmRegion::open_or_create_locked(name, shm_segment_size(owners)?)?;
         if region.created() {
             unsafe {
                 ptr::write(
                     region.as_ptr().cast::<CellStateHeader>(),
-                    CellStateHeader::new(),
+                    CellStateHeader::new(owners),
                 );
                 let slots = region.as_ptr().add(size_of::<CellStateHeader>());
                 ptr::write_bytes(
                     slots,
                     0,
-                    CELL_CAPACITY * size_of::<CellSlot>(),
+                    shm_segment_size(owners)? - size_of::<CellStateHeader>(),
                 );
             }
         } else {
@@ -1021,6 +1080,7 @@ impl ShmCellTable {
                     != size_of::<CellStateHeader>()
                 || header.capacity as usize != CELL_CAPACITY
                 || header.slot_size as usize != size_of::<CellSlot>()
+                || header.owners as usize != owners
             {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1030,17 +1090,25 @@ impl ShmCellTable {
                 )));
             }
         }
-        Ok(Self { region, structural_lock: Mutex::new(()) })
+        let shared = lifetime::Shared::claim_locked(
+            region,
+            name,
+            owners,
+            CELL_CAPACITY,
+            owner_offset(),
+        )?;
+        Ok(Self { shared, structural_lock: Mutex::new(()) })
     }
 
     fn header(&self) -> &CellStateHeader {
-        unsafe { &*self.region.as_ptr().cast::<CellStateHeader>() }
+        unsafe { &*self.shared.region.as_ptr().cast::<CellStateHeader>() }
     }
 
     fn slots(&self) -> &[CellSlot] {
         unsafe {
             std::slice::from_raw_parts(
-                self.region
+                self.shared
+                    .region
                     .as_ptr()
                     .add(size_of::<CellStateHeader>())
                     .cast::<CellSlot>(),
@@ -1051,17 +1119,43 @@ impl ShmCellTable {
 
     fn with_structure<T>(
         &self,
-        operation: impl FnOnce(&[CellSlot], &AtomicU32) -> Result<T>,
+        operation: impl FnOnce(&[CellSlot], &AtomicU32, &Owners) -> Result<T>,
     ) -> Result<T> {
+        let owners = Owners::Shared(self.shared.clone());
+        owners.check_process()?;
         let _local = lock_unpoisoned(&self.structural_lock);
-        let _process = self.region.lock_exclusive()?;
-        operation(self.slots(), &self.header().hint)
+        let _process = self.shared.region.lock_exclusive()?;
+        operation(self.slots(), &self.header().hint, &owners)
     }
 }
 
 #[cfg(unix)]
-fn shm_segment_size() -> usize {
+fn owner_offset() -> usize {
     size_of::<CellStateHeader>() + CELL_CAPACITY * size_of::<CellSlot>()
+}
+
+#[cfg(unix)]
+fn shm_segment_size(owners: usize) -> Result<usize> {
+    lifetime::segment_size(owner_offset(), CELL_CAPACITY, owners)
+}
+
+#[cfg(unix)]
+fn shm_table(
+    name: &str,
+    owners: usize,
+) -> Result<Arc<ShmCellTable>> {
+    static TABLES: LazyLock<Mutex<HashMap<String, Weak<ShmCellTable>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut tables = lock_unpoisoned(&TABLES);
+    tables.retain(|_, table| table.strong_count() != 0);
+    if let Some(table) = tables.get(name).and_then(Weak::upgrade)
+        && table.shared.is_current(owners)
+    {
+        return Ok(table);
+    }
+    let table = Arc::new(ShmCellTable::open_or_create(name, owners)?);
+    tables.insert(name.to_owned(), Arc::downgrade(&table));
+    Ok(table)
 }
 
 const _: () = assert!(CELL_CAPACITY.is_power_of_two());
@@ -1088,6 +1182,48 @@ mod registry_tests {
         assert!(Arc::strong_count(&fleet) > 1);
         drop(cells);
         assert_eq!(Arc::strong_count(&fleet), 1);
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn a_retired_cell_keeps_old_waiter_accounting_until_its_handles_drop() {
+        let cells =
+            Cells::new(Arc::new(Fleet::join("example", 1).unwrap())).unwrap();
+        let old = cells.allocate(7_u64).unwrap();
+        let id = old.id();
+        let held: Vec<_> = (1..CELL_CAPACITY)
+            .map(|_| cells.allocate(0_u64).unwrap())
+            .collect();
+        let slot = old.slot().unwrap();
+        slot.waiters.fetch_add(1, Ordering::SeqCst);
+        cells.release(id).unwrap();
+        assert!(matches!(cells.allocate(42_u64), Err(Error::Full { .. })));
+        assert_eq!(slot.waiters.fetch_sub(1, Ordering::SeqCst), 1);
+        drop(old);
+        let fresh = cells.allocate(42_u64).unwrap();
+        assert_eq!(fresh.id().index(), id.index());
+        assert_eq!(fresh.slot().unwrap().waiters.load(Ordering::Acquire), 0);
+        assert_eq!(fresh.load().unwrap(), 42);
+        drop(held);
+    }
+
+    #[test]
+    fn exhausted_cell_generations_are_never_reissued() {
+        let cells =
+            Cells::new(Arc::new(Fleet::join("example", 1).unwrap())).unwrap();
+        cells
+            .with_structure(|slots, _, _| {
+                for slot in slots {
+                    slot.generation.store(u32::MAX, Ordering::Relaxed);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(cells.allocate(1_u64), Err(Error::Full { .. })));
     }
 }
 

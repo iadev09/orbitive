@@ -61,21 +61,20 @@ fn a_released_cell_goes_stale_and_its_slot_is_reused_under_a_new_generation() {
     assert!(matches!(cells.open::<i64>(id), Err(Error::Stale(_))));
     assert!(!cells.is_live(id));
 
-    let mut fresh = None;
-    for _ in 0..orbit_cell::CELL_CAPACITY {
-        let cell = cells.allocate(2_i64).expect("allocate");
-        if cell.id().index() == id.index() {
-            fresh = Some(cell);
-            break;
-        }
-    }
-    let fresh = fresh.expect("the released slot is reused within one lap");
+    let held: Vec<_> = (1..orbit_cell::CELL_CAPACITY)
+        .map(|_| cells.allocate(0_u64).expect("fill other slots"))
+        .collect();
+    assert!(matches!(cells.allocate(2_u64), Err(Error::Full { .. })));
+    let clone = kept.clone();
+    drop(kept);
+    assert!(matches!(cells.allocate(2_u64), Err(Error::Full { .. })));
+    drop(clone);
+    let fresh = cells.allocate(2_u64).expect("reuse after last handle");
+    assert_eq!(fresh.id().index(), id.index());
     assert_ne!(fresh.id().generation(), id.generation());
-    assert!(
-        matches!(kept.load(), Err(Error::Stale(_))),
-        "the old handle still does not reach the new occupant"
-    );
+    assert!(matches!(cells.open::<i64>(id), Err(Error::Stale(_))));
     assert_eq!(fresh.load().expect("load"), 2);
+    drop(held);
 }
 
 #[test]
