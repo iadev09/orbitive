@@ -46,7 +46,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-orbitive = { version = "0.5.5", features = ["events"] }
+orbitive = { version = "0.5.9", features = ["events"] }
 ```
 
 Replace `src/main.rs` with:
