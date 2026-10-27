@@ -25,3 +25,7 @@ pub use pool::{
     ActiveRequestPolicy, ClientLease, ClientManager, ClientPool, PoolState,
     PoolStats,
 };
+
+#[cfg(test)]
+#[path = "../tests/support.rs"]
+mod support;

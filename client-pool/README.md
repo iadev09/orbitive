@@ -136,6 +136,15 @@ fleet-wide policy gate requires its own managed shared resource.
 
 ## Cancellation and drain
 
+Before an acquisition returns a lease, its create/recycle reservation belongs
+to that future. Dropping it, including task abort, returns its counters and
+wakes capacity/drain waiters. An interrupted recycle drops the checked-out
+client before returning physical capacity. Successful completion transfers
+ownership to the lease or retained warm client exactly once. These rules also
+cover pending warm creation and the fleet composition's local manager work;
+fleet admission, creation and execution permits retain their own drop guards.
+Dropping a maintainer future does not retire warm clients already committed.
+
 Waiting for admission and executing with an acquired client are separate
 lifecycle states:
 

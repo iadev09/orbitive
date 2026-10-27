@@ -39,10 +39,10 @@ fn options() -> FleetPoolOptions {
     FleetPoolOptions::new(0, 1, 1, 1, 0, 1)
 }
 
-fn pool_with_options(
-    manager: Manager,
+fn pool_with_options<M: ClientManager>(
+    manager: M,
     options: FleetPoolOptions,
-) -> FleetClientPool<Manager> {
+) -> FleetClientPool<M> {
     let fleet = Arc::new(Fleet::join("client-pool-test", 1).expect("fleet"));
     let shared = Arc::new(
         Pool::with_spec(
@@ -75,6 +75,9 @@ fn pool_with_options(
     )
     .expect("client pool")
 }
+
+#[path = "fleet/cancellation.rs"]
+mod cancellation;
 
 fn pool(manager: Manager) -> FleetClientPool<Manager> {
     pool_with_options(manager, options())

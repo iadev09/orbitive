@@ -13,7 +13,14 @@ use crate::{
     AcquireError, ClientPolicy, OptionsError, PoolDirective, PoolOptions,
 };
 
+#[path = "reservation.rs"]
+mod reservation;
+use reservation::Pending;
+
 /// Creates and validates one protocol-specific outbound client.
+///
+/// These futures may be dropped before completion. The manager owns cleanup
+/// of partially created protocol resources; the pool returns its reservation.
 #[async_trait]
 pub trait ClientManager: Send + Sync + 'static {
     type Client: Send + 'static;
@@ -201,53 +208,38 @@ impl<M: ClientManager> ClientPool<M> {
             };
 
             match action {
-                Action::Reuse(mut entry) => {
+                Action::Reuse(entry) => {
+                    let mut pending = Pending::recycle(self, entry);
                     match self
                         .operation(
-                            self.inner.manager.recycle(&mut entry.client),
+                            self.inner.manager.recycle(pending.client()),
                             cancellation,
                         )
                         .await
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => {
-                            self.retire_one();
                             return Err(AcquireError::Manager(error));
                         }
                         Err(interrupted) => {
-                            self.retire_one();
                             return Err(interrupted.acquire_error());
                         }
                     }
-                    return Ok(ClientLease::new(
-                        self.clone(),
-                        entry,
-                        active_policy,
-                    ));
+                    return Ok(pending.lease(active_policy));
                 }
                 Action::Create => {
+                    let pending = Pending::create(self, true);
                     match self
                         .operation(self.inner.manager.create(), cancellation)
                         .await
                     {
                         Ok(Ok(client)) => {
-                            self.finish_create(true, true);
-                            return Ok(ClientLease::new(
-                                self.clone(),
-                                Entry {
-                                    client,
-                                    created_at: Instant::now(),
-                                    idle_since: Instant::now(),
-                                },
-                                active_policy,
-                            ));
+                            return Ok(pending.created(client, active_policy));
                         }
                         Ok(Err(error)) => {
-                            self.finish_create(false, true);
                             return Err(AcquireError::Manager(error));
                         }
                         Err(interrupted) => {
-                            self.finish_create(false, true);
                             return Err(interrupted.acquire_error());
                         }
                     }
@@ -299,27 +291,11 @@ impl<M: ClientManager> ClientPool<M> {
             state.creating += 1;
             state.in_flight += 1;
         }
+        let pending = Pending::create(self, true);
         match self.operation(self.inner.manager.create(), cancellation).await {
-            Ok(Ok(client)) => {
-                self.finish_create(true, true);
-                Ok(ClientLease::new(
-                    self.clone(),
-                    Entry {
-                        client,
-                        created_at: Instant::now(),
-                        idle_since: Instant::now(),
-                    },
-                    active_policy,
-                ))
-            }
-            Ok(Err(error)) => {
-                self.finish_create(false, true);
-                Err(AcquireError::Manager(error))
-            }
-            Err(interrupted) => {
-                self.finish_create(false, true);
-                Err(interrupted.acquire_error())
-            }
+            Ok(Ok(client)) => Ok(pending.created(client, active_policy)),
+            Ok(Err(error)) => Err(AcquireError::Manager(error)),
+            Err(interrupted) => Err(interrupted.acquire_error()),
         }
     }
 
@@ -354,7 +330,7 @@ impl<M: ClientManager> ClientPool<M> {
         active_policy: ActiveRequestPolicy,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ClientLease<M>>, AcquireError<M::Error>> {
-        let mut entry = {
+        let entry = {
             let mut state = self.state();
             self.prune_expired(&mut state);
             if !matches!(&state.status, PoolState::Open) {
@@ -371,24 +347,23 @@ impl<M: ClientManager> ClientPool<M> {
             state.in_flight += 1;
             state.idle.remove(index).expect("idle index came from this queue")
         };
+        let mut pending = Pending::recycle(self, entry);
         match self
             .operation(
-                self.inner.manager.recycle(&mut entry.client),
+                self.inner.manager.recycle(pending.client()),
                 cancellation,
             )
             .await
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                self.retire_one();
                 return Err(AcquireError::Manager(error));
             }
             Err(interrupted) => {
-                self.retire_one();
                 return Err(interrupted.acquire_error());
             }
         }
-        Ok(Some(ClientLease::new(self.clone(), entry, active_policy)))
+        Ok(Some(pending.lease(active_policy)))
     }
 
     #[cfg(feature = "fleet")]
@@ -431,17 +406,19 @@ impl<M: ClientManager> ClientPool<M> {
                 return Ok(());
             }
             if self.reserve_warm_create() {
+                let pending = Pending::create(self, false);
                 match self
                     .operation(self.inner.manager.create(), Some(&cancellation))
                     .await
                 {
-                    Ok(Ok(client)) => self.finish_warm_create(client),
+                    Ok(Ok(client)) => pending.warm(client),
                     Ok(Err(error)) => {
-                        self.finish_create(false, false);
                         return Err(error);
                     }
                     Err(_) => {
-                        self.finish_create(false, false);
+                        // Release the unfinished creation before drain waits
+                        // for the pool's remaining live clients.
+                        drop(pending);
                         self.drain().await;
                         return Ok(());
                     }
@@ -1084,3 +1061,7 @@ fn retirement_deadline<C>(
 #[cfg(test)]
 #[path = "../tests/pool.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/cancellation.rs"]
+mod cancellation_tests;
