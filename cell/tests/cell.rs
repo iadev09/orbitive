@@ -150,11 +150,14 @@ fn text_readers_never_see_a_torn_write() {
         }
     });
     for _ in 0..5_000 {
-        let seen = text.load().expect("load");
-        assert!(
-            seen == "aaaaaaaa" || seen == "bbbbbbbb",
-            "torn read: {seen:?}"
-        );
+        match text.load() {
+            Ok(seen) => assert!(
+                seen == "aaaaaaaa" || seen == "bbbbbbbb",
+                "torn read: {seen:?}"
+            ),
+            Err(Error::Contended) => {}
+            Err(error) => panic!("unexpected read failure: {error}"),
+        }
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     thread.join().expect("writer");

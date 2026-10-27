@@ -38,6 +38,8 @@ impl Wake {
             Ordering::SeqCst,
             |sequence| sequence.checked_add(1),
         );
+        #[cfg(test)]
+        crate::text::tests::at(crate::text::tests::Phase::Sequence);
         crate::wake_on(&self.sequence);
     }
 
@@ -71,7 +73,7 @@ impl Wake {
 
 #[cfg(test)]
 thread_local! {
-    static BEFORE_PARK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static BEFORE_PARK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -126,9 +128,9 @@ mod tests {
                 Self::Scalar(cells.allocate(7_u64).unwrap())
             }
         }
-        fn version(&self) -> u32 {
+        fn version(&self) -> u64 {
             match self {
-                Self::Scalar(c) => c.version().unwrap(),
+                Self::Scalar(c) => u64::from(c.version().unwrap()),
                 Self::Text(c) => c.version().unwrap(),
             }
         }
@@ -146,20 +148,25 @@ mod tests {
         }
         fn wait(
             &self,
-            since: u32,
-        ) -> u32 {
+            since: u64,
+        ) -> u64 {
             match self {
-                Self::Scalar(c) => c.wait_changed(since).unwrap(),
+                Self::Scalar(c) => u64::from(
+                    c.wait_changed(since.try_into().unwrap()).unwrap(),
+                ),
                 Self::Text(c) => c.wait_changed(since).unwrap(),
             }
         }
         fn wait_until(
             &self,
-            since: u32,
+            since: u64,
             stop: &AtomicBool,
-        ) -> Option<u32> {
+        ) -> Option<u64> {
             match self {
-                Self::Scalar(c) => c.wait_changed_until(since, stop).unwrap(),
+                Self::Scalar(c) => c
+                    .wait_changed_until(since.try_into().unwrap(), stop)
+                    .unwrap()
+                    .map(u64::from),
                 Self::Text(c) => c.wait_changed_until(since, stop).unwrap(),
             }
         }

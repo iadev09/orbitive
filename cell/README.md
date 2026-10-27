@@ -68,8 +68,11 @@ holding up to `CELL_TEXT_MAX` bytes of UTF-8 (default 240, sized by
 `ORBIT_CELL_TEXT_CAPACITY` and `ORBIT_CELL_TEXT_MAX`). `load` copies the
 current text, `store` replaces it and `append` extends it atomically with
 respect to every other writer; a write that would not fit is refused whole,
-never cut. Readers go through a seqlock and never observe a torn string. A
-`TextId` prints as `text:<slot>:<generation>`.
+never cut. Writers prepare an inactive bank and atomically publish its full-width
+revision. Readers copy and validate that revision, so no torn string is returned.
+A read that races bank reuse, or a write that finds another writer, returns
+`Error::Contended` after one attempt instead of spinning. A `TextId` prints as
+`text:<slot>:<generation>`.
 
 ## Waiting for a change
 
@@ -107,7 +110,10 @@ loop {
 count has moved past `since` and returns the count now. A million writes
 while the reader is parked wake it once, and `load` gives the latest: this is
 a gauge, not a queue, and nothing in between is retained. The same pair
-exists on `Text`, where the seqlock's own sequence is the count.
+exists on `Text`, where the result is an opaque `u64` committed revision token.
+Pass it back unchanged; do not truncate it or assume consecutive numeric values.
+Text revisions never wrap: further writes return `Error::RevisionExhausted` at
+the limit, while the last committed text remains readable.
 
 The wait is the memory's, not a channel's. Linux futex, FreeBSD umtx and
 macOS `os_sync_wait_on_address` (14.4 and later; earlier releases are refused) key
@@ -194,15 +200,43 @@ this value. Repeated opens of the same table within one process share its owner
 row. Each row uses one `u32` counter per slot, rounded to a cache-line stride;
 owner capacity exhaustion returns an IO error with `WouldBlock`.
 
-The handle-pinned protocol with separate parking generations uses SHM kinds
-`187` (scalar) and `188` (text), with version 4 headers. Scalar slots remain
-64 bytes; text slots use `(20 + CELL_TEXT_MAX)` rounded up to a cache line
-(320 bytes at the default text capacity). Earlier kinds `189`/`190` (v3)
-and `233`/`227` (v2) are left untouched. Old and
-new binaries do not share cell tables; applications must coordinate the change
-of protocol. There is no automatic migration, reset or unlink of old tables.
+The scalar table uses SHM kind `187` with a version 4 header and 64-byte slots.
+The recoverable text table uses kind `186` with a version 5 header. Text slots
+use a 64-byte header plus two banks of `(2 + CELL_TEXT_MAX)` bytes rounded up to
+a cache line each (576 bytes at the default text capacity). Each text owner row
+also has a 64-byte incarnation record before the handle-pin rows. Earlier text
+kind `188` (v4), kinds `189`/`190` (v3), and `233`/`227` (v2) are left untouched.
+Old and new binaries do not share text tables; applications must coordinate this
+text protocol change. The scalar protocol is unchanged. There is no automatic migration, reset or unlink of old tables.
 
 Geometry is compile-time: `ORBIT_CELL_CAPACITY` (a power of two, default
 4096) sizes the table for every binary that opens the fleet. The table is
 current state, not history: the fleet owner clears it with `reset_all` during
 quiescent boot, and nothing about it survives a fleet generation on purpose.
+
+## Text writer recovery
+
+A process dying while it prepares a text update leaves the last committed bank
+readable. If it dies after publication, the new committed text remains readable.
+The abandoned writer descriptor still excludes further writers until recovery;
+reads and revision inspection do not wait for it.
+
+Call `Cells::recover_text_writers()` from the runtime's owner-exit handler. It
+checks exact kernel owner holds under the table's structural lock, finishes any
+pending native wake, and then clears abandoned writer ownership and handle pins.
+It returns the number of recovered writer descriptors. A live or merely slow
+process is never taken over. Repeating recovery is safe and does not publish a
+new text revision. No PID probe, timeout or periodic scan is installed.
+
+The descriptor and its kernel death proof remain attributable until notification
+completes. If a recovery process also dies, the next recovery can finish the same
+notification. Before a process reuses a text owner row, it recovers that row's
+old descriptors and then publishes a fresh, nonwrapping incarnation. An exhausted
+row reports `Error::OwnerExhausted` rather than aliasing an earlier identity.
+
+Kernel owner-hold release does not itself wake a reader parked on the text word.
+The owner-exit callback is therefore required for prompt recovery when no later
+process opens the table. Table opening and allocation pressure also recover dead
+owners on their existing cold paths. In-memory writer guards complete notification
+and release ownership during ordinary unwinding; there is no cross-process owner
+to recover there.

@@ -66,6 +66,15 @@ impl Owners {
     /// Only allocation pressure needs a death scan. No clocks or PID probes.
     /// The caller holds the structural lock throughout recovery and reuse.
     pub(crate) fn reclaim_dead(&self) -> Result<bool> {
+        self.reclaim_dead_with(|_| Ok(()))
+    }
+
+    /// Recovery runs while the exact old row hold and structural lock are
+    /// retained, before its pins can be cleared or its identity reused.
+    pub(crate) fn reclaim_dead_with(
+        &self,
+        mut recover: impl FnMut(usize) -> Result<()>,
+    ) -> Result<bool> {
         self.check_process()?;
         let mut reclaimed = false;
         #[cfg(unix)]
@@ -80,12 +89,15 @@ impl Owners {
                     continue;
                 }
                 if let Some(_hold) = try_hold_lane(&shared.name, owner)? {
+                    recover(owner)?;
                     for count in shared.counts(owner) {
                         reclaimed |= count.swap(0, Ordering::AcqRel) != 0;
                     }
                 }
             }
         }
+        #[cfg(not(unix))]
+        let _ = &mut recover;
         Ok(reclaimed)
     }
 
@@ -138,8 +150,27 @@ impl Shared {
         capacity: usize,
         offset: usize,
     ) -> Result<Arc<Self>> {
+        Self::claim_locked_with(
+            region,
+            name,
+            owners,
+            capacity,
+            offset,
+            |_, _| Ok(()),
+        )
+    }
+
+    pub(crate) fn claim_locked_with(
+        region: ShmRegion,
+        name: &str,
+        owners: usize,
+        capacity: usize,
+        offset: usize,
+        recover: impl FnOnce(usize, &ShmRegion) -> Result<()>,
+    ) -> Result<Arc<Self>> {
         for owner in 0..owners {
             if let Some(hold) = try_hold_lane(name, owner)? {
+                recover(owner, &region)?;
                 let shared = Self {
                     region,
                     name: name.to_owned(),
@@ -167,6 +198,10 @@ impl Shared {
         owners: usize,
     ) -> bool {
         self.pid == std::process::id() && self.owners == owners
+    }
+
+    pub(crate) fn owner(&self) -> usize {
+        self.owner
     }
 
     fn counts(

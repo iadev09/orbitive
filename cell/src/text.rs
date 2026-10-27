@@ -2,14 +2,14 @@
 //!
 //! A text cell holds up to [`CELL_TEXT_MAX`] bytes of UTF-8 in shared memory.
 //! Sixty-four bits can be swapped in one instruction; a string cannot, so a
-//! cell is a seqlock: writers take the cell's own spin bit and bump a version
-//! around their write, readers copy and accept the copy only if the version
-//! held still. Readers never block writers and never see a torn string.
+//! cell publishes an inactive bank with one full-width revision. A bounded
+//! reader validates that revision after copying; contention is explicit.
+//! The last committed bank survives a writer exit before publication.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use orbit_core::Fleet;
@@ -17,13 +17,19 @@ use orbit_core::Fleet;
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
 use crate::lifetime::{self, Lease, Owners};
-use crate::wake::Wake;
 use crate::{
     Error, Result, SLOT_EMPTY, SLOT_OCCUPIED, SLOT_RETIRED, lock_unpoisoned,
 };
 
+mod slot;
+use slot::TextSlot;
+#[cfg(unix)]
+mod owners;
+#[cfg(test)]
+pub(crate) mod tests;
+
 /// Reserved Orbit SHM kind for the text cell table.
-pub const CELL_TEXT_KIND: u8 = 188;
+pub const CELL_TEXT_KIND: u8 = 186;
 /// Number of text cells one fleet generation can hold at once.
 ///
 /// Compile-time geometry: `ORBIT_CELL_TEXT_CAPACITY`. Must be a power of two.
@@ -43,7 +49,7 @@ pub const CELL_TEXT_MAX: usize = orbit_core::compile::usize_from_env(
 #[cfg(unix)]
 const TEXT_MAGIC: u32 = 0x43_54_58_54; // "CTXT"
 #[cfg(unix)]
-const TEXT_VERSION: u16 = 4;
+const TEXT_VERSION: u16 = 5;
 
 /// The address of one text cell; prints as `text:<slot>:<generation>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -106,41 +112,25 @@ impl Text {
         self.id
     }
 
-    /// A copy of the current text.
+    /// A bounded copy of the current text. Returns [`Error::Contended`] if
+    /// another publication reuses its bank while the copy is in progress.
     pub fn load(&self) -> Result<String> {
-        let slot = self.slot()?;
         let mut bytes = vec![0_u8; CELL_TEXT_MAX];
-        loop {
-            let before = slot.version.load(Ordering::Acquire);
-            if before & 1 == 1 {
-                std::hint::spin_loop();
-                continue;
-            }
-            let len = usize::from(slot.len.load(Ordering::Relaxed))
-                .min(CELL_TEXT_MAX);
-            for (target, source) in
-                bytes[..len].iter_mut().zip(&slot.bytes[..len])
-            {
-                *target = source.load(Ordering::Relaxed);
-            }
-            std::sync::atomic::fence(Ordering::Acquire);
-            if slot.version.load(Ordering::Relaxed) == before {
-                bytes.truncate(len);
-                return String::from_utf8(bytes)
-                    .map_err(|_| Error::Corrupt(self.id.to_string()));
-            }
-        }
+        let len = self.slot()?.copy(self.id, &mut bytes)?;
+        bytes.truncate(len);
+        String::from_utf8(bytes)
+            .map_err(|_| Error::Corrupt(self.id.to_string()))
     }
 
     pub fn len(&self) -> Result<usize> {
-        Ok(usize::from(self.slot()?.len.load(Ordering::Acquire)))
+        self.slot()?.copy(self.id, &mut [])
     }
 
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
     }
 
-    /// Replace the text.
+    /// Replace the text. A live writer causes [`Error::Contended`], not a spin.
     pub fn store(
         &self,
         text: &str,
@@ -149,26 +139,20 @@ impl Text {
             return Err(Error::TooLong { len: text.len(), max: CELL_TEXT_MAX });
         }
         let slot = self.slot()?;
-        let _write = slot.writer();
-        slot.write(0, text.as_bytes());
+        slot.writer(self.table.writer_token())?
+            .write(text.as_bytes(), false)?;
         Ok(())
     }
 
-    /// Append to the text, atomically with respect to every other writer;
-    /// refused whole, never cut, when the result would not fit.
+    /// Append by publishing a complete new bank. A refused write changes
+    /// neither the committed value nor its revision.
     pub fn append(
         &self,
         text: &str,
     ) -> Result<usize> {
-        let slot = self.slot()?;
-        let _write = slot.writer();
-        let current = usize::from(slot.len.load(Ordering::Relaxed));
-        let total = current + text.len();
-        if total > CELL_TEXT_MAX {
-            return Err(Error::TooLong { len: total, max: CELL_TEXT_MAX });
-        }
-        slot.write(current, text.as_bytes());
-        Ok(total)
+        self.slot()?
+            .writer(self.table.writer_token())?
+            .write(text.as_bytes(), true)
     }
 
     /// Retire this generation immediately. The physical slot remains pinned
@@ -177,17 +161,10 @@ impl Text {
         self.table.release(self.id)
     }
 
-    /// The seqlock sequence at rest, the thing [`Self::wait_changed`] waits
-    /// on. Take it before [`Self::load`] and the wait misses nothing.
-    pub fn version(&self) -> Result<u32> {
-        let slot = self.slot()?;
-        loop {
-            let version = slot.version.load(Ordering::Acquire);
-            if version & 1 == 0 {
-                return Ok(version);
-            }
-            std::hint::spin_loop();
-        }
+    /// The full-width committed revision token. Compare for equality; do not
+    /// truncate it or interpret its bank bit as an in-progress marker.
+    pub fn version(&self) -> Result<u64> {
+        Ok(self.slot()?.committed.load(Ordering::Acquire))
     }
 
     /// Park until the text has been written since `since`, then return the
@@ -195,20 +172,18 @@ impl Text {
     /// [`Error::StaleText`]. Blocking; an async runtime wraps it.
     pub fn wait_changed(
         &self,
-        since: u32,
-    ) -> Result<u32> {
+        since: u64,
+    ) -> Result<u64> {
         loop {
             let slot = self.slot()?;
-            let now = slot.version.load(Ordering::SeqCst);
+            let now = slot.committed.load(Ordering::SeqCst);
             if now != since {
-                if now & 1 == 1 {
-                    std::hint::spin_loop();
-                    continue;
-                }
                 return Ok(now);
             }
-            slot.wake
-                .wait_if(|| slot.version.load(Ordering::SeqCst) == since)?;
+            slot.wake.wait_if(|| {
+                slot.state.load(Ordering::SeqCst) == SLOT_OCCUPIED
+                    && slot.committed.load(Ordering::SeqCst) == since
+            })?;
         }
     }
 
@@ -216,29 +191,26 @@ impl Text {
     /// means the interrupt arrived, not that time ran out — nothing here
     /// measures time. The canceller sets `interrupt`, then calls
     /// [`Self::wake_waiters`]. The wake advances a separate parking generation;
-    /// it does not change the text or its seqlock version.
+    /// it does not change the text or its committed revision.
     pub fn wait_changed_until(
         &self,
-        since: u32,
+        since: u64,
         interrupt: &core::sync::atomic::AtomicBool,
-    ) -> Result<Option<u32>> {
+    ) -> Result<Option<u64>> {
         loop {
             if interrupt.load(Ordering::SeqCst) {
                 return Ok(None);
             }
 
             let slot = self.slot()?;
-            let now = slot.version.load(Ordering::SeqCst);
+            let now = slot.committed.load(Ordering::SeqCst);
             if now != since {
-                if now & 1 == 1 {
-                    std::hint::spin_loop();
-                    continue;
-                }
                 return Ok(Some(now));
             }
 
             slot.wake.wait_if(|| {
-                slot.version.load(Ordering::SeqCst) == since
+                slot.state.load(Ordering::SeqCst) == SLOT_OCCUPIED
+                    && slot.committed.load(Ordering::SeqCst) == since
                     && !interrupt.load(Ordering::SeqCst)
             })?;
         }
@@ -298,6 +270,7 @@ impl TextBackend {
                         slot.state.load(Ordering::Acquire),
                         SLOT_EMPTY | SLOT_RETIRED
                     ) && slot.generation.load(Ordering::Relaxed) != u32::MAX
+                        && slot.writer.load(Ordering::Acquire) == 0
                         && !owners.pinned(index)
                     {
                         let lease = owners.lease(index)?;
@@ -317,7 +290,7 @@ impl TextBackend {
             if let Some(allocated) = allocate()? {
                 return Ok(allocated);
             }
-            if owners.reclaim_dead()?
+            if self.reclaim_dead(owners)?
                 && let Some(allocated) = allocate()?
             {
                 return Ok(allocated);
@@ -350,10 +323,8 @@ impl TextBackend {
                 .get(id.index as usize)
                 .filter(|slot| slot.is(id))
                 .ok_or(Error::StaleText(id))?;
-            slot.state.store(SLOT_RETIRED, Ordering::Release);
-            // An even step keeps the seqlock at rest; waiters find it gone.
-            slot.version.fetch_add(2, Ordering::SeqCst);
-            slot.wake_waiters();
+            slot.state.store(SLOT_RETIRED, Ordering::SeqCst);
+            slot.wake.changed();
             Ok(())
         })
     }
@@ -368,9 +339,8 @@ impl TextBackend {
     pub(crate) fn reset_all(&self) -> Result<()> {
         self.with_structure(|slots, hint, _| {
             for slot in slots {
-                slot.state.store(SLOT_RETIRED, Ordering::Release);
-                slot.version.fetch_add(2, Ordering::SeqCst);
-                slot.wake_waiters();
+                slot.state.store(SLOT_RETIRED, Ordering::SeqCst);
+                slot.wake.changed();
             }
             hint.store(0, Ordering::Relaxed);
             Ok(())
@@ -383,6 +353,46 @@ impl TextBackend {
             Self::InMemory(_) => self.reset_all(),
             Self::Shm(table) => table.shared.region.unlink().map_err(Error::Io),
         }
+    }
+
+    fn writer_token(&self) -> u64 {
+        match self {
+            Self::InMemory(_) => 1,
+            #[cfg(unix)]
+            Self::Shm(table) => table.token,
+        }
+    }
+
+    fn reclaim_dead(
+        &self,
+        owners: &Owners,
+    ) -> Result<bool> {
+        owners.reclaim_dead_with(|owner| {
+            #[cfg(unix)]
+            if let Self::Shm(table) = self {
+                owners::recover(&table.shared.region, owner)?;
+            }
+            #[cfg(not(unix))]
+            let _ = owner;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn recover_writers(&self) -> Result<usize> {
+        let mut recovered = 0;
+        self.with_structure(|_, _, pins| {
+            pins.reclaim_dead_with(|owner| {
+                #[cfg(unix)]
+                if let Self::Shm(table) = self {
+                    recovered += owners::recover(&table.shared.region, owner)?;
+                }
+                #[cfg(not(unix))]
+                let _ = owner;
+                Ok(())
+            })?;
+            Ok(())
+        })?;
+        Ok(recovered)
     }
 
     fn slots(&self) -> &[TextSlot] {
@@ -457,113 +467,6 @@ impl TextStateHeader {
     }
 }
 
-/// One text cell in shared memory: a seqlock version, a writer bit, a
-/// length and the bytes, padded to the cache line.
-#[repr(C, align(64))]
-struct TextSlot {
-    state: AtomicU8,
-    writer: AtomicU8,
-    len: AtomicU16,
-    generation: AtomicU32,
-    /// Public seqlock sequence: odd while a write is in progress. Native
-    /// parking uses the separate sequence in `wake`.
-    version: AtomicU32,
-    /// Native parking sequence and waiter count, separate from `version`.
-    wake: Wake,
-    bytes: [AtomicU8; CELL_TEXT_MAX],
-}
-
-impl TextSlot {
-    fn empty() -> Self {
-        Self {
-            state: AtomicU8::new(SLOT_EMPTY),
-            writer: AtomicU8::new(0),
-            len: AtomicU16::new(0),
-            generation: AtomicU32::new(0),
-            version: AtomicU32::new(0),
-            wake: Wake::new(),
-            bytes: std::array::from_fn(|_| AtomicU8::new(0)),
-        }
-    }
-
-    fn is(
-        &self,
-        id: TextId,
-    ) -> bool {
-        self.state.load(Ordering::Acquire) == SLOT_OCCUPIED
-            && self.generation.load(Ordering::Relaxed) == id.generation
-    }
-
-    /// Under the structural lock.
-    fn install(
-        &self,
-        text: &[u8],
-    ) -> u32 {
-        let generation = self
-            .generation
-            .load(Ordering::Relaxed)
-            .checked_add(1)
-            .expect("exhausted generations are never reused");
-        for (index, byte) in self.bytes.iter().enumerate() {
-            byte.store(
-                text.get(index).copied().unwrap_or(0),
-                Ordering::Relaxed,
-            );
-        }
-        self.len.store(text.len() as u16, Ordering::Relaxed);
-        self.version.store(0, Ordering::Relaxed);
-        self.wake.reset();
-        self.writer.store(0, Ordering::Relaxed);
-        self.generation.store(generation, Ordering::Relaxed);
-        self.state.store(SLOT_OCCUPIED, Ordering::Release);
-        generation
-    }
-
-    /// The cell's writer bit, held for the duration of one write.
-    fn writer(&self) -> WriterGuard<'_> {
-        while self
-            .writer
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            std::hint::spin_loop();
-        }
-        WriterGuard(self)
-    }
-
-    /// Write `bytes` at `offset` and publish the new length; the caller holds
-    /// the writer bit and has checked the fit.
-    fn write(
-        &self,
-        offset: usize,
-        bytes: &[u8],
-    ) {
-        debug_assert!(offset + bytes.len() <= CELL_TEXT_MAX);
-        self.version.fetch_add(1, Ordering::AcqRel);
-        for (target, source) in
-            self.bytes[offset..offset + bytes.len()].iter().zip(bytes)
-        {
-            target.store(*source, Ordering::Relaxed);
-        }
-        self.len.store((offset + bytes.len()) as u16, Ordering::Relaxed);
-        self.version.fetch_add(1, Ordering::SeqCst);
-        self.wake_waiters();
-    }
-
-    /// The sequence moved: wake whoever parked on it, if anyone did.
-    fn wake_waiters(&self) {
-        self.wake.changed();
-    }
-}
-
-struct WriterGuard<'a>(&'a TextSlot);
-
-impl Drop for WriterGuard<'_> {
-    fn drop(&mut self) {
-        self.0.writer.store(0, Ordering::Release);
-    }
-}
-
 pub(crate) struct MemoryTextTable {
     /// Held so the fleet's address, which keys the registry, cannot be
     /// reused by another fleet while this table lives.
@@ -606,6 +509,7 @@ fn memory_table(fleet: &Arc<Fleet>) -> Arc<MemoryTextTable> {
 #[cfg(unix)]
 pub(crate) struct ShmTextTable {
     shared: Arc<lifetime::Shared>,
+    token: u64,
     structural_lock: Mutex<()>,
 }
 
@@ -658,14 +562,16 @@ impl ShmTextTable {
                 )));
             }
         }
-        let shared = lifetime::Shared::claim_locked(
+        let shared = lifetime::Shared::claim_locked_with(
             region,
             name,
             owners,
             CELL_TEXT_CAPACITY,
-            owner_offset(),
+            owners::pins_offset(owners)?,
+            |owner, region| owners::claim(region, owner),
         )?;
-        Ok(Self { shared, structural_lock: Mutex::new(()) })
+        let token = owners::token(&shared.region, shared.owner());
+        Ok(Self { shared, token, structural_lock: Mutex::new(()) })
     }
 
     fn header(&self) -> &TextStateHeader {
@@ -673,16 +579,7 @@ impl ShmTextTable {
     }
 
     fn slots(&self) -> &[TextSlot] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self.shared
-                    .region
-                    .as_ptr()
-                    .add(size_of::<TextStateHeader>())
-                    .cast::<TextSlot>(),
-                CELL_TEXT_CAPACITY,
-            )
-        }
+        owners::slots(&self.shared.region)
     }
 
     fn with_structure<T>(
@@ -698,13 +595,12 @@ impl ShmTextTable {
 }
 
 #[cfg(unix)]
-fn owner_offset() -> usize {
-    size_of::<TextStateHeader>() + CELL_TEXT_CAPACITY * size_of::<TextSlot>()
-}
-
-#[cfg(unix)]
 fn shm_segment_size(owners: usize) -> Result<usize> {
-    lifetime::segment_size(owner_offset(), CELL_TEXT_CAPACITY, owners)
+    lifetime::segment_size(
+        owners::pins_offset(owners)?,
+        CELL_TEXT_CAPACITY,
+        owners,
+    )
 }
 
 #[cfg(unix)]
@@ -729,55 +625,3 @@ fn shm_table(
 const _: () = assert!(CELL_TEXT_CAPACITY.is_power_of_two());
 const _: () = assert!(CELL_TEXT_MAX > 0 && CELL_TEXT_MAX <= u16::MAX as usize);
 const _: () = assert!(size_of::<TextStateHeader>() == 64);
-// 20 bytes of fixed fields, then the text, padded to the cache line.
-const _: () =
-    assert!(size_of::<TextSlot>() == (20 + CELL_TEXT_MAX).next_multiple_of(64));
-
-#[cfg(test)]
-mod lifetime_tests {
-    use super::*;
-
-    #[test]
-    fn a_retired_text_writer_cannot_cross_into_a_new_generation() {
-        let fleet = Arc::new(Fleet::join("example", 1).unwrap());
-        let table = TextBackend::new(&fleet).unwrap();
-        let old = table.allocate("old").unwrap();
-        let id = old.id();
-        let held: Vec<_> = (1..CELL_TEXT_CAPACITY)
-            .map(|_| table.allocate("held").unwrap())
-            .collect();
-        let slot = old.slot().unwrap();
-        let write = slot.writer();
-        slot.wake.waiters.fetch_add(1, Ordering::SeqCst);
-        table.release(id).unwrap();
-        assert!(matches!(table.allocate("new"), Err(Error::Full { .. })));
-        slot.write(0, b"late");
-        assert_eq!(slot.wake.waiters.fetch_sub(1, Ordering::SeqCst), 1);
-        drop(write);
-        drop(old);
-        let fresh = table.allocate("new").unwrap();
-        assert_eq!(fresh.id().index(), id.index());
-        assert_ne!(fresh.id().generation(), id.generation());
-        assert_eq!(
-            fresh.slot().unwrap().wake.waiters.load(Ordering::Acquire),
-            0
-        );
-        assert_eq!(fresh.load().unwrap(), "new");
-        drop(held);
-    }
-
-    #[test]
-    fn exhausted_text_generations_are_never_reissued() {
-        let fleet = Arc::new(Fleet::join("example", 1).unwrap());
-        let table = TextBackend::new(&fleet).unwrap();
-        table
-            .with_structure(|slots, _, _| {
-                for slot in slots {
-                    slot.generation.store(u32::MAX, Ordering::Relaxed);
-                }
-                Ok(())
-            })
-            .unwrap();
-        assert!(matches!(table.allocate("new"), Err(Error::Full { .. })));
-    }
-}

@@ -146,6 +146,13 @@ pub enum Error {
     /// The native parking generation reached its limit. Value access still
     /// works; release and reallocate to obtain a new parking generation.
     WakeExhausted,
+    /// A bounded text read raced bank reuse, or another live writer holds
+    /// the cell. The operation does not spin or wait for that writer.
+    Contended,
+    /// The full-width text publication sequence cannot advance without ABA.
+    RevisionExhausted,
+    /// A text owner row cannot mint another distinct incarnation.
+    OwnerExhausted,
     /// No slot is reusable: slots may be live, pinned after release, or have
     /// exhausted their generation range.
     Full {
@@ -180,6 +187,13 @@ impl fmt::Display for Error {
             }
             Self::WakeExhausted => {
                 f.write_str("cell parking generation is exhausted")
+            }
+            Self::Contended => f.write_str("text cell is contended"),
+            Self::RevisionExhausted => {
+                f.write_str("text publication sequence is exhausted")
+            }
+            Self::OwnerExhausted => {
+                f.write_str("text owner incarnation is exhausted")
             }
             Self::Full { capacity } => {
                 write!(
@@ -377,6 +391,18 @@ impl Cells {
         initial: &str,
     ) -> Result<Text> {
         self.text.allocate(initial)
+    }
+
+    /// Recover abandoned text writers after an owner-exit notification.
+    ///
+    /// Takes only kernel holds whose owners have gone, completes their wake
+    /// before clearing ownership, and preserves the last committed text.
+    /// This cold-path hook does not infer death from a PID or elapsed time.
+    /// Call it from the runtime's process-exit handler; no polling is installed.
+    /// Returns the number of recovered writer descriptors. In-memory tables
+    /// use RAII for unwinding and have no dead process owners to recover.
+    pub fn recover_text_writers(&self) -> Result<usize> {
+        self.text.recover_writers()
     }
 
     /// A handle to a live text cell.
