@@ -17,12 +17,13 @@ use orbit_core::Fleet;
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
 use crate::lifetime::{self, Lease, Owners};
+use crate::wake::Wake;
 use crate::{
     Error, Result, SLOT_EMPTY, SLOT_OCCUPIED, SLOT_RETIRED, lock_unpoisoned,
 };
 
 /// Reserved Orbit SHM kind for the text cell table.
-pub const CELL_TEXT_KIND: u8 = 190;
+pub const CELL_TEXT_KIND: u8 = 188;
 /// Number of text cells one fleet generation can hold at once.
 ///
 /// Compile-time geometry: `ORBIT_CELL_TEXT_CAPACITY`. Must be a power of two.
@@ -42,7 +43,7 @@ pub const CELL_TEXT_MAX: usize = orbit_core::compile::usize_from_env(
 #[cfg(unix)]
 const TEXT_MAGIC: u32 = 0x43_54_58_54; // "CTXT"
 #[cfg(unix)]
-const TEXT_VERSION: u16 = 3;
+const TEXT_VERSION: u16 = 4;
 
 /// The address of one text cell; prints as `text:<slot>:<generation>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -206,21 +207,16 @@ impl Text {
                 }
                 return Ok(now);
             }
-            slot.waiters.fetch_add(1, Ordering::SeqCst);
-            let outcome = if slot.version.load(Ordering::SeqCst) == since {
-                crate::wait_on(&slot.version, since)
-            } else {
-                Ok(())
-            };
-            slot.waiters.fetch_sub(1, Ordering::SeqCst);
-            outcome?;
+            slot.wake
+                .wait_if(|| slot.version.load(Ordering::SeqCst) == since)?;
         }
     }
 
     /// [`Self::wait_changed`], but a second word can end it. `Ok(None)`
     /// means the interrupt arrived, not that time ran out — nothing here
     /// measures time. The canceller sets `interrupt`, then calls
-    /// [`Self::wake_waiters`].
+    /// [`Self::wake_waiters`]. The wake advances a separate parking generation;
+    /// it does not change the text or its seqlock version.
     pub fn wait_changed_until(
         &self,
         since: u32,
@@ -241,23 +237,17 @@ impl Text {
                 return Ok(Some(now));
             }
 
-            slot.waiters.fetch_add(1, Ordering::SeqCst);
-            let outcome = if slot.version.load(Ordering::SeqCst) == since
-                && !interrupt.load(Ordering::SeqCst)
-            {
-                crate::wait_on(&slot.version, since)
-            } else {
-                Ok(())
-            };
-            slot.waiters.fetch_sub(1, Ordering::SeqCst);
-            outcome?;
+            slot.wake.wait_if(|| {
+                slot.version.load(Ordering::SeqCst) == since
+                    && !interrupt.load(Ordering::SeqCst)
+            })?;
         }
     }
 
     /// Wake everyone parked on this text cell without appending to it.
     /// Only useful after the word the waiter also watches has been set.
     pub fn wake_waiters(&self) -> Result<()> {
-        crate::wake_on(&self.slot()?.version);
+        self.slot()?.wake.notify();
         Ok(())
     }
 
@@ -475,11 +465,11 @@ struct TextSlot {
     writer: AtomicU8,
     len: AtomicU16,
     generation: AtomicU32,
-    /// The seqlock's sequence: odd while a write is in progress, and the
-    /// word a waiter parks on, since every write moves it.
+    /// Public seqlock sequence: odd while a write is in progress. Native
+    /// parking uses the separate sequence in `wake`.
     version: AtomicU32,
-    /// Waiters parked on `version`; a writer wakes only when nonzero.
-    waiters: AtomicU32,
+    /// Native parking sequence and waiter count, separate from `version`.
+    wake: Wake,
     bytes: [AtomicU8; CELL_TEXT_MAX],
 }
 
@@ -491,7 +481,7 @@ impl TextSlot {
             len: AtomicU16::new(0),
             generation: AtomicU32::new(0),
             version: AtomicU32::new(0),
-            waiters: AtomicU32::new(0),
+            wake: Wake::new(),
             bytes: std::array::from_fn(|_| AtomicU8::new(0)),
         }
     }
@@ -522,7 +512,7 @@ impl TextSlot {
         }
         self.len.store(text.len() as u16, Ordering::Relaxed);
         self.version.store(0, Ordering::Relaxed);
-        self.waiters.store(0, Ordering::Relaxed);
+        self.wake.reset();
         self.writer.store(0, Ordering::Relaxed);
         self.generation.store(generation, Ordering::Relaxed);
         self.state.store(SLOT_OCCUPIED, Ordering::Release);
@@ -562,9 +552,7 @@ impl TextSlot {
 
     /// The sequence moved: wake whoever parked on it, if anyone did.
     fn wake_waiters(&self) {
-        if self.waiters.load(Ordering::SeqCst) > 0 {
-            crate::wake_on(&self.version);
-        }
+        self.wake.changed();
     }
 }
 
@@ -741,9 +729,9 @@ fn shm_table(
 const _: () = assert!(CELL_TEXT_CAPACITY.is_power_of_two());
 const _: () = assert!(CELL_TEXT_MAX > 0 && CELL_TEXT_MAX <= u16::MAX as usize);
 const _: () = assert!(size_of::<TextStateHeader>() == 64);
-// 16 bytes of fixed fields, then the text, padded to the cache line.
+// 20 bytes of fixed fields, then the text, padded to the cache line.
 const _: () =
-    assert!(size_of::<TextSlot>() == (16 + CELL_TEXT_MAX).next_multiple_of(64));
+    assert!(size_of::<TextSlot>() == (20 + CELL_TEXT_MAX).next_multiple_of(64));
 
 #[cfg(test)]
 mod lifetime_tests {
@@ -760,17 +748,20 @@ mod lifetime_tests {
             .collect();
         let slot = old.slot().unwrap();
         let write = slot.writer();
-        slot.waiters.fetch_add(1, Ordering::SeqCst);
+        slot.wake.waiters.fetch_add(1, Ordering::SeqCst);
         table.release(id).unwrap();
         assert!(matches!(table.allocate("new"), Err(Error::Full { .. })));
         slot.write(0, b"late");
-        assert_eq!(slot.waiters.fetch_sub(1, Ordering::SeqCst), 1);
+        assert_eq!(slot.wake.waiters.fetch_sub(1, Ordering::SeqCst), 1);
         drop(write);
         drop(old);
         let fresh = table.allocate("new").unwrap();
         assert_eq!(fresh.id().index(), id.index());
         assert_ne!(fresh.id().generation(), id.generation());
-        assert_eq!(fresh.slot().unwrap().waiters.load(Ordering::Acquire), 0);
+        assert_eq!(
+            fresh.slot().unwrap().wake.waiters.load(Ordering::Acquire),
+            0
+        );
         assert_eq!(fresh.load().unwrap(), "new");
         drop(held);
     }

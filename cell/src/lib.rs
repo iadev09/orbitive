@@ -25,15 +25,17 @@ use orbit_core::shm::{ShmRegion, ring_segment_name};
 
 mod lifetime;
 mod text;
+mod wake;
 
 use lifetime::{Lease, Owners};
+use wake::Wake;
 
 pub use text::{
     CELL_TEXT_CAPACITY, CELL_TEXT_KIND, CELL_TEXT_MAX, Text, TextId,
 };
 
 /// Reserved Orbit SHM kind for the cell table.
-pub const CELL_STATE_KIND: u8 = 189;
+pub const CELL_STATE_KIND: u8 = 187;
 /// Number of cells one fleet generation can hold at once.
 ///
 /// Compile-time geometry: `ORBIT_CELL_CAPACITY` in the application's
@@ -110,7 +112,7 @@ pub(crate) fn wake_on(word: &AtomicU32) {
 #[cfg(unix)]
 const STATE_MAGIC: u32 = 0x43_45_4c_4c; // "CELL"
 #[cfg(unix)]
-const STATE_VERSION: u16 = 3;
+const STATE_VERSION: u16 = 4;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -141,6 +143,9 @@ pub enum Error {
     },
     /// The update would leave the integer range.
     Overflow,
+    /// The native parking generation reached its limit. Value access still
+    /// works; release and reallocate to obtain a new parking generation.
+    WakeExhausted,
     /// No slot is reusable: slots may be live, pinned after release, or have
     /// exhausted their generation range.
     Full {
@@ -172,6 +177,9 @@ impl fmt::Display for Error {
             }
             Self::Overflow => {
                 f.write_str("cell value is outside the integer range")
+            }
+            Self::WakeExhausted => {
+                f.write_str("cell parking generation is exhausted")
             }
             Self::Full { capacity } => {
                 write!(
@@ -629,14 +637,8 @@ impl<T: CellType> Orbital<T> {
             if now != since {
                 return Ok(now);
             }
-            slot.waiters.fetch_add(1, Ordering::SeqCst);
-            let outcome = if slot.changes.load(Ordering::SeqCst) == since {
-                wait_on(&slot.changes, since)
-            } else {
-                Ok(())
-            };
-            slot.waiters.fetch_sub(1, Ordering::SeqCst);
-            outcome?;
+            slot.wake
+                .wait_if(|| slot.changes.load(Ordering::SeqCst) == since)?;
         }
     }
 
@@ -673,8 +675,9 @@ impl<T: CellType> Orbital<T> {
     ///
     /// The canceller sets `interrupt` and then calls
     /// [`Self::wake_waiters`], in that order. Set-then-wake is what closes
-    /// the window: a waiter that had already parked is released by the
-    /// wake, and one that had not yet parked sees the flag instead.
+    /// the window: the wake advances a separate parking generation before
+    /// waking. A waiter either sees the flag or cannot park on the old
+    /// generation. Neither the value nor its version is changed by cancellation.
     pub fn wait_changed_until(
         &self,
         since: u32,
@@ -691,25 +694,19 @@ impl<T: CellType> Orbital<T> {
                 return Ok(Some(now));
             }
 
-            slot.waiters.fetch_add(1, Ordering::SeqCst);
-            let outcome = if slot.changes.load(Ordering::SeqCst) == since
-                && !interrupt.load(Ordering::SeqCst)
-            {
-                wait_on(&slot.changes, since)
-            } else {
-                Ok(())
-            };
-            slot.waiters.fetch_sub(1, Ordering::SeqCst);
-            outcome?;
+            slot.wake.wait_if(|| {
+                slot.changes.load(Ordering::SeqCst) == since
+                    && !interrupt.load(Ordering::SeqCst)
+            })?;
         }
     }
 
     /// Wake everyone parked on this cell without writing to it. On its own
-    /// this changes nothing — a waiter re-checks the count, finds it where
-    /// it was and parks again — so it is only useful after the word the
+    /// this does not change the value version — a waiter re-checks it, finds
+    /// it where it was and parks again — so it is only useful after the word the
     /// waiter also watches has been set. See [`Self::wait_changed_until`].
     pub fn wake_waiters(&self) -> Result<()> {
-        wake_on(&self.slot()?.changes);
+        self.slot()?.wake.notify();
         Ok(())
     }
 
@@ -927,13 +924,12 @@ struct CellSlot {
     _reserved: [u8; 2],
     generation: AtomicU32,
     value: AtomicU64,
-    /// Bumped by every write and by release: the word a waiter parks on.
-    /// Linux futex wants 32 bits, so the value itself cannot be that word.
+    /// Public value version, bumped by every write and release. Native
+    /// parking uses the separate sequence in `wake`.
     changes: AtomicU32,
-    /// Waiters parked on `changes`; a writer wakes only when this is nonzero,
-    /// so the write path costs one extra load when nobody is listening.
-    waiters: AtomicU32,
-    _padding: [u8; 40],
+    /// Native parking sequence and waiter count, separate from `changes`.
+    wake: Wake,
+    _padding: [u8; 36],
 }
 
 impl CellSlot {
@@ -945,8 +941,8 @@ impl CellSlot {
             generation: AtomicU32::new(0),
             value: AtomicU64::new(0),
             changes: AtomicU32::new(0),
-            waiters: AtomicU32::new(0),
-            _padding: [0; 40],
+            wake: Wake::new(),
+            _padding: [0; 36],
         }
     }
 
@@ -956,9 +952,7 @@ impl CellSlot {
     /// here or sees the new count itself; never neither.
     fn changed(&self) {
         self.changes.fetch_add(1, Ordering::SeqCst);
-        if self.waiters.load(Ordering::SeqCst) > 0 {
-            wake_on(&self.changes);
-        }
+        self.wake.changed();
     }
 
     fn is(
@@ -985,7 +979,7 @@ impl CellSlot {
         self.tag.store(tag, Ordering::Relaxed);
         self.value.store(value, Ordering::Relaxed);
         self.changes.store(0, Ordering::Relaxed);
-        self.waiters.store(0, Ordering::Relaxed);
+        self.wake.reset();
         self.generation.store(generation, Ordering::Relaxed);
         self.state.store(SLOT_OCCUPIED, Ordering::Release);
         generation
@@ -1199,14 +1193,17 @@ mod lifetime_tests {
             .map(|_| cells.allocate(0_u64).unwrap())
             .collect();
         let slot = old.slot().unwrap();
-        slot.waiters.fetch_add(1, Ordering::SeqCst);
+        slot.wake.waiters.fetch_add(1, Ordering::SeqCst);
         cells.release(id).unwrap();
         assert!(matches!(cells.allocate(42_u64), Err(Error::Full { .. })));
-        assert_eq!(slot.waiters.fetch_sub(1, Ordering::SeqCst), 1);
+        assert_eq!(slot.wake.waiters.fetch_sub(1, Ordering::SeqCst), 1);
         drop(old);
         let fresh = cells.allocate(42_u64).unwrap();
         assert_eq!(fresh.id().index(), id.index());
-        assert_eq!(fresh.slot().unwrap().waiters.load(Ordering::Acquire), 0);
+        assert_eq!(
+            fresh.slot().unwrap().wake.waiters.load(Ordering::Acquire),
+            0
+        );
         assert_eq!(fresh.load().unwrap(), 42);
         drop(held);
     }

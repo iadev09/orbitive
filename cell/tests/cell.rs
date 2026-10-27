@@ -241,13 +241,9 @@ fn a_waiter_ends_on_an_interrupt_without_a_write() {
         std::thread::spawn(move || cell.wait_changed_until(since, &interrupt))
     };
 
-    // Set first, wake second: a waiter already parked is released by the
-    // wake, one not yet parked reads the flag.
+    // One set-then-wake must suffice, even in the last-check-to-park gap.
     interrupt.store(true, Ordering::SeqCst);
-    while !parked.is_finished() {
-        cell.wake_waiters().expect("wake");
-        std::thread::yield_now();
-    }
+    cell.wake_waiters().expect("wake");
 
     assert_eq!(parked.join().expect("join").expect("wait"), None);
     assert_eq!(

@@ -110,7 +110,7 @@ a gauge, not a queue, and nothing in between is retained. The same pair
 exists on `Text`, where the seqlock's own sequence is the count.
 
 The wait is the memory's, not a channel's. Linux futex, FreeBSD umtx and
-macOS `os_sync_wait_on_address` (14.4 and later; earlier releases poll) key
+macOS `os_sync_wait_on_address` (14.4 and later; earlier releases are refused) key
 waiters by the physical location of the word, so a write in one process
 wakes a reader parked in another with nothing carried between them: no
 descriptor to share, no ring to drain, no subscription to keep. A writer
@@ -122,13 +122,23 @@ Releasing a cell is a change too: whoever is parked on it wakes with
 
 ### Why nothing is lost
 
-The exchange is the forty-year-old futex idiom. A reader announces itself
-(`waiters += 1`), checks the count again, and only then parks; the park
-itself is a compare-and-sleep in the kernel, so a write that lands between
-the check and the sleep makes the sleep return at once. A writer bumps the
-count and only then looks for waiters. Both sides are sequentially
-consistent, so of the two races that could lose a wake, neither can happen:
-either the writer sees the waiter, or the waiter sees the new count.
+The native comparison word is a parking generation separate from the value
+version. A reader announces itself (`waiters += 1`), snapshots that generation,
+then rechecks the value version before parking. A writer publishes the value
+version first; when readers are registered it advances the parking generation
+before waking them. Both sides use sequentially consistent ordering: either
+the reader sees the value change or the writer sees its registration, and a
+late kernel entry cannot park on the earlier parking generation.
+
+`wait_changed_until` also checks a caller-owned interrupt flag. Set that flag,
+then call `wake_waiters`. This wake advances the parking generation even if no
+thread is in the kernel yet. The reader either observes the interrupt in its
+final check or the native comparison prevents its late park. It returns
+`Ok(None)` for cancellation. `wake_waiters` changes neither payload nor value
+version; an ordinary waiter keeps waiting until an actual write or release.
+The parking generation never wraps: after `u32::MAX` notifications, a call
+that would park returns `Error::WakeExhausted`. Value operations still work;
+release and reallocate the cell to obtain a new parking generation.
 
 A change made while the reader is *not* parked is not lost either. The
 count moved, so the reader's next `wait_changed(seen)` returns without
@@ -139,7 +149,8 @@ gauge has none to show.
 
 With nobody parked, a write is the atomic operation plus one atomic
 increment and one atomic load: a few nanoseconds, no system call. With a
-reader parked, the write also issues one wake, which lifts every parked
+reader registered, the write also increments the parking generation and issues
+one wake, which lifts every parked
 reader at once. A reader is parked only between its own reads, so a hot
 writer with one reader pays a wake at the reader's pace, not its own: twenty
 million writes and a reader that holds twenty milliseconds between looks is
@@ -183,8 +194,11 @@ this value. Repeated opens of the same table within one process share its owner
 row. Each row uses one `u32` counter per slot, rounded to a cache-line stride;
 owner capacity exhaustion returns an IO error with `WouldBlock`.
 
-The handle-pinned protocol uses SHM kinds `189` (scalar) and `190` (text), with
-version 3 headers. Earlier kinds `233` and `227` are left untouched. Old and
+The handle-pinned protocol with separate parking generations uses SHM kinds
+`187` (scalar) and `188` (text), with version 4 headers. Scalar slots remain
+64 bytes; text slots use `(20 + CELL_TEXT_MAX)` rounded up to a cache line
+(320 bytes at the default text capacity). Earlier kinds `189`/`190` (v3)
+and `233`/`227` (v2) are left untouched. Old and
 new binaries do not share cell tables; applications must coordinate the change
 of protocol. There is no automatic migration, reset or unlink of old tables.
 
