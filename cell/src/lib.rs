@@ -743,7 +743,16 @@ impl Orbital<i64> {
         &self,
         by: i64,
     ) -> Result<i64> {
-        self.fetch_add(by.checked_neg().ok_or(Error::Overflow)?)
+        let slot = self.slot()?;
+        slot.value
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
+                (bits as i64).checked_sub(by).map(|value| value as u64)
+            })
+            .map(|previous| {
+                slot.changed();
+                (previous as i64) - by
+            })
+            .map_err(|_| Error::Overflow)
     }
 
     /// Add up to `by` while the value stays at or under `limit`, in one
@@ -761,8 +770,9 @@ impl Orbital<i64> {
     /// contended word is touched once per claim rather than once per unit.
     /// `limit` is the ceiling for the total, never for a single call.
     ///
-    /// Overflow needs no separate guard: a result that cannot pass `limit`
-    /// cannot pass `i64::MAX` either.
+    /// The positive distance to the ceiling may exceed `i64::MAX`. Clamping
+    /// that distance is safe because `by` itself cannot exceed `i64::MAX`;
+    /// the chosen increment and result remain representable.
     ///
     /// **A claim is not a lease.** What this hands back is gone from the
     /// total the moment the swap lands, and nothing gives it back: a caller
@@ -787,7 +797,7 @@ impl Orbital<i64> {
             if current >= limit {
                 return Ok(Claim::Exhausted);
             }
-            let taken = by.min(limit - current);
+            let taken = by.min(limit.saturating_sub(current));
             let after = current + taken;
             if slot
                 .value
