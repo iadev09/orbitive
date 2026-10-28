@@ -122,6 +122,30 @@ impl Text {
             .map_err(|_| Error::Corrupt(self.id.to_string()))
     }
 
+    /// Copy the current text into caller-owned storage without allocating on
+    /// success.
+    /// The returned string borrows only `buffer`, not the shared-memory bank.
+    /// A buffer of [`CELL_TEXT_MAX`] bytes fits every valid text value.
+    ///
+    /// Like [`Self::load`], this makes one bounded attempt and returns
+    /// [`Error::Contended`] if publication changes during the copy. A buffer
+    /// too small for the validated snapshot returns [`Error::BufferTooSmall`],
+    /// never a truncated string. Buffer contents are unspecified on error.
+    pub fn load_into<'a>(
+        &self,
+        buffer: &'a mut [u8],
+    ) -> Result<&'a str> {
+        let len = self.slot()?.copy(self.id, buffer)?;
+        if len > buffer.len() {
+            return Err(Error::BufferTooSmall {
+                required: len,
+                available: buffer.len(),
+            });
+        }
+        std::str::from_utf8(&buffer[..len])
+            .map_err(|_| Error::Corrupt(self.id.to_string()))
+    }
+
     pub fn len(&self) -> Result<usize> {
         self.slot()?.copy(self.id, &mut [])
     }

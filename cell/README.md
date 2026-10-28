@@ -74,6 +74,29 @@ A read that races bank reuse, or a write that finds another writer, returns
 `Error::Contended` after one attempt instead of spinning. A `TextId` prints as
 `text:<slot>:<generation>`.
 
+For repeated reads, `load_into` copies into caller-owned storage and returns
+a UTF-8 string borrowing that buffer, with no allocation on a successful read:
+
+```rust
+# use std::sync::Arc;
+use orbitive::cell::{Cells, CELL_TEXT_MAX};
+# use orbitive::Fleet;
+# let cells = Cells::new(Arc::new(Fleet::join("example", 1)?))?;
+let title = cells.allocate_text("ready")?;
+let mut buffer = vec![0; CELL_TEXT_MAX];
+assert_eq!(title.load_into(&mut buffer)?, "ready");
+title.store("updated")?;
+assert_eq!(title.load_into(&mut buffer)?, "updated");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The same generation, revision and contention checks apply as for `load`.
+Any mutable byte slice works; `CELL_TEXT_MAX` bytes fit every valid value.
+A smaller buffer returns `Error::BufferTooSmall { required, available }` when
+the validated snapshot does not fit, even if its copied prefix ends inside a
+UTF-8 character.
+It never returns a truncated string. Buffer contents are unspecified on error.
+
 ## Waiting for a change
 
 A cell is state, not a message: nobody is told when it changes, and a reader

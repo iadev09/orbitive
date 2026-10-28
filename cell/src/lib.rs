@@ -132,6 +132,11 @@ pub enum Error {
         len: usize,
         max: usize,
     },
+    /// The caller's read buffer cannot hold the validated text snapshot.
+    BufferTooSmall {
+        required: usize,
+        available: usize,
+    },
     /// A text cell held bytes that are not UTF-8: something wrote past the
     /// contract.
     Corrupt(String),
@@ -176,6 +181,10 @@ impl fmt::Display for Error {
             Self::TooLong { len, max } => {
                 write!(f, "text does not fit the cell: len={len} max={max}")
             }
+            Self::BufferTooSmall { required, available } => write!(
+                f,
+                "text read buffer is too small: required={required} available={available}"
+            ),
             Self::Corrupt(id) => {
                 write!(f, "text cell {id} holds bytes that are not UTF-8")
             }

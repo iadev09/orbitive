@@ -35,6 +35,98 @@ fn memory() -> TextBackend {
 }
 
 #[test]
+fn text_load_into_reuses_storage_across_lengths_and_utf8() {
+    let text = memory().allocate("initial").unwrap();
+    let full = "x".repeat(CELL_TEXT_MAX);
+    let mut buffer = vec![0xcc; CELL_TEXT_MAX + 4];
+    for value in [full.as_str(), "short", "é🙂", ""] {
+        text.store(value).unwrap();
+        let version = text.version().unwrap();
+        assert_eq!(text.load_into(&mut buffer).unwrap(), value);
+        assert_eq!(text.version().unwrap(), version);
+    }
+    assert_eq!(&buffer[CELL_TEXT_MAX..], &[0xcc; 4]);
+}
+
+#[test]
+fn text_load_into_rejects_short_buffers_without_returning_partial_utf8() {
+    let text = memory().allocate("€").unwrap();
+    assert!(matches!(
+        text.load_into(&mut [0; 2]),
+        Err(Error::BufferTooSmall { required: 3, available: 2 })
+    ));
+    assert!(matches!(
+        text.load_into(&mut []),
+        Err(Error::BufferTooSmall { required: 3, available: 0 })
+    ));
+    assert_eq!(text.load_into(&mut [0; 3]).unwrap(), "€");
+    text.store("").unwrap();
+    assert_eq!(text.load_into(&mut []).unwrap(), "");
+}
+
+#[test]
+fn text_load_into_preserves_live_writer_and_retired_generation_checks() {
+    let table = memory();
+    let text = table.allocate("committed").unwrap();
+    let slot = text.slot().unwrap();
+    let token = table.writer_token();
+    let writer = slot.writer(token).unwrap();
+    let version = text.version().unwrap();
+    let mut buffer = vec![0; CELL_TEXT_MAX];
+    assert_eq!(text.load_into(&mut buffer).unwrap(), "committed");
+    assert_eq!(slot.writer.load(Ordering::Acquire), token);
+    assert_eq!(text.version().unwrap(), version);
+    drop(writer);
+    table.release(text.id()).unwrap();
+    assert!(
+        matches!(text.load_into(&mut buffer), Err(Error::StaleText(id)) if id == text.id())
+    );
+}
+
+#[test]
+fn text_load_into_rejects_bank_reuse_above_the_u32_revision_range() {
+    let text = memory().allocate("old").unwrap();
+    let reader = text.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |phase| {
+                if phase == Phase::Read {
+                    ready_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                }
+            }))
+        });
+        let mut buffer = vec![0; CELL_TEXT_MAX];
+        reader.load_into(&mut buffer).map(|_| ())
+    });
+    ready_rx.recv().unwrap();
+    // Skip intermediate revisions in the fixture. Two real publications
+    // then reuse the captured bank with identical low 32 revision bits.
+    text.slot().unwrap().committed.store((1_u64 << 32) - 4, Ordering::Release);
+    text.store("first").unwrap();
+    text.store("second").unwrap();
+    assert_eq!(text.version().unwrap(), 1_u64 << 32);
+    resume_tx.send(()).unwrap();
+    assert!(matches!(thread.join().unwrap(), Err(Error::Contended)));
+}
+
+#[test]
+fn text_load_into_validates_utf8_after_the_revision_validated_copy() {
+    let text = memory().allocate("valid").unwrap();
+    let slot = text.slot().unwrap();
+    // Model corrupted shared bytes through the internal raw writer fixture.
+    // The public Text writer accepts only UTF-8 strings.
+    slot.writer(text.table.writer_token())
+        .unwrap()
+        .write(&[0xff], false)
+        .unwrap();
+    let mut buffer = vec![0; CELL_TEXT_MAX];
+    assert!(matches!(text.load_into(&mut buffer), Err(Error::Corrupt(_))));
+}
+
+#[test]
 fn a_retired_text_writer_cannot_cross_into_a_new_generation() {
     let table = memory();
     let old = table.allocate("old").unwrap();
