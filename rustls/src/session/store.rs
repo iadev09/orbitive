@@ -165,7 +165,7 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
             for (index, slot) in set.iter_mut().enumerate() {
                 if slot.state() != SLOT_OCCUPIED || slot.expires_at_ms <= now_ms
                 {
-                    slot.clear();
+                    slot.release();
                     reusable.get_or_insert(index);
                     continue;
                 }
@@ -236,7 +236,7 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
                     continue;
                 }
                 if slot.expires_at_ms <= now_ms {
-                    slot.clear();
+                    slot.release();
                     return None;
                 }
                 let Some(value) = slot.value() else {
@@ -247,7 +247,7 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
                 };
                 let value = value.to_vec();
                 if consume {
-                    slot.clear();
+                    slot.release();
                 }
                 return Some(value);
             }
@@ -445,7 +445,7 @@ impl<const KEY_CAPACITY: usize> SessionSlot<KEY_CAPACITY> {
         inserted_at_ms: u64,
         expires_at_ms: u64,
     ) {
-        self.clear();
+        self.release();
         self.state.store(SLOT_WRITING, Ordering::Release);
         self.domain_len = domain.len() as u8;
         self.key_len = key.len() as u8;
@@ -459,19 +459,86 @@ impl<const KEY_CAPACITY: usize> SessionSlot<KEY_CAPACITY> {
         self.state.store(SLOT_OCCUPIED, Ordering::Release);
     }
 
+    /// The extents a committed entry wrote, when all three are plausible.
+    ///
+    /// Only an occupied slot has committed lengths, and an entry never has an
+    /// empty domain, key or value. Anything else is not a committed entry.
+    fn extents(&self) -> Option<(usize, usize, usize)> {
+        if self.state() != SLOT_OCCUPIED {
+            return None;
+        }
+        let extents = (
+            self.domain_len as usize,
+            self.key_len as usize,
+            self.value_len as usize,
+        );
+        let (domain, key, value) = extents;
+        ((1..=DOMAIN_MAX).contains(&domain)
+            && (1..=KEY_CAPACITY).contains(&key)
+            && (1..=VALUE_MAX).contains(&value))
+        .then_some(extents)
+    }
+
+    /// Give the slot up, leaving no byte of what it held.
+    ///
+    /// Every byte outside a committed entry's extents is already clear: slots
+    /// start zeroed and are only ever emptied by this function or by
+    /// [`clear`](Self::clear). A committed entry is therefore erased over the
+    /// extents it wrote and an empty slot needs nothing. A slot in any other
+    /// state, or with implausible lengths, is an abandoned write or damaged
+    /// metadata, and is erased whole.
+    fn release(&mut self) {
+        if self.state() == SLOT_EMPTY {
+            return;
+        }
+        let Some((domain, key, value)) = self.extents() else {
+            return self.clear();
+        };
+        // An interrupted erasure stays marked as an incomplete write, so it
+        // is erased whole by whoever finds it.
+        self.state.store(SLOT_WRITING, Ordering::Release);
+        erase(&mut self.domain[..domain]);
+        erase(&mut self.key[..key]);
+        erase(&mut self.value[..value]);
+        self.forget();
+        self.state.store(SLOT_EMPTY, Ordering::Release);
+    }
+
+    /// Erase the whole slot, trusting nothing stored in it.
     fn clear(&mut self) {
         self.state.store(SLOT_WRITING, Ordering::Release);
+        erase(&mut self.domain);
+        erase(&mut self.key);
+        erase(&mut self.value);
+        self.forget();
+        self.state.store(SLOT_EMPTY, Ordering::Release);
+    }
+
+    fn forget(&mut self) {
         self.domain_len = 0;
         self.key_len = 0;
         self.value_len = 0;
         self.key_hash = 0;
         self.inserted_at_ms = 0;
         self.expires_at_ms = 0;
-        self.domain.fill(0);
-        self.key.fill(0);
-        self.value.fill(0);
-        self.state.store(SLOT_EMPTY, Ordering::Release);
     }
+}
+
+/// Zero bytes that held session secrets, with stores the compiler may not
+/// remove on the grounds that nothing reads them afterwards.
+fn erase(bytes: &mut [u8]) {
+    // SAFETY: any bit pattern is a valid `u64`, and the three parts are
+    // disjoint views of `bytes`.
+    let (head, words, tail) = unsafe { bytes.align_to_mut::<u64>() };
+    for byte in head.iter_mut().chain(tail) {
+        // SAFETY: `byte` is a valid exclusive reference.
+        unsafe { ptr::write_volatile(byte, 0) };
+    }
+    for word in words {
+        // SAFETY: `word` is a valid exclusive reference.
+        unsafe { ptr::write_volatile(word, 0) };
+    }
+    std::sync::atomic::compiler_fence(Ordering::SeqCst);
 }
 
 fn validate_header<const KEY_CAPACITY: usize>(
@@ -687,6 +754,60 @@ mod tests {
                 Some(b"preserved".to_vec())
             );
         }
+    }
+
+    /// The slot holding `key`, by its index in the table.
+    fn slot_of(
+        primitive: &ServerSessionPrimitive,
+        domain: &[u8],
+        key: &[u8],
+    ) -> usize {
+        let hash = entry_hash(domain, key);
+        primitive
+            .with_slots(|slots| {
+                let set_start = set_index(hash) * WAYS;
+                set_slots_mut(slots, hash)
+                    .iter()
+                    .position(|slot| slot.matches(hash, domain, key))
+                    .map(|offset| set_start + offset)
+                    .expect("occupied slot")
+            })
+            .expect("find slot")
+    }
+
+    #[test]
+    fn a_shorter_replacement_and_an_abandoned_write_leave_nothing_behind() {
+        let primitive = primitive();
+        let domain = b"erasure";
+        let ttl = super::super::DEFAULT_SESSION_TTL;
+
+        // The tail of a longer entry does not outlive a shorter one.
+        primitive.put(domain, b"entry", &[0xaa; 1000], ttl).unwrap();
+        primitive.put(domain, b"entry", &[0xbb; 10], ttl).unwrap();
+        let index = slot_of(&primitive, domain, b"entry");
+        primitive
+            .with_slots(|slots| {
+                let slot = &mut slots[index];
+                assert!(slot.value[..10].iter().all(|byte| *byte == 0xbb));
+                assert!(slot.value[10..].iter().all(|byte| *byte == 0));
+                // A writer died here: bytes beyond any committed length, and
+                // a state that says the write never finished.
+                slot.value[5000..5010].fill(0xcc);
+                slot.state.store(SLOT_WRITING, Ordering::Release);
+            })
+            .unwrap();
+
+        // Its slot is the first one free in the set; reusing it erases all
+        // of it, not the extent of an entry that was never committed.
+        primitive.put(domain, b"entry", &[0xdd; 10], ttl).unwrap();
+        assert_eq!(slot_of(&primitive, domain, b"entry"), index);
+        primitive
+            .with_slots(|slots| {
+                let slot = &slots[index];
+                assert!(slot.value[..10].iter().all(|byte| *byte == 0xdd));
+                assert!(slot.value[10..].iter().all(|byte| *byte == 0));
+            })
+            .unwrap();
     }
 
     #[test]
