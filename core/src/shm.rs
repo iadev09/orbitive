@@ -41,6 +41,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod group;
@@ -113,6 +114,13 @@ pub struct ShmRegion {
     /// section opens its own file description so a later fork does not inherit
     /// an idle descriptor that can keep a future `flock` alive.
     process_lock: bool,
+    /// The verified lock directory, opened by the first critical section.
+    ///
+    /// It carries no lock, so a child that inherits it keeps nothing alive.
+    /// Each lock file is then opened relative to it: the directory is created
+    /// and checked once, and a path replaced afterwards cannot redirect a
+    /// later open.
+    lock_dir: OnceLock<OwnedFd>,
     ptr: NonNull<u8>,
     len: usize,
     /// True when this handle was the one that *created* the segment
@@ -270,6 +278,7 @@ impl ShmRegion {
                 .join(format!("{}.lock", name.trim_start_matches('/'))),
             name: cname,
             process_lock: false,
+            lock_dir: OnceLock::new(),
             ptr,
             len: actual_size,
             created: false,
@@ -479,6 +488,7 @@ impl ShmRegion {
                 name: cname,
                 lock_path,
                 process_lock,
+                lock_dir: OnceLock::new(),
                 ptr,
                 len: size,
                 created,
@@ -519,7 +529,33 @@ impl ShmRegion {
                 "SHM region was opened without a process lock",
             ));
         }
-        lock_path_exclusive(&self.lock_path)
+        lock_fd_exclusive(self.open_own_lock_file()?)
+    }
+
+    /// A new description of this region's lock file, for one critical
+    /// section, opened inside the directory verified for this region.
+    fn open_own_lock_file(&self) -> io::Result<OwnedFd> {
+        let (Some(dir), Some(name)) =
+            (self.lock_path.parent(), self.lock_path.file_name())
+        else {
+            return open_lock_file(&self.lock_path);
+        };
+        let verified = match self.lock_dir.get() {
+            Some(verified) => verified,
+            None => {
+                // Two first sections may both open it; one descriptor stays.
+                let _ = self.lock_dir.set(open_lock_dir(dir)?);
+                self.lock_dir.get().expect("lock directory was just set")
+            }
+        };
+        match open_lock_file_in(verified, name, &self.lock_path) {
+            // The directory was removed under a live region. The path is
+            // created and verified again for this section.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                open_lock_file(&self.lock_path)
+            }
+            opened => opened,
+        }
     }
 
     #[cfg(test)]
@@ -682,8 +718,6 @@ fn lock_path_exclusive(lock_path: &Path) -> io::Result<ShmRegionLock> {
 }
 
 fn open_lock_file(lock_path: &Path) -> io::Result<OwnedFd> {
-    use std::os::unix::fs::MetadataExt;
-
     if let Some(dir) = lock_path.parent() {
         ensure_lock_dir(dir)?;
     }
@@ -696,9 +730,21 @@ fn open_lock_file(lock_path: &Path) -> io::Result<OwnedFd> {
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(lock_path)?;
 
-    // The directory check makes this unreachable, which is the reason to make
-    // it anyway: it turns a property inferred from the directory's mode into
-    // one this function establishes about the descriptor it is about to lock.
+    ensure_own_lock_file(&file, lock_path)?;
+    Ok(file.into())
+}
+
+/// Refuses a lock file this user does not own.
+///
+/// The directory check makes this unreachable, which is the reason to make
+/// it anyway: it turns a property inferred from the directory's mode into
+/// one established about the descriptor that is about to be locked.
+fn ensure_own_lock_file(
+    file: &std::fs::File,
+    lock_path: &Path,
+) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
     let uid = unsafe { libc::geteuid() };
     let owner = file.metadata()?.uid();
     if owner != uid {
@@ -710,7 +756,60 @@ fn open_lock_file(lock_path: &Path) -> io::Result<OwnedFd> {
             ),
         ));
     }
+    Ok(())
+}
 
+/// Create and verify the lock directory, and hold it by descriptor.
+///
+/// The path is checked as before. The same properties are then established
+/// about the descriptor, so that what later opens resolve against is the
+/// directory that was verified and not whatever the path names by then.
+fn open_lock_dir(dir: &Path) -> io::Result<OwnedFd> {
+    ensure_lock_dir(dir)?;
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(dir)?;
+    let uid = unsafe { libc::geteuid() };
+    ensure_private(&opened.metadata()?, dir, uid)?;
+    Ok(opened.into())
+}
+
+/// Open a lock file by name inside a verified lock directory.
+fn open_lock_file_in(
+    dir: &OwnedFd,
+    name: &std::ffi::OsStr,
+    lock_path: &Path,
+) -> io::Result<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "lock name has nul byte")
+    })?;
+    let fd = loop {
+        // SAFETY: `dir` is an open directory and `name` a valid C string.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_CLOEXEC
+                    | libc::O_NOFOLLOW,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd >= 0 {
+            break fd;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    };
+    // SAFETY: `openat` returned a descriptor this function now owns.
+    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    ensure_own_lock_file(&file, lock_path)?;
     Ok(file.into())
 }
 
@@ -1111,9 +1210,17 @@ fn ensure_private_dir(
     dir: &Path,
     uid: u32,
 ) -> io::Result<()> {
+    ensure_private(&std::fs::symlink_metadata(dir)?, dir, uid)
+}
+
+/// The same refusal, about metadata already taken from a path or a descriptor.
+fn ensure_private(
+    metadata: &std::fs::Metadata,
+    dir: &Path,
+    uid: u32,
+) -> io::Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let metadata = std::fs::symlink_metadata(dir)?;
     if !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

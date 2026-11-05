@@ -91,3 +91,36 @@ fn locks_ignore_the_runtime_environment() {
     drop(locks);
     check("released");
 }
+
+#[test]
+fn a_region_locks_the_file_its_path_names_and_recreates_it_there() {
+    let name = format!("orbit-ld{:x}", std::process::id());
+    let (region, initialization) =
+        ShmRegion::open_or_create_locked(&format!("/{name}"), 1).unwrap();
+    drop(initialization);
+    struct Cleanup(ShmRegion);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = self.0.unlink();
+        }
+    }
+    let cleanup = Cleanup(region);
+    let region = &cleanup.0;
+    let refused = |region: &ShmRegion| {
+        region.try_lock_exclusive().err().map(|error| error.kind())
+    };
+
+    // A section opened through the verified directory holds the same file
+    // that a description opened by path contends for.
+    let held = region.lock_exclusive().unwrap();
+    assert_eq!(refused(region), Some(io::ErrorKind::WouldBlock));
+    drop(held);
+    assert_eq!(refused(region), None);
+
+    // A removed lock file comes back in that directory, under the same name.
+    std::fs::remove_file(lock_file_path(&name)).unwrap();
+    let held = region.lock_exclusive().unwrap();
+    assert!(lock_file_path(&name).exists());
+    assert_eq!(refused(region), Some(io::ErrorKind::WouldBlock));
+    drop(held);
+}
