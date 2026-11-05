@@ -12,6 +12,10 @@ use std::{io, ptr};
 use orbit_core::Fleet;
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
+use self::claim::ClaimTable;
+
+mod claim;
+
 pub(super) const DOMAIN_MAX: usize = orbit_core::compile::usize_from_env(
     option_env!("ORBIT_RUSTLS_SESSION_DOMAIN_CAPACITY"),
     64,
@@ -27,7 +31,10 @@ pub(super) const VALUE_MAX: usize = orbit_core::compile::usize_from_env(
     16 * 1024,
 );
 
-pub(super) const SERVER_SESSION_STATE_KIND: u8 = 231;
+/// The server table at layout version 2. Version 1 was kind 231, which this
+/// crate no longer opens; a segment of that kind left by an earlier build is
+/// neither read nor removed here.
+pub(super) const SERVER_SESSION_STATE_KIND: u8 = 185;
 #[cfg(feature = "rustls_0_24")]
 pub(super) const CLIENT_SESSION_STATE_KIND: u8 = 254;
 const SET_COUNT: usize = orbit_core::compile::usize_from_env(
@@ -42,6 +49,7 @@ const WAYS: usize = orbit_core::compile::usize_from_env(
 pub(super) const CLIENT_TLS13_TICKETS_PER_SERVER: usize = WAYS;
 const CAPACITY: usize = SET_COUNT * WAYS;
 const MAGIC: u32 = 0x4f_54_53_53; // "OTSS"
+/// One lock around the whole table.
 const VERSION: u16 = 1;
 const SLOT_EMPTY: u8 = 0;
 const SLOT_OCCUPIED: u8 = 1;
@@ -57,17 +65,37 @@ pub(super) type ClientSessionPrimitive =
 
 pub(super) struct SessionPrimitive<const KIND: u8, const KEY_CAPACITY: usize> {
     backing: Backing<KEY_CAPACITY>,
+    /// Membership of the fleet the table belongs to, kept for as long as the
+    /// table is open. Declared after the backing, so it is given up last.
+    _fleet: Arc<Fleet>,
+}
+
+/// What one operation keeps every other operation out of.
+///
+/// It is also the shared layout: the two are different segments under
+/// different kinds, and a table is only ever opened the way it was created.
+#[derive(Clone, Copy)]
+pub(super) enum Exclusion {
+    /// The whole table, behind one lock that an operation waits for.
+    #[cfg_attr(not(feature = "rustls_0_24"), allow(dead_code))]
+    Table,
+    /// The set its key hashes to, by a claim that is never waited for.
+    Set,
 }
 
 enum Backing<const KEY_CAPACITY: usize> {
     Memory(Mutex<MemoryTable<KEY_CAPACITY>>),
-    Shm(ShmTable<KEY_CAPACITY>),
+    Locked(ShmTable<KEY_CAPACITY>),
+    Claimed(ClaimTable<KEY_CAPACITY>),
 }
 
 impl<const KIND: u8, const KEY_CAPACITY: usize>
     SessionPrimitive<KIND, KEY_CAPACITY>
 {
-    pub(super) fn open(fleet: &Arc<Fleet>) -> io::Result<Self> {
+    pub(super) fn open(
+        fleet: &Arc<Fleet>,
+        exclusion: Exclusion,
+    ) -> io::Result<Self> {
         if KEY_CAPACITY == 0 || KEY_CAPACITY > u8::MAX as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -75,14 +103,19 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
             ));
         }
         let backing = if fleet.is_shm() {
-            Backing::Shm(ShmTable::open_or_create(&ring_segment_name(
-                fleet.name(),
-                KIND,
-            ))?)
+            let name = ring_segment_name(fleet.name(), KIND);
+            match exclusion {
+                Exclusion::Table => {
+                    Backing::Locked(ShmTable::open_or_create(&name)?)
+                }
+                Exclusion::Set => {
+                    Backing::Claimed(ClaimTable::open_or_create(&name)?)
+                }
+            }
         } else {
             Backing::Memory(Mutex::new(MemoryTable::new()))
         };
-        Ok(Self { backing })
+        Ok(Self { backing, _fleet: fleet.clone() })
     }
 
     pub(super) fn put(
@@ -98,16 +131,15 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
         let now_ms = monotonic_ms()?;
         let ttl_ms = u64::try_from(ttl.as_millis().max(1)).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
-        self.with_slots(|slots| {
-            let hash = entry_hash(domain, key);
-            let set = set_slots_mut(slots, hash);
+        let hash = entry_hash(domain, key);
+        let stored = self.with_set(hash, true, |set| {
             let mut reusable = None;
             let mut oldest = (0, u64::MAX);
 
             for (index, slot) in set.iter_mut().enumerate() {
                 if slot.matches(hash, domain, key) {
                     slot.write(hash, domain, key, value, now_ms, expires_at_ms);
-                    return true;
+                    return;
                 }
                 if slot.state() != SLOT_OCCUPIED || slot.expires_at_ms <= now_ms
                 {
@@ -128,8 +160,8 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
                 now_ms,
                 expires_at_ms,
             );
-            true
-        })
+        })?;
+        Ok(stored.is_some())
     }
 
     /// Add another value for the same key without replacing earlier values.
@@ -154,9 +186,8 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
         let now_ms = monotonic_ms()?;
         let ttl_ms = u64::try_from(ttl.as_millis().max(1)).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
-        self.with_slots(|slots| {
-            let hash = entry_hash(domain, key);
-            let set = set_slots_mut(slots, hash);
+        let hash = entry_hash(domain, key);
+        let stored = self.with_set(hash, true, |set| {
             let mut matching = 0_usize;
             let mut reusable = None;
             let mut oldest_match = None;
@@ -195,8 +226,8 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
                 now_ms,
                 expires_at_ms,
             );
-            true
-        })
+        })?;
+        Ok(stored.is_some())
     }
 
     pub(super) fn get(
@@ -229,9 +260,9 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
             return Ok(None);
         }
         let now_ms = monotonic_ms()?;
-        self.with_slots(|slots| {
-            let hash = entry_hash(domain, key);
-            for slot in set_slots_mut(slots, hash) {
+        let hash = entry_hash(domain, key);
+        let found = self.with_set(hash, false, |set| {
+            for slot in set {
                 if !slot.matches(hash, domain, key) {
                     continue;
                 }
@@ -252,24 +283,66 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
                 return Some(value);
             }
             None
-        })
+        })?;
+        Ok(found.flatten())
     }
 
+    /// Erase every slot.
+    ///
+    /// A claimed table refuses while any of its sets is held by an owner that
+    /// is alive; the sets before that one have been erased by then.
     pub(super) fn reset(&self) -> io::Result<()> {
-        self.with_slots(|slots| {
-            for slot in slots {
-                slot.clear();
+        match &self.backing {
+            Backing::Memory(table) => {
+                lock_unpoisoned(table)
+                    .slots
+                    .iter_mut()
+                    .for_each(SessionSlot::clear);
+                Ok(())
             }
-        })
+            Backing::Locked(table) => table.with_slots(|slots| {
+                slots.iter_mut().for_each(SessionSlot::clear);
+            }),
+            Backing::Claimed(table) => table.reset(),
+        }
     }
 
     pub(super) fn unlink(&self) -> io::Result<()> {
         match &self.backing {
             Backing::Memory(_) => self.reset(),
-            Backing::Shm(table) => table.region.unlink(),
+            Backing::Locked(table) => table.region.unlink(),
+            Backing::Claimed(table) => table.unlink(),
         }
     }
 
+    /// Run `operation` on the set `hash` selects, as that set's only user.
+    ///
+    /// `None` means another operation holds the set and this one did not wait
+    /// for it. Only a claimed table answers so; the others wait their turn.
+    /// `recover` lets the operation take the set back from an owner that is
+    /// gone, which asks the kernel and is therefore left to stores.
+    fn with_set<T>(
+        &self,
+        hash: u64,
+        recover: bool,
+        operation: impl FnOnce(&mut [SessionSlot<KEY_CAPACITY>]) -> T,
+    ) -> io::Result<Option<T>> {
+        match &self.backing {
+            Backing::Memory(table) => {
+                let mut table = lock_unpoisoned(table);
+                Ok(Some(operation(set_slots_mut(&mut table.slots, hash))))
+            }
+            Backing::Locked(table) => table
+                .with_slots(|slots| operation(set_slots_mut(slots, hash)))
+                .map(Some),
+            Backing::Claimed(table) => {
+                table.with_set(set_index(hash), recover, operation)
+            }
+        }
+    }
+
+    /// The whole table, for a test that is its only user.
+    #[cfg(test)]
     fn with_slots<T>(
         &self,
         operation: impl FnOnce(&mut [SessionSlot<KEY_CAPACITY>]) -> T,
@@ -279,7 +352,8 @@ impl<const KIND: u8, const KEY_CAPACITY: usize>
                 let mut table = lock_unpoisoned(table);
                 Ok(operation(&mut table.slots))
             }
-            Backing::Shm(table) => table.with_slots(operation),
+            Backing::Locked(table) => table.with_slots(operation),
+            Backing::Claimed(table) => Ok(table.with_slots(operation)),
         }
     }
 }
@@ -309,7 +383,7 @@ impl<const KEY_CAPACITY: usize> ShmTable<KEY_CAPACITY> {
             unsafe {
                 ptr::write(
                     region.as_ptr().cast::<SessionHeader>(),
-                    SessionHeader::new::<KEY_CAPACITY>(),
+                    SessionHeader::new::<KEY_CAPACITY>(VERSION, 0),
                 );
                 let slots =
                     region.as_ptr().add(std::mem::size_of::<SessionHeader>());
@@ -320,9 +394,12 @@ impl<const KEY_CAPACITY: usize> ShmTable<KEY_CAPACITY> {
                 );
             }
         } else {
-            validate_header::<KEY_CAPACITY>(name, unsafe {
-                &*region.as_ptr().cast::<SessionHeader>()
-            })?;
+            validate_header::<KEY_CAPACITY>(
+                name,
+                unsafe { &*region.as_ptr().cast::<SessionHeader>() },
+                VERSION,
+                0,
+            )?;
         }
         Ok(Self { region, local_lock: Mutex::new(()) })
     }
@@ -358,14 +435,20 @@ struct SessionHeader {
     domain_max: u16,
     key_max: u16,
     value_max: u32,
-    _reserved: [u8; 36],
+    /// Owner registrations a claimed table has; zero in a locked one, where
+    /// these bytes were reserved and written as zero.
+    owners: u16,
+    _reserved: [u8; 34],
 }
 
 impl SessionHeader {
-    fn new<const KEY_CAPACITY: usize>() -> Self {
+    fn new<const KEY_CAPACITY: usize>(
+        version: u16,
+        owners: usize,
+    ) -> Self {
         Self {
             magic: MAGIC,
-            version: VERSION,
+            version,
             header_size: std::mem::size_of::<Self>() as u16,
             capacity: CAPACITY as u32,
             slot_size: std::mem::size_of::<SessionSlot<KEY_CAPACITY>>() as u32,
@@ -374,7 +457,8 @@ impl SessionHeader {
             domain_max: DOMAIN_MAX as u16,
             key_max: KEY_CAPACITY as u16,
             value_max: VALUE_MAX as u32,
-            _reserved: [0; 36],
+            owners: owners as u16,
+            _reserved: [0; 34],
         }
     }
 }
@@ -544,6 +628,8 @@ fn erase(bytes: &mut [u8]) {
 fn validate_header<const KEY_CAPACITY: usize>(
     name: &str,
     header: &SessionHeader,
+    version: u16,
+    owners: usize,
 ) -> io::Result<()> {
     if header.magic != MAGIC {
         return Err(io::Error::new(
@@ -554,7 +640,8 @@ fn validate_header<const KEY_CAPACITY: usize>(
             ),
         ));
     }
-    if header.version != VERSION
+    if header.version != version
+        || usize::from(header.owners) != owners
         || usize::from(header.header_size)
             != std::mem::size_of::<SessionHeader>()
         || header.capacity as usize != CAPACITY
@@ -663,23 +750,30 @@ const _: () = assert!(
 mod tests {
     use super::*;
 
+    fn fleet() -> Arc<Fleet> {
+        Arc::new(Fleet::join("tls-primitive-unit", 1).expect("fleet"))
+    }
+
     fn primitive() -> ServerSessionPrimitive {
-        let fleet =
-            Arc::new(Fleet::join("tls-primitive-unit", 1).expect("fleet"));
-        SessionPrimitive::open(&fleet).expect("primitive")
+        SessionPrimitive::open(&fleet(), Exclusion::Set).expect("primitive")
     }
 
     #[test]
     fn malformed_retained_session_get_is_a_miss() {
-        malformed_retained_session(false);
+        malformed_retained_session(false, Exclusion::Table);
+        malformed_retained_session(false, Exclusion::Set);
     }
 
     #[test]
     fn malformed_retained_session_take_is_a_miss() {
-        malformed_retained_session(true);
+        malformed_retained_session(true, Exclusion::Table);
+        malformed_retained_session(true, Exclusion::Set);
     }
 
-    fn malformed_retained_session(consume: bool) {
+    fn malformed_retained_session(
+        consume: bool,
+        exclusion: Exclusion,
+    ) {
         use std::sync::atomic::AtomicU64;
 
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -688,18 +782,24 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        struct Cleanup(ShmTable<SERVER_KEY_MAX>);
+        let open = || ServerSessionPrimitive {
+            backing: match exclusion {
+                Exclusion::Table => Backing::Locked(
+                    ShmTable::open_or_create(&name).expect("table"),
+                ),
+                Exclusion::Set => Backing::Claimed(
+                    ClaimTable::open_or_create(&name).expect("table"),
+                ),
+            },
+            _fleet: fleet(),
+        };
+        struct Cleanup(ServerSessionPrimitive);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let _ = self.0.region.unlink();
+                let _ = self.0.unlink();
             }
         }
-        let _cleanup = Cleanup(ShmTable::open_or_create(&name).expect("table"));
-        let open = || ServerSessionPrimitive {
-            backing: Backing::Shm(
-                ShmTable::open_or_create(&name).expect("table"),
-            ),
-        };
+        let _cleanup = Cleanup(open());
         let domain = b"public";
         let key = 0_u64.to_le_bytes();
         let hash = entry_hash(domain, &key);
@@ -926,8 +1026,8 @@ mod tests {
         let fleet = Arc::new(
             Fleet::join("tls-client-primitive-unit", 1).expect("fleet"),
         );
-        let primitive =
-            ClientSessionPrimitive::open(&fleet).expect("primitive");
+        let primitive = ClientSessionPrimitive::open(&fleet, Exclusion::Table)
+            .expect("primitive");
         let domain = &[9; 33];
         let key = vec![7; CLIENT_KEY_MAX];
 

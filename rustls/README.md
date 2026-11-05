@@ -59,6 +59,17 @@ Each session store is a current-state table, not a ring. It has no cursor,
 notification fd, or background task. A miss simply causes a full TLS
 handshake.
 
+The server table has no table-wide lock. An operation works on the one set
+its key belongs to and does not wait for another operation using that set at
+the same moment: the lookup is a miss, or the session is not stored, and the
+handshake is a full one. Each open table holds one of a fixed number of owner
+registrations, 256 by default and set at build time with
+`ORBIT_RUSTLS_SESSION_OWNERS`; opening fails when all of them are held. A
+registration is released by the kernel when its process ends, and what that
+process left unfinished is erased by the next store that meets it. Open the
+table in the process that uses it: one inherited across `fork` is refused in
+the child.
+
 This is not a browser, authentication, or general application-session store.
 Those uses normally require reusable reads, durability, larger values, and
 different eviction guarantees.

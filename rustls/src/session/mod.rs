@@ -7,7 +7,7 @@ use orbit_core::Fleet;
 
 #[cfg(feature = "rustls_0_24")]
 use self::store::ClientSessionPrimitive;
-use self::store::{DOMAIN_MAX, ServerSessionPrimitive};
+use self::store::{DOMAIN_MAX, Exclusion, ServerSessionPrimitive};
 
 #[cfg(feature = "rustls_0_24")]
 mod client_v24;
@@ -89,7 +89,10 @@ impl FleetServerSessions {
     ) -> io::Result<Self> {
         let ttl_ms = validate_ttl(ttl)?;
         Ok(Self {
-            primitive: Arc::new(ServerSessionPrimitive::open(&fleet)?),
+            primitive: Arc::new(ServerSessionPrimitive::open(
+                &fleet,
+                Exclusion::Set,
+            )?),
             ttl_ms: Arc::new(AtomicU64::new(ttl_ms)),
         })
     }
@@ -119,6 +122,9 @@ impl FleetServerSessions {
     }
 
     /// Clear every domain. Call only during owner-controlled quiescent boot.
+    ///
+    /// Fails when another live handle is found at work in the table; what
+    /// was cleared before that stays cleared.
     pub fn reset(&self) -> io::Result<()> {
         self.primitive.reset()
     }
@@ -295,7 +301,10 @@ impl FleetClientSessions {
     ) -> io::Result<Self> {
         let ttl_ms = validate_ttl(ttl)?;
         Ok(Self {
-            primitive: Arc::new(ClientSessionPrimitive::open(&fleet)?),
+            primitive: Arc::new(ClientSessionPrimitive::open(
+                &fleet,
+                Exclusion::Table,
+            )?),
             ttl_ms: Arc::new(AtomicU64::new(ttl_ms)),
         })
     }
