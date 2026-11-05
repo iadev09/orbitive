@@ -19,6 +19,14 @@
 //! operation never finished can be trusted. An operation that dies while
 //! erasing leaves a claim of its own, which is taken back the same way. No
 //! clock is involved anywhere.
+//!
+//! A table is opened in the process that uses it. A handle inherited across
+//! `fork` is not looked for: operating through one stays exclusive, since
+//! parent and child then claim under one identity, and the lock stays held
+//! until both are gone, so a claim is never taken from a live process. What
+//! it costs is capacity: a set the child leaves claimed is not taken back
+//! while the parent lives. The one thing a child must not do is unlock, and
+//! dropping its copy of the handle does not.
 
 use std::mem::{ManuallyDrop, size_of};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,8 +78,8 @@ fn claimant(word: u64) -> Option<(usize, u64)> {
 pub(super) struct ClaimTable<const KEY_CAPACITY: usize> {
     region: ShmRegion,
     name: Box<str>,
-    /// The process that registered. A fork child inherits this handle and
-    /// the description holding its lock, and may use neither.
+    /// The process that registered. A fork child inherits the description
+    /// holding the registration's lock and must not unlock it.
     pid: u32,
     owner: usize,
     generation: u64,
@@ -258,13 +266,13 @@ impl<const KEY_CAPACITY: usize> ClaimTable<KEY_CAPACITY> {
         }
     }
 
+    /// Refuse to operate under a registration that is no longer this
+    /// handle's.
+    ///
+    /// Which process this is, is not asked here: that would be a system call
+    /// on every operation, for a fact the embedder settles when it opens the
+    /// table in the process that uses it.
     fn check(&self) -> io::Result<()> {
-        if self.pid != std::process::id() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "session table handle was opened by another process; open it after fork",
-            ));
-        }
         if self.generation_of(self.owner).load(Ordering::Acquire)
             != self.generation
         {
@@ -633,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_child_can_neither_use_nor_release_its_parents_registration() {
+    fn a_fork_child_dropping_its_copy_does_not_release_the_registration() {
         use nix::sys::wait::{WaitStatus, waitpid};
         use nix::unistd::{ForkResult, fork};
 
@@ -642,16 +650,12 @@ mod tests {
         let key = 4_u64.to_le_bytes();
         let set = set_of(&key);
 
-        // SAFETY: the child only touches what it inherited and exits.
+        // SAFETY: the child only drops what it inherited and exits.
         match unsafe { fork() }.expect("fork") {
             ForkResult::Child => {
-                let refused =
-                    table(&parent).claim(set, false).is_err_and(|error| {
-                        error.kind() == io::ErrorKind::PermissionDenied
-                    });
                 drop(parent);
                 // SAFETY: leaves without running the harness's own exit path.
-                unsafe { libc::_exit(if refused { 0 } else { 1 }) };
+                unsafe { libc::_exit(0) };
             }
             ForkResult::Parent { child } => {
                 assert_eq!(
@@ -661,8 +665,8 @@ mod tests {
             }
         }
 
-        // The child dropped its copy of the handle. Had that released the
-        // registration, this store would take the set from a live owner.
+        // Had the child's drop unlocked the shared description, this store
+        // would take the set from an owner that is alive.
         let held = table(&parent).claim(set, false).unwrap();
         assert!(held.is_some());
         assert!(!other.put(DOMAIN, &key, b"x", DEFAULT_SESSION_TTL).unwrap());

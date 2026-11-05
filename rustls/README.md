@@ -67,8 +67,9 @@ registrations, 256 by default and set at build time with
 `ORBIT_RUSTLS_SESSION_OWNERS`; opening fails when all of them are held. A
 registration is released by the kernel when its process ends, and what that
 process left unfinished is erased by the next store that meets it. Open the
-table in the process that uses it: one inherited across `fork` is refused in
-the child.
+table in the process that uses it. A table inherited across `fork` is not
+checked for on each operation: it stays consistent, but what the child leaves
+unfinished is not erased while the parent lives.
 
 This is not a browser, authentication, or general application-session store.
 Those uses normally require reusable reads, durability, larger values, and
