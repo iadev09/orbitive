@@ -10,13 +10,13 @@ and 0.24; client-session storage requires rustls 0.24.
 rustls 0.23 is the default:
 
 ```toml
-orbitive = { version = "0.5.5", features = ["rustls"] }
+orbitive = { version = "0.6.2", features = ["rustls"] }
 ```
 
 Select rustls 0.24 explicitly when the consuming TLS stack uses that line:
 
 ```toml
-orbitive = { version = "0.5.5", default-features = false, features = ["rustls_0_24"] }
+orbitive = { version = "0.6.2", default-features = false, features = ["rustls_0_24"] }
 ```
 
 The version features are additive. Enabling both is supported for workspaces
@@ -70,6 +70,19 @@ process left unfinished is erased by the next store that meets it. Open the
 table in the process that uses it. A table inherited across `fork` is not
 checked for on each operation: it stays consistent, but what the child leaves
 unfinished is not erased while the parent lives.
+
+## Upgrading to orbit-rustls 0.5.6
+
+The server table has a new shared layout and therefore a new SHM kind:
+`SERVER_SESSION_STATE_KIND` is 185, where 0.5.5 and earlier used 231. Read the
+kind from that constant rather than writing the number: whatever names the
+segment for validation, reset or removal must name the one this crate opens.
+The earlier segment is neither opened nor removed by this version; remove it
+once nothing built against the earlier layout is running.
+
+Processes built against the two layouts use two tables. During a rolling
+upgrade a session stored by one is not found by the other, which costs full
+handshakes for that time and nothing else. The client table is unchanged.
 
 This is not a browser, authentication, or general application-session store.
 Those uses normally require reusable reads, durability, larger values, and
