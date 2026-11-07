@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "tokio")]
 use orbit_core::shm::try_hold_watcher;
-use orbit_core::shm::{LaneHold, ShmRegion, ring_segment_name, try_hold_lane};
+use orbit_core::shm::{
+    LaneHold, ShmRegion, ring_segment_name, try_hold_lane, wait_lane_free,
+};
 
 use super::{Error, Inbox, LinkSpec, Reclaimed, Result};
 
@@ -317,6 +319,26 @@ impl LinkSegment {
             reclaimed.push(gone);
         }
         Ok(reclaimed)
+    }
+
+    /// Wait until the kernel has released the lane of this exited process, so
+    /// that [`Self::reclaim_process`] can prove the death. An exit notification
+    /// can arrive first. Blocks, and only a live holder prolongs it: a lane
+    /// another process already took back returns at once.
+    pub fn wait_lane_released(
+        &self,
+        lane: usize,
+        pid: u32,
+        incarnation: u64,
+    ) -> Result<()> {
+        if self.inbox.last_owner(lane)? != Some((pid, incarnation)) {
+            return Ok(());
+        }
+        match &self.group {
+            Some(access) => access.wait_lane_free(&self.name, lane),
+            None => wait_lane_free(&self.name, lane),
+        }
+        .map_err(Error::Io)
     }
 
     /// Recover producer reservations after a native exit notification, or on

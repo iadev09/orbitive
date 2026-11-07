@@ -200,6 +200,28 @@ fn link_kinds_are_explicit_and_must_be_distinct() {
 }
 
 #[test]
+fn waiting_for_a_lane_ends_when_its_holder_lets_go() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let name = fleet_name("wait");
+    let owner = Scratch::segment(&name);
+    let joined = owner.segment.join("example-owner", "native", 10).unwrap();
+    let pid = std::process::id();
+    // Not the process that holds it: nothing to wait for.
+    owner.segment.wait_lane_released(joined.lane, pid, 11).unwrap();
+
+    let let_go = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            owner.segment.wait_lane_released(joined.lane, pid, 10).unwrap();
+            assert!(let_go.load(Ordering::SeqCst));
+        });
+        let_go.store(true, Ordering::SeqCst);
+        drop(joined.hold);
+    });
+}
+
+#[test]
 fn a_join_reclaims_the_exact_dead_incarnation_and_ends_its_streams() {
     let name = fleet_name("reclaim");
     let held = Scratch::segment(&name);

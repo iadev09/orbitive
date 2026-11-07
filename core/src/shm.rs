@@ -1067,6 +1067,32 @@ pub fn try_hold_lane(
     Err(error)
 }
 
+/// Wait until nothing holds lane `lane` of segment `shm_name`, then let it go.
+///
+/// A process's exit can be reported before the kernel has released its locks,
+/// so whoever acts on that report waits here. The kernel ends the wait, and
+/// only a live holder prolongs it.
+pub fn wait_lane_free(
+    shm_name: &str,
+    lane: usize,
+) -> io::Result<()> {
+    let name = format!("{}.lane{lane}", shm_name.trim_start_matches('/'));
+    wait_free(&open_lock_file(&lock_file_path(&name))?)
+}
+
+pub(crate) fn wait_free(lock_fd: &OwnedFd) -> io::Result<()> {
+    loop {
+        // SAFETY: `lock_fd` is an open descriptor borrowed for this call.
+        if unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 /// One process's hold on one directory-watcher slot of a segment: the same
 /// kernel-released `flock` as a [`LaneHold`], on a lock file of its own.
 ///

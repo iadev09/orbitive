@@ -303,6 +303,18 @@ impl GroupAccess {
             .map(|lock_fd| LaneHold { lock_fd }))
     }
 
+    /// [`wait_lane_free`](super::wait_lane_free) on this group's lock file.
+    pub fn wait_lane_free(
+        &self,
+        segment: &str,
+        lane: usize,
+    ) -> io::Result<()> {
+        super::wait_free(&self.lock_file(&format!(
+            "{}.lane{lane}.lock",
+            segment.trim_start_matches('/')
+        ))?)
+    }
+
     pub fn try_hold_watcher(
         &self,
         segment: &str,
