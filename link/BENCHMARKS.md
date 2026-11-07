@@ -11,7 +11,7 @@ answer different questions.
 - `link/benches/dispatch.rs` measures the synchronous named-dispatch protocol
   core: target lookup, ticket encode/decode, inbox publication, stream open and
   a tiny duplex request/reply. It does not await the Tokio reactor bell.
-- `servers/edge-server/scripts/bench.sh` is the downstream test: an edge server
+- A downstream benchmark script is the downstream test: an edge server
   implementing Orbit. It includes cross-process SHM, the async inbox receiver,
   four edge workers, the retained body slot, HTTP and one Gufi application
   process.
@@ -25,7 +25,7 @@ and application handlers. Measurements from that harness are recorded here.
 
 ## 2026-09-29 — synchronous link core
 
-Host: macOS `bison`. Command:
+Host: macOS. Command:
 
 ```sh
 cargo bench -p orbit-link --bench dispatch
@@ -45,7 +45,7 @@ numbers say nothing about descriptor wake or process scheduling.
 
 ## 2026-09-29 — downstream edge server implementing Orbit
 
-Host: macOS `bison`. Four edge workers, one Gufi application process, release
+Host: macOS. Four edge workers, one Gufi application process, release
 binaries built from the local Orbitive and Claviron branches. Command shape:
 
 ```sh
