@@ -28,6 +28,9 @@ which node's process holds each side), and two
 `Direction`s: `head` (writer-owned, bytes committed), `tail` (reader-owned,
 bytes consumed), `flags` (FIN, RESET, READER_GONE), `changes`, `waiters`.
 Positions are monotonic `u64`; the ring index is the position masked.
+`exact_needed` is the async atomic writer's required free capacity, zero when
+unarmed. It occupies four bytes of existing writer-line padding: direction,
+slot and segment sizes and existing field offsets are unchanged.
 
 Creation happens in the creator's own lane under a process-local mutex
 (one live process per node id is already the per-node ring rule). Side B
@@ -168,7 +171,20 @@ socket.
   generation, and wakes it only when its `listening` count is nonzero. A
   commit onto a ring the reader has not drained, or a consume from one the
   writer never found full, rings nobody: under look/register/look-again a
-  reader parks only on empty and a writer only on full.
+  reader parks only on empty and an ordinary byte writer only on full.
+
+  An async exact writer can also wait on a partially occupied ring. Before
+  check/register/recheck it publishes `exact_needed` with sequential
+  consistency. After consuming bytes, the reader observes that threshold
+  after its tail store/fence and rings only when free space crosses it.
+  Consumes below or already above the threshold do not ring. Only the writer
+  clears or replaces the threshold: the reader must not disarm a newer wait.
+  A ready/error result, a write attempt, or ordinary write readiness clears
+  it. Cancellation of a direct poll has the same retained-registration
+  semantics as other polls; the next writer operation supersedes it.
+  Blocking exact waits still use the direction word and waiter count.
+  Exact notification requires the updated reader-side implementation on
+  the peer as well; an older reader does not observe the added threshold.
 
   **That test is taken after the change, never before it.** A writer reads
   the tail again after storing its new head, a reader reads the head again

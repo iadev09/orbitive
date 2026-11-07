@@ -1002,6 +1002,7 @@ impl Handle {
     ) -> Result<usize> {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.write_direction());
+        clear_exact_wait(direction);
         let flags = direction.flags();
         if flags & FLAG_RESET != 0 {
             return Err(Error::Reset);
@@ -1059,6 +1060,7 @@ impl Handle {
     ) -> Result<()> {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.write_direction());
+        clear_exact_wait(direction);
         let flags = direction.flags();
         if flags & FLAG_RESET != 0 {
             return Err(Error::Reset);
@@ -1148,13 +1150,16 @@ impl Handle {
             );
         }
         direction.tail.store(tail + len as u64, Ordering::SeqCst);
-        // The mirror image, and the other half of that agreement: a writer
-        // parks only on a full ring, so the head read after this consume is
-        // what says whether one is parked on the space just freed.
+        // Observe an ordinary full-ring waiter or an exact writer whose
+        // declared free-space threshold this consume crosses.
         std::sync::atomic::fence(Ordering::SeqCst);
-        let head_now = direction.head.load(Ordering::SeqCst);
-        let was_full = head_now - tail >= buffer_bytes as u64;
-        self.table.notify(self.index, slot, direction, self.peer_if(was_full));
+        let wake = writer_gained_capacity(
+            direction,
+            buffer_bytes,
+            tail,
+            tail + len as u64,
+        );
+        self.table.notify(self.index, slot, direction, self.peer_if(wake));
         Ok(len)
     }
 
@@ -1209,9 +1214,13 @@ impl Handle {
         }
         direction.tail.store(tail + buf.len() as u64, Ordering::SeqCst);
         std::sync::atomic::fence(Ordering::SeqCst);
-        let head_now = direction.head.load(Ordering::SeqCst);
-        let was_full = head_now - tail >= buffer_bytes as u64;
-        self.table.notify(self.index, slot, direction, self.peer_if(was_full));
+        let wake = writer_gained_capacity(
+            direction,
+            buffer_bytes,
+            tail,
+            tail + buf.len() as u64,
+        );
+        self.table.notify(self.index, slot, direction, self.peer_if(wake));
         Ok(())
     }
 
@@ -1331,6 +1340,33 @@ impl Handle {
             std::task::Poll::Pending
         }
     }
+}
+
+fn clear_exact_wait(direction: &Direction) {
+    // The common byte writer never stores to the extra word. Its value is
+    // owned by this writer, so a relaxed look suffices to skip a redundant clear.
+    if direction.exact_needed.load(Ordering::Relaxed) != 0 {
+        direction.exact_needed.store(0, Ordering::SeqCst);
+    }
+}
+
+fn writer_gained_capacity(
+    direction: &Direction,
+    capacity: usize,
+    before_tail: u64,
+    after_tail: u64,
+) -> bool {
+    let head = direction.head.load(Ordering::SeqCst);
+    let needed = direction.exact_needed.load(Ordering::SeqCst) as usize;
+    if needed == 0 {
+        return head - before_tail >= capacity as u64;
+    }
+    if direction.flags() & (FLAG_FIN | FLAG_RESET | FLAG_READER_GONE) != 0 {
+        return false;
+    }
+    let before = capacity.saturating_sub((head - before_tail) as usize);
+    let after = capacity.saturating_sub((head - after_tail) as usize);
+    before < needed && after >= needed
 }
 
 /// Whether a task could be parked writing into `direction` as its reader
@@ -1879,7 +1915,10 @@ impl WriteHalf {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
         self.handle.wait_until_timeout(
             self.handle.side.write_direction(),
-            |direction| writable(direction, buffer_bytes),
+            |direction| {
+                clear_exact_wait(direction);
+                writable(direction, buffer_bytes)
+            },
             timeout,
         )
     }
@@ -1887,10 +1926,13 @@ impl WriteHalf {
     /// Park until a write would make progress or the direction ended.
     pub fn wait_writable(&self) -> Result<()> {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
-        self.handle
-            .wait_until(self.handle.side.write_direction(), |direction| {
+        self.handle.wait_until(
+            self.handle.side.write_direction(),
+            |direction| {
+                clear_exact_wait(direction);
                 writable(direction, buffer_bytes)
-            })
+            },
+        )
     }
 
     /// Park until an atomic write of `needed` bytes can be attempted.
@@ -1904,10 +1946,13 @@ impl WriteHalf {
                 "atomic stream write is {needed} bytes; ring capacity is {buffer_bytes}"
             )));
         }
-        self.handle
-            .wait_until(self.handle.side.write_direction(), |direction| {
+        self.handle.wait_until(
+            self.handle.side.write_direction(),
+            |direction| {
+                clear_exact_wait(direction);
                 writable_exact(direction, buffer_bytes, needed)
-            })
+            },
+        )
     }
 
     /// Readiness for a task: `Ready` when a write would make progress or
@@ -1925,7 +1970,10 @@ impl WriteHalf {
                 writer: true,
                 reset: false,
             },
-            |direction| writable(direction, buffer_bytes),
+            |direction| {
+                clear_exact_wait(direction);
+                writable(direction, buffer_bytes)
+            },
             cx,
         )
     }
@@ -1937,12 +1985,23 @@ impl WriteHalf {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
         let buffer_bytes = self.handle.table.geometry().buffer_bytes;
+        let slot = match self.handle.slot() {
+            Ok(slot) => slot,
+            Err(error) => return std::task::Poll::Ready(Err(error)),
+        };
+        let direction =
+            Handle::direction(slot, self.handle.side.write_direction());
         if needed > buffer_bytes {
+            clear_exact_wait(direction);
             return std::task::Poll::Ready(Err(Error::Malformed(format!(
                 "atomic stream write is {needed} bytes; ring capacity is {buffer_bytes}"
             ))));
         }
-        self.handle.poll_ready(
+        // Publish before register/recheck. Together with the reader's tail
+        // store/fence/threshold load, either this poll sees the freed capacity
+        // or that reader sees this wait and rings the writer.
+        direction.exact_needed.store(needed as u32, Ordering::SeqCst);
+        let result = self.handle.poll_ready(
             Interest {
                 direction: self.handle.side.write_direction(),
                 writer: true,
@@ -1950,7 +2009,11 @@ impl WriteHalf {
             },
             |direction| writable_exact(direction, buffer_bytes, needed),
             cx,
-        )
+        );
+        if result.is_ready() {
+            clear_exact_wait(direction);
+        }
+        result
     }
 }
 

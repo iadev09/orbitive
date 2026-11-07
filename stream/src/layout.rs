@@ -160,7 +160,10 @@ pub(crate) struct Direction {
     pub(crate) head: AtomicU64,
     pub(crate) flags: AtomicU8,
     _reserved: [u8; 3],
-    _writer_padding: [u8; 52],
+    /// Async atomic writer's required free space; zero means no exact wait.
+    /// Writer-owned, in previously reserved padding; the reader only observes it.
+    pub(crate) exact_needed: AtomicU32,
+    _writer_padding: [u8; 48],
 
     // ── the reader's line ──────────────────────────────────────────────
     pub(crate) tail: AtomicU64,
@@ -179,12 +182,28 @@ impl Direction {
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
         self.flags.store(0, Ordering::Relaxed);
+        self.exact_needed.store(0, Ordering::Relaxed);
         self.changes.store(0, Ordering::Relaxed);
         self.waiters.store(0, Ordering::Relaxed);
     }
 
     pub(crate) fn flags(&self) -> u8 {
         self.flags.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_wait_uses_padding_without_moving_existing_shared_fields() {
+        assert_eq!(size_of::<Direction>(), 192);
+        assert_eq!(std::mem::offset_of!(Direction, exact_needed), 12);
+        assert_eq!(std::mem::offset_of!(Direction, tail), 64);
+        assert_eq!(std::mem::offset_of!(Direction, changes), 128);
+        assert_eq!(std::mem::offset_of!(Direction, waiters), 132);
+        assert_eq!(size_of::<Slot>(), 448);
     }
 }
 
