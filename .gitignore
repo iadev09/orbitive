@@ -103,3 +103,4 @@ ARCHITECTURE.md
 
 # Published benchmark results for the link transport.
 !link/BENCHMARKS.md
+!link/docs/benches/*.md

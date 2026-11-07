@@ -27,7 +27,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-util"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-util", "io-std", "net", "sync", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -35,3 +35,8 @@ libc.workspace = true
 [[bench]]
 name = "dispatch"
 harness = false
+
+[[bench]]
+name = "transport"
+harness = false
+required-features = ["tokio"]

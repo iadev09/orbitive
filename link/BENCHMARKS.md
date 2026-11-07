@@ -8,6 +8,9 @@ answer different questions.
 - `stream/benches/transport.rs` measures the exchange payload arena across
   body size, application chunk size and concurrency. `orbit-link` does not use
   that arena for its current body path.
+- `link/benches/transport.rs` compares Link with a Unix socket between two
+  processes with no HTTP. For the transport, trust it over the downstream rows
+  below; see `link/docs/benches/`.
 - `link/benches/dispatch.rs` measures the synchronous named-dispatch protocol
   core: target lookup, ticket encode/decode, inbox publication, stream open and
   a tiny duplex request/reply. It does not await the Tokio reactor bell.
