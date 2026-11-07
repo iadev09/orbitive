@@ -307,6 +307,19 @@ The stream's reset observer uses the existing readiness driver and a separate
 bounded process-local waker entry, so concurrent body reading cannot replace
 its wake. Neither change introduces a timer or a new shared-memory field.
 
+#### Ownership-based recovery, event-driven progress
+
+Recovery follows ownership rather than a clock. Producer intents and
+generation-checked claims protect publication without a new `posix-sync`
+dependency or a pthread robust mutex around inbox writes. Kernel holds stay
+at registration and recovery; ordinary writes add no ownership lock or syscall.
+Existing readiness notifications drive progress, with no sleep loop,
+timeout-based death inference or periodic recovery scan.
+
+Crash recovery therefore does not turn the inbox into a timed retry service.
+Claims still cost atomic work: the measurements below show recovered
+throughput and graceful shutdown, not zero overhead.
+
 Both examples resolved local Orbitive. The final verification cleared both
 stopped test fleets, rebuilt development-profile binaries at optimization
 level 1, verified both paths returned `200`, then ran the original two-thread,
