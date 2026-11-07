@@ -140,6 +140,62 @@ fn ordinary_write_attempt_cancels_a_previous_exact_wait() {
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(feature = "tokio")]
+#[test]
+fn async_byte_write_replaces_exact_wait_and_keeps_full_ring_wakes() {
+    use std::pin::Pin;
+    use tokio::io::AsyncWrite;
+
+    for occupied in [48, 64] {
+        let (mut writer, reader, count, waker) = pair(occupied);
+        let mut cx = Context::from_waker(&waker);
+        assert!(writer.poll_writable_exact(32, &mut cx).is_pending());
+
+        let write = Pin::new(&mut writer).poll_write(&mut cx, &[9]);
+        if occupied == 64 {
+            assert!(write.is_pending());
+        } else {
+            assert!(matches!(write, Poll::Ready(Ok(1))));
+        }
+
+        // A byte writer on a full ring must wake before the former exact
+        // threshold is met; a successful byte write must leave no exact wake.
+        reader.try_read_exact(&mut [0; 17]).unwrap();
+        assert_eq!(count.0.load(Ordering::SeqCst), usize::from(occupied == 64));
+        if occupied == 64 {
+            assert!(matches!(
+                Pin::new(&mut writer).poll_write(&mut cx, &[9]),
+                Poll::Ready(Ok(1))
+            ));
+        }
+    }
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn exact_wait_can_follow_an_async_byte_write() {
+    use std::pin::Pin;
+    use tokio::io::AsyncWrite;
+
+    let (mut writer, reader, count, waker) = pair(48);
+    let mut cx = Context::from_waker(&waker);
+    assert!(writer.poll_writable_exact(32, &mut cx).is_pending());
+    assert!(matches!(
+        Pin::new(&mut writer).poll_write(&mut cx, &[9]),
+        Poll::Ready(Ok(1))
+    ));
+    reader.try_read_exact(&mut [0; 17]).unwrap();
+    assert_eq!(count.0.load(Ordering::SeqCst), 0);
+
+    assert!(writer.poll_writable_exact(48, &mut cx).is_pending());
+    reader.try_read_exact(&mut [0; 16]).unwrap();
+    assert_eq!(count.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        writer.poll_writable_exact(48, &mut cx),
+        Poll::Ready(Ok(()))
+    ));
+}
+
 #[test]
 fn invalid_exact_request_clears_the_previous_threshold() {
     let (writer, reader, count, waker) = pair(48);

@@ -54,7 +54,7 @@ impl AsyncWrite for WriteHalf {
             if let Err(error) = std::task::ready!(self.poll_writable(cx)) {
                 return Poll::Ready(Err(error.into()));
             }
-            match self.try_write(buf) {
+            match self.handle.try_write_ready(buf) {
                 Err(Error::WouldBlock) => continue,
                 other => {
                     coop.made_progress();

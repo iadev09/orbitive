@@ -1003,6 +1003,27 @@ impl Handle {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.write_direction());
         clear_exact_wait(direction);
+        self.write_bytes(slot, direction, buf)
+    }
+
+    /// Ordinary readiness already cleared any previous exact wait. Keep the
+    /// slot and terminal-state checks, without clearing that wait a second time.
+    #[cfg(feature = "tokio")]
+    fn try_write_ready(
+        &self,
+        buf: &[u8],
+    ) -> Result<usize> {
+        let slot = self.slot()?;
+        let direction = Self::direction(slot, self.side.write_direction());
+        self.write_bytes(slot, direction, buf)
+    }
+
+    fn write_bytes(
+        &self,
+        slot: &Slot,
+        direction: &Direction,
+        buf: &[u8],
+    ) -> Result<usize> {
         let flags = direction.flags();
         if flags & FLAG_RESET != 0 {
             return Err(Error::Reset);

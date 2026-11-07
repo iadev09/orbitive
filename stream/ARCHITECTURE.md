@@ -182,6 +182,9 @@ socket.
   A ready/error result, a write attempt, or ordinary write readiness clears
   it. Cancellation of a direct poll has the same retained-registration
   semantics as other polls; the next writer operation supersedes it.
+  Tokio's byte writer clears through ordinary readiness, then writes without
+  repeating that clear. Slot, terminal-state and capacity checks still apply;
+  direct byte-write attempts clear the threshold themselves.
   Blocking exact waits still use the direction word and waiter count.
   Exact notification requires the updated reader-side implementation on
   the peer as well; an older reader does not observe the added threshold.
