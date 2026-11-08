@@ -863,23 +863,37 @@ impl Inbox {
         lane_index: usize,
         payload: &[u8],
     ) -> Result<u64> {
+        self.write_vectored(lane_index, &[payload])
+    }
+
+    /// [`Inbox::write`] for a frame held in pieces — a head encoded here and a
+    /// body that already has an owner — copied into the slot one after the
+    /// other, so they need not be joined into one buffer first.
+    pub fn write_vectored(
+        &self,
+        lane_index: usize,
+        parts: &[&[u8]],
+    ) -> Result<u64> {
         self.check_lane(lane_index)?;
-        if payload.len() > self.geometry.payload_capacity {
+        let len = parts.iter().map(|part| part.len()).sum::<usize>();
+        if len > self.geometry.payload_capacity {
             return Err(Error::FrameTooLarge);
         }
         let mut reservation = self.reserve_frame(lane_index)?;
         let position = reservation.position;
         let slot = self.slot_header(lane_index, position);
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                payload.as_ptr(),
-                self.payload_ptr(lane_index, position),
-                payload.len(),
-            );
+        let mut at = self.payload_ptr(lane_index, position);
+        for part in parts {
+            // SAFETY: the reservation owns this slot's payload until it
+            // commits, and the parts together fit its capacity.
+            unsafe {
+                std::ptr::copy_nonoverlapping(part.as_ptr(), at, part.len());
+                at = at.add(part.len());
+            }
         }
         #[cfg(test)]
         claims::checkpoint("payload");
-        slot.len.store(payload.len() as u32, Ordering::Relaxed);
+        slot.len.store(len as u32, Ordering::Relaxed);
         // Admission is not publication: only COMMITTED releases these bytes.
         slot.claim.store(reservation.claim(COMMITTED), Ordering::Release);
         #[cfg(test)]

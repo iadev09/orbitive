@@ -1267,6 +1267,25 @@ impl Handle {
         }
     }
 
+    /// [`Handle::set_flag`] with nobody told: see [`WriteHalf::finish_quietly`].
+    fn set_flag_quietly(
+        &self,
+        direction_index: usize,
+        flag: u8,
+    ) {
+        if let Ok(slot) = self.slot() {
+            let direction = Self::direction(slot, direction_index);
+            if direction.flags.fetch_or(flag, Ordering::SeqCst) & flag == 0 {
+                self.table.notify(
+                    self.index,
+                    slot,
+                    direction,
+                    table::Ring::Nobody,
+                );
+            }
+        }
+    }
+
     /// Park until `ready` holds for the direction, or the stream ends.
     /// The same wait, bounded: `false` is the timeout and nothing else.
     #[cfg(any(
@@ -1912,6 +1931,18 @@ impl WriteHalf {
         self.shut = true;
         self.handle.set_flag(self.handle.side.write_direction(), FLAG_FIN);
         Ok(())
+    }
+
+    /// FIN without a ring, for a direction its reader already knows carries
+    /// nothing: the peer was told by other means — a frame that says the body
+    /// travelled with it — and will not read here. The flag is set as
+    /// [`WriteHalf::finish`] sets it and blocking waiters are counted as
+    /// always, but no doorbell rings, so nobody is woken to find an end it was
+    /// never going to look for. A reader that does look still sees it.
+    pub fn finish_quietly(&mut self) {
+        self.shut = true;
+        self.handle
+            .set_flag_quietly(self.handle.side.write_direction(), FLAG_FIN);
     }
 
     /// Abandon the direction: the reader gets an error and buffered bytes
