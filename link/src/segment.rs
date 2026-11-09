@@ -165,9 +165,23 @@ impl LinkSegment {
         role: &str,
         incarnation: u64,
     ) -> Result<Joined> {
+        self.join_with_capacity(service, role, incarnation, None)
+    }
+
+    pub fn join_with_capacity(
+        &self,
+        service: &str,
+        role: &str,
+        incarnation: u64,
+        capacity: Option<usize>,
+    ) -> Result<Joined> {
         let recovered = self.recover_abandoned()?;
-        let (lane, hold) =
-            self.inbox.join(service, role, incarnation, |lane| {
+        let (lane, hold) = self.inbox.join_with_capacity(
+            service,
+            role,
+            incarnation,
+            capacity,
+            |lane| {
                 let Some(hold) = self.hold(lane)? else { return Ok(None) };
                 // A withdrawn owner may have died during drain. End its sides
                 // under the hold before its stamp is replaced by the new claim.
@@ -175,7 +189,8 @@ impl LinkSegment {
                     self.recover_streams(lane, previous)?;
                 }
                 Ok(Some(hold))
-            })?;
+            },
+        )?;
         let mut reclaimed =
             std::mem::take(&mut *self.reclaimed.lock().map_err(|_| {
                 Error::Malformed("Link recovery observations are poisoned")

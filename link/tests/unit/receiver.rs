@@ -50,6 +50,57 @@ fn peek(socket: &tokio::net::UnixDatagram) -> io::Result<usize> {
     if count < 0 { Err(io::Error::last_os_error()) } else { Ok(count as usize) }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn returned_capacity_resumes_the_existing_receiver_without_a_frame() {
+    let scratch = Scratch::new();
+    scratch
+        .0
+        .inbox()
+        .claim_lane_with_capacity(1, "target", "worker", 1, Some(1))
+        .unwrap();
+    let mut receiver = scratch.0.receiver(0).unwrap();
+    let ticket = scratch.0.inbox().reserve_work(1, 0).unwrap().unwrap();
+    scratch.0.inbox().watch_capacity(1, 0).unwrap();
+    let (armed, waiting) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut frame = Vec::new();
+        let mut next = Box::pin(receiver.next(&mut frame));
+        let mut armed = Some(armed);
+        std::future::poll_fn(|cx| {
+            let result = next.as_mut().poll(cx);
+            if result.is_pending()
+                && let Some(armed) = armed.take()
+            {
+                armed.send(()).unwrap();
+            }
+            result
+        })
+        .await
+    });
+    waiting.await.unwrap();
+    scratch.0.inbox().cancel_work(ticket);
+    assert!(matches!(
+        task.await.unwrap().unwrap(),
+        crate::Received::Capacity(_)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn plain_recv_cannot_discard_a_work_ticket() {
+    let scratch = Scratch::new();
+    scratch
+        .0
+        .inbox()
+        .claim_lane_with_capacity(1, "target", "worker", 1, Some(1))
+        .unwrap();
+    let mut receiver = scratch.0.receiver(1).unwrap();
+    let ticket = scratch.0.inbox().reserve_work(1, 0).unwrap().unwrap();
+    scratch.0.inbox().write_work(ticket, &[b"work"]).unwrap();
+    assert!(receiver.recv(&mut Vec::new()).await.is_err());
+    assert!(scratch.0.inbox().accept_work(1, ticket).is_err());
+    assert!(scratch.0.inbox().reserve_work(1, 0).is_ok());
+}
+
 use std::io;
 
 /// Drive arm/cancel/commit/read without yielding to the IO reactor. The idle

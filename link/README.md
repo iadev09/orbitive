@@ -55,6 +55,41 @@ only move forward, so this ordering may conservatively overstate a concurrent
 producer but cannot pair an old reservation with a newer read and underflow
 into a false `Full`. Admission and write reservation use the same ordering.
 
+## Receiver-owned work admission
+
+`join_with_capacity` declares a per-receiver exchange bound, or `None` for no
+execution bound. A positive bound cannot exceed `spec.inbox.capacity`, the
+physical number of admission records per receiver. This is separate from
+unread inbox frames and creator-side body slots.
+
+A joined sender calls `LinkSegment::reserve_work(target, origin)` before taking
+a body slot. `CapacityFull` means wait for capacity; `NoConsumer` means the
+member left. `WorkReservation::publish` attaches its exact ticket to the inbox
+slot without changing the application payload. Dropping an unpublished
+reservation rolls it back. After publication, the receiver uses
+`InboxReceiver::next` or `Inbox::read_frame`, then `LinkSegment::accept_work`.
+The returned `WorkExecution` holds capacity until dropped. Keep it through the
+complete body or session, not just through production of a response head.
+
+Work admission never gates reading event/control frames. A protocol adapter
+must require an admission ticket for its work frames on a bounded receiver.
+The plain `read` and `recv` conveniences reject admitted frames rather than
+silently discard their tickets.
+
+When full, register `Inbox::watch_capacity(target, origin)` and recheck before
+parking. `Received::Capacity` reports a change through the origin's existing
+inbox bell; several local waits share one member interest. Cancelling one wait
+must not clear another's interest. No polling, second queue, descriptor or
+capacity-driver thread is added. Callers own any declared waiting budget.
+
+Only the receiver completes accepted work. Recovery under a dead member's
+kernel hold cancels its unaccepted reservations, while its accepted work on a
+live receiver stays counted. Receiver death retires its own admissions.
+Claim generations never wrap or reset on lane reuse; old completion cannot
+free a new admission. The owner must drain accepted work before releasing
+its lane hold. Native exit handling must invoke the existing exact-member
+recovery APIs; elapsed time is not death evidence.
+
 ## Interrupted producers
 
 Opening a `LinkSegment` also holds a producer registration, including for a
@@ -88,7 +123,7 @@ kernel hold, cancels unfinished claims, preserves committed frames and repeats
 their wake. It is idempotent if its own actor dies. There is no automatic timed
 recovery scan, PID liveness probe or timeout-based cancellation of live writers.
 
-This is inbox layout version 7. Existing segments are not converted in place:
+This is inbox layout version 8. Existing segments are not converted in place:
 use a new kind for coexistence, or stop all users before removing the old named
 resources. Neither opening nor recovery unlinks a running fleet's resources.
 

@@ -9,6 +9,10 @@ use crate::{LinkSegment, Result};
 pub enum Received {
     /// A downstream frame was copied out of the lane.
     Frame,
+    /// A frame carrying one receiver-owned work admission.
+    Work(crate::WorkTicket),
+    /// Interested capacity changed; recheck before submitting work.
+    Capacity(u64),
     /// An orbit-link event frame was copied out of the lane; hand it to
     /// `LinkEvents::accept` (the `events` feature). Its first byte is in
     /// [`crate::RESERVED_FRAME_TAGS`], so a downstream decoder never sees it
@@ -32,6 +36,7 @@ pub struct InboxReceiver {
     socket: tokio::net::UnixDatagram,
     /// The directory generation this receiver last reported.
     directory: u64,
+    capacity: u64,
 }
 
 impl InboxReceiver {
@@ -41,7 +46,8 @@ impl InboxReceiver {
     ) -> Result<Self> {
         let socket = segment.inbox().bind_receiver(lane)?;
         let directory = segment.inbox().directory();
-        Ok(Self { segment, lane, socket, directory })
+        let capacity = segment.inbox().capacity_generation(lane)?;
+        Ok(Self { segment, lane, socket, directory, capacity })
     }
 
     /// Wait for and copy the next frame from this lane, of either kind.
@@ -54,8 +60,15 @@ impl InboxReceiver {
         out: &mut Vec<u8>,
     ) -> Result<()> {
         loop {
-            if !matches!(self.next(out).await?, Received::Directory(_)) {
-                return Ok(());
+            match self.next(out).await? {
+                Received::Directory(_) | Received::Capacity(_) => {}
+                Received::Work(ticket) => {
+                    self.segment.inbox().cancel_work(ticket);
+                    return Err(crate::Error::Malformed(
+                        "work frames require an admission-aware receiver",
+                    ));
+                }
+                Received::Frame | Received::Event => return Ok(()),
             }
         }
     }
@@ -78,8 +91,15 @@ impl InboxReceiver {
                 return Ok(Received::Directory(directory));
             }
             let seen = inbox.receiver_generation(self.lane)?;
-            if inbox.read(self.lane, out)? {
-                return Ok(if crate::frame::is_event(out) {
+            let capacity = inbox.capacity_generation(self.lane)?;
+            if capacity != self.capacity {
+                self.capacity = capacity;
+                return Ok(Received::Capacity(capacity));
+            }
+            if let Some(work) = inbox.read_frame(self.lane, out)? {
+                return Ok(if let Some(ticket) = work {
+                    Received::Work(ticket)
+                } else if crate::frame::is_event(out) {
                     Received::Event
                 } else {
                     Received::Frame

@@ -45,6 +45,8 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 8: receiver-owned work reservations and capacity-change interests.
+///
 /// 7: producer registry, owned claims and monotonic consumer handoff.
 ///
 /// 6: an interest table follows the watchers, one entry per lane and per
@@ -60,7 +62,7 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 7;
+pub(crate) const INBOX_VERSION: u32 = 8;
 
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,9 +221,14 @@ const _: () = assert!(size_of::<InterestEntry>() == 64);
 pub(crate) struct SlotHeader {
     pub(crate) seq: AtomicU64,
     pub(crate) claim: AtomicU64,
+    pub(crate) work_epoch: AtomicU64,
+    pub(crate) work_claim: AtomicU64,
     pub(crate) len: AtomicU32,
-    _padding: [u8; 44],
+    pub(crate) work_slot: AtomicU32,
+    _padding: [u8; 24],
 }
+
+const _: () = assert!(size_of::<SlotHeader>() == 64);
 
 /// What a writer must know to refuse correctly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -276,6 +283,7 @@ impl InboxGeometry {
                     + size_of::<WatcherHeader>()
                     + 2 * size_of::<InterestEntry>())
             + claims::registry_bytes(fleet_capacity, self.capacity)
+            + crate::admission::bytes(fleet_capacity, self.capacity)
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -326,7 +334,7 @@ pub(crate) struct TableHeader {
 /// bytes are written by other processes: a `&[u8]` would promise Rust that
 /// nothing else mutates them, and something else always does.
 pub struct Inbox {
-    base: *mut u8,
+    pub(crate) base: *mut u8,
     /// How many lanes the table holds.
     ///
     /// It is the fleet capacity today because a lane belongs to a node: a
@@ -335,8 +343,8 @@ pub struct Inbox {
     /// it serves — this is the number that would stop being the fleet's. The
     /// rest of the interface already speaks in lanes rather than nodes, so
     /// that change would not reach the edge.
-    lanes: usize,
-    geometry: InboxGeometry,
+    pub(crate) lanes: usize,
+    pub(crate) geometry: InboxGeometry,
     /// Installed once, before this mapping is exposed to SHM publishers.
     producer: Option<claims::Producer>,
     /// Named descriptor wake used by a Tokio receiver. Memory-backed tables
@@ -374,6 +382,11 @@ impl Inbox {
         geometry: InboxGeometry,
     ) -> Result<Self> {
         geometry.validate()?;
+        if fleet_capacity == 0 || fleet_capacity > u16::MAX as usize {
+            return Err(Error::Malformed(
+                "inbox fleet capacity must fit a nonzero u16",
+            ));
+        }
         let inbox = Self {
             base,
             lanes: fleet_capacity,
@@ -407,6 +420,11 @@ impl Inbox {
         geometry: InboxGeometry,
     ) -> Result<Self> {
         geometry.validate()?;
+        if fleet_capacity == 0 || fleet_capacity > u16::MAX as usize {
+            return Err(Error::Malformed(
+                "inbox fleet capacity must fit a nonzero u16",
+            ));
+        }
         let inbox = Self {
             base,
             lanes: fleet_capacity,
@@ -459,9 +477,29 @@ impl Inbox {
         role: &str,
         incarnation: u64,
     ) -> Result<()> {
+        self.claim_lane_with_capacity(
+            lane_index,
+            service,
+            role,
+            incarnation,
+            None,
+        )
+    }
+
+    /// Publish the work bound before making this lane discoverable.
+    pub fn claim_lane_with_capacity(
+        &self,
+        lane_index: usize,
+        service: &str,
+        role: &str,
+        incarnation: u64,
+        capacity: Option<usize>,
+    ) -> Result<()> {
         self.check_lane(lane_index)?;
         check_identity(service, role)?;
+        self.validate_work_capacity(capacity)?;
         self.reset_lane(lane_index)?;
+        self.configure_capacity(lane_index, capacity)?;
         let lane = self.lane_header(lane_index);
         lane.consumers.store(1, Ordering::Release);
         self.publish_identity(lane, service, role, incarnation);
@@ -505,9 +543,21 @@ impl Inbox {
         service: &str,
         role: &str,
         incarnation: u64,
+        hold: impl FnMut(usize) -> Result<Option<H>>,
+    ) -> Result<(usize, H)> {
+        self.join_with_capacity(service, role, incarnation, None, hold)
+    }
+
+    pub fn join_with_capacity<H>(
+        &self,
+        service: &str,
+        role: &str,
+        incarnation: u64,
+        capacity: Option<usize>,
         mut hold: impl FnMut(usize) -> Result<Option<H>>,
     ) -> Result<(usize, H)> {
         check_identity(service, role)?;
+        self.validate_work_capacity(capacity)?;
         self.refuse_other_role(service, role, None)?;
         for lane_index in 0..self.lanes {
             let lane = self.lane_header(lane_index);
@@ -525,6 +575,7 @@ impl Inbox {
                 continue;
             }
             self.reset_lane(lane_index)?;
+            self.configure_capacity(lane_index, capacity)?;
             self.publish_identity(lane, service, role, incarnation);
             if let Err(conflict) =
                 self.refuse_other_role(service, role, Some(lane_index))
@@ -788,6 +839,7 @@ impl Inbox {
         // routing is not death: accepted streams may still be draining. A
         // later confirmed process exit must still be able to end those sides.
         self.clear_interest(lane_index);
+        self.capacity_changed(lane_index);
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
         self.wake(lane_index, lane);
         self.announce_directory();
@@ -874,8 +926,29 @@ impl Inbox {
         lane_index: usize,
         parts: &[&[u8]],
     ) -> Result<u64> {
+        self.write_frame(lane_index, parts, None)
+    }
+
+    pub(crate) fn write_work(
+        &self,
+        ticket: crate::WorkTicket,
+        parts: &[&[u8]],
+    ) -> Result<u64> {
+        self.check_work(ticket)?;
+        self.write_frame(usize::from(ticket.lane), parts, Some(ticket))
+    }
+
+    fn write_frame(
+        &self,
+        lane_index: usize,
+        parts: &[&[u8]],
+        work: Option<crate::WorkTicket>,
+    ) -> Result<u64> {
         self.check_lane(lane_index)?;
-        let len = parts.iter().map(|part| part.len()).sum::<usize>();
+        let len = parts
+            .iter()
+            .try_fold(0usize, |len, part| len.checked_add(part.len()))
+            .ok_or(Error::FrameTooLarge)?;
         if len > self.geometry.payload_capacity {
             return Err(Error::FrameTooLarge);
         }
@@ -893,6 +966,13 @@ impl Inbox {
         }
         #[cfg(test)]
         claims::checkpoint("payload");
+        if let Some(ticket) = work {
+            slot.work_epoch.store(ticket.epoch, Ordering::Relaxed);
+            slot.work_slot.store(ticket.slot, Ordering::Relaxed);
+            slot.work_claim.store(ticket.claim, Ordering::Relaxed);
+        } else {
+            slot.work_claim.store(0, Ordering::Relaxed);
+        }
         slot.len.store(len as u32, Ordering::Relaxed);
         // Admission is not publication: only COMMITTED releases these bytes.
         slot.claim.store(reservation.claim(COMMITTED), Ordering::Release);
@@ -913,19 +993,38 @@ impl Inbox {
         lane_index: usize,
         out: &mut Vec<u8>,
     ) -> Result<bool> {
+        match self.read_frame(lane_index, out)? {
+            None => Ok(false),
+            Some(None) => Ok(true),
+            Some(Some(ticket)) => {
+                self.cancel_work(ticket);
+                Err(Error::Malformed(
+                    "work frames require an admission-aware receiver",
+                ))
+            }
+        }
+    }
+
+    /// Copy a frame and its optional admission identity. Only the owning
+    /// receiver may read, then accept work before dispatching its payload.
+    pub fn read_frame(
+        &self,
+        lane_index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<Option<crate::WorkTicket>>> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
         for _ in 0..self.geometry.capacity {
             let position = lane.read.load(Ordering::Relaxed);
             if position >= lane.reserve.load(Ordering::Acquire) {
-                return Ok(false);
+                return Ok(None);
             }
             let slot = self.slot_header(lane_index, position);
             let claim = slot.claim.load(Ordering::Acquire);
             if slot.seq.load(Ordering::Acquire) != position
                 || !matches!(claim & 3, COMMITTED | CANCELLED)
             {
-                return Ok(false);
+                return Ok(None);
             }
             let intent = self.intent_for_claim(claim)?;
             if intent.position != position || intent.lane != lane_index {
@@ -935,6 +1034,13 @@ impl Inbox {
             }
             let deliver = claim & 3 == COMMITTED
                 && intent.incarnation == lane.epoch.load(Ordering::Acquire);
+            let work_claim = slot.work_claim.load(Ordering::Relaxed);
+            let work = (work_claim != 0).then(|| crate::WorkTicket {
+                lane: lane_index as u16,
+                epoch: slot.work_epoch.load(Ordering::Relaxed),
+                slot: slot.work_slot.load(Ordering::Relaxed),
+                claim: work_claim,
+            });
             if deliver {
                 let len = slot.len.load(Ordering::Relaxed) as usize;
                 if len > self.geometry.payload_capacity {
@@ -955,7 +1061,7 @@ impl Inbox {
             }
             self.consume_frame(lane_index, position, claim)?;
             if deliver {
-                return Ok(true);
+                return Ok(Some(work));
             }
         }
         // No wake. Nobody waits on a consume — a writer that finds the lane
@@ -964,7 +1070,7 @@ impl Inbox {
         // token: every drain moved `changes` past the value it would park on,
         // so each wake-up paid a park that returned at once before the one
         // that waited.
-        Ok(false)
+        Ok(None)
     }
 
     /// The word a parked reader waits on, and its current value.
@@ -1054,6 +1160,8 @@ impl Inbox {
         lane.waiters.store(0, Ordering::Relaxed);
         lane.reactor.store(0, Ordering::Relaxed);
         self.clear_interest(lane_index);
+        self.recover_work(lane_index);
+        self.configure_capacity(lane_index, None)?;
         Ok(())
     }
 
@@ -1133,7 +1241,7 @@ impl Inbox {
     /// The bump comes first and the waiter count is read after, so a reader
     /// that registered itself in between is still seen; one that registers
     /// after finds the word already moved and does not start the wait.
-    fn wake(
+    pub(crate) fn wake(
         &self,
         lane_index: usize,
         lane: &LaneHeader,
@@ -1420,7 +1528,7 @@ impl Inbox {
         }
     }
 
-    fn check_lane(
+    pub(crate) fn check_lane(
         &self,
         lane_index: usize,
     ) -> Result<()> {
@@ -1446,7 +1554,7 @@ impl Inbox {
         }
     }
 
-    fn lane_header(
+    pub(crate) fn lane_header(
         &self,
         lane_index: usize,
     ) -> &LaneHeader {

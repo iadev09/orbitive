@@ -130,7 +130,11 @@ impl Inbox {
         unsafe {
             self.base.add(
                 self.geometry.segment_bytes(self.lanes)
-                    - registry_bytes(self.lanes, self.geometry.capacity),
+                    - registry_bytes(self.lanes, self.geometry.capacity)
+                    - crate::admission::bytes(
+                        self.lanes,
+                        self.geometry.capacity,
+                    ),
             )
         }
     }

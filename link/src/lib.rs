@@ -21,6 +21,7 @@ use std::fmt;
 
 use orbit_stream::StreamSpec;
 
+mod admission;
 #[cfg(unix)]
 mod bell;
 mod body;
@@ -35,6 +36,9 @@ mod segment;
 #[cfg(all(unix, feature = "tokio"))]
 mod watcher;
 
+pub use admission::WorkTicket;
+#[cfg(unix)]
+pub use admission::{WorkExecution, WorkReservation};
 pub use body::LinkBodies;
 #[cfg(all(unix, feature = "events"))]
 pub use events::{LinkEvents, Routing};
@@ -99,6 +103,12 @@ impl LinkSpec {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// All receiver-declared work admissions are occupied.
+    CapacityFull,
+    /// The work reservation was cancelled, accepted, completed or replaced.
+    StaleWork,
+    /// No joined receiver owns this destination.
+    NoConsumer,
     InboxFull,
     NoLane,
     NoWatcher,
@@ -128,6 +138,15 @@ impl fmt::Display for Error {
         formatter: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         match self {
+            Self::CapacityFull => {
+                formatter.write_str("receiver work capacity is full")
+            }
+            Self::StaleWork => {
+                formatter.write_str("work reservation is no longer valid")
+            }
+            Self::NoConsumer => {
+                formatter.write_str("the receiver is not joined")
+            }
             Self::InboxFull => {
                 formatter.write_str("the target inbox lane is full or unowned")
             }
