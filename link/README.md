@@ -90,6 +90,13 @@ free a new admission. The owner must drain accepted work before releasing
 its lane hold. Native exit handling must invoke the existing exact-member
 recovery APIs; elapsed time is not death evidence.
 
+`LinkSegment::update_work_capacity(&joined, limit)` changes a positive bound
+without replacing the receiver. Growth notifies waiting callers. On shrink,
+claims above the new boundary finish before lower slots are refilled; accepted
+work is never cancelled. Switching an unbounded receiver to bounded admission
+requires rejoining, because its earlier work has no admission tickets. Physical
+inbox and stream geometry remains fixed for the segment's lifetime.
+
 ## Interrupted producers
 
 Opening a `LinkSegment` also holds a producer registration, including for a

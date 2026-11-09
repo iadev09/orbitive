@@ -156,3 +156,39 @@ async fn a_commit_while_disarmed_remains_visible_before_parking() {
         io::ErrorKind::WouldBlock
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_growth_resumes_a_parked_receiver_without_a_frame() {
+    let scratch = Scratch::new();
+    scratch
+        .0
+        .inbox()
+        .claim_lane_with_capacity(1, "target", "worker", 1, Some(1))
+        .unwrap();
+    let mut receiver = scratch.0.receiver(0).unwrap();
+    let ticket = scratch.0.inbox().reserve_work(1, 0).unwrap().unwrap();
+    scratch.0.inbox().watch_capacity(1, 0).unwrap();
+    let (armed, waiting) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut frame = Vec::new();
+        let mut next = Box::pin(receiver.next(&mut frame));
+        let mut armed = Some(armed);
+        std::future::poll_fn(|cx| {
+            let result = next.as_mut().poll(cx);
+            if result.is_pending()
+                && let Some(armed) = armed.take()
+            {
+                armed.send(()).unwrap();
+            }
+            result
+        })
+        .await
+    });
+    waiting.await.unwrap();
+    scratch.0.inbox().update_work_capacity(1, 2).unwrap();
+    assert!(matches!(
+        task.await.unwrap().unwrap(),
+        crate::Received::Capacity(_)
+    ));
+    scratch.0.inbox().cancel_work(ticket);
+}

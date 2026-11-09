@@ -228,3 +228,90 @@ fn invalid_bounds_fail_before_a_lane_is_advertised() {
         .unwrap();
     assert_eq!(inbox.reserve_work(1, 0).unwrap(), None);
 }
+
+#[test]
+fn live_growth_notifies_registered_origins_once() {
+    let memory = memory(Some(1));
+    let inbox = &memory.inbox;
+    let active = inbox.reserve_work(1, 0).unwrap().unwrap();
+    inbox.accept_work(1, active).unwrap();
+    inbox.watch_capacity(1, 2).unwrap();
+    let seen = inbox.capacity_generation(2).unwrap();
+    inbox.update_work_capacity(1, 3).unwrap();
+    assert_eq!(inbox.capacity_generation(2).unwrap(), seen + 1);
+    let second = inbox.reserve_work(1, 2).unwrap().unwrap();
+    let third = inbox.reserve_work(1, 3).unwrap().unwrap();
+    assert!(matches!(inbox.reserve_work(1, 0), Err(Error::CapacityFull)));
+    inbox.watch_capacity(1, 2).unwrap();
+    inbox.update_work_capacity(1, 3).unwrap();
+    assert_eq!(inbox.capacity_generation(2).unwrap(), seen + 1);
+    inbox.complete_work(active);
+    inbox.cancel_work(second);
+    inbox.cancel_work(third);
+}
+
+#[test]
+fn shrink_drains_retiring_claims_without_cancelling_any_ticket() {
+    let memory = memory(Some(4));
+    let inbox = &memory.inbox;
+    let tickets: Vec<_> =
+        (0..4).map(|_| inbox.reserve_work(1, 0).unwrap().unwrap()).collect();
+    for ticket in &tickets {
+        inbox.accept_work(1, *ticket).unwrap();
+    }
+    inbox.update_work_capacity(1, 2).unwrap();
+    assert_eq!(inbox.work_capacity(1).unwrap(), Some(2));
+    // Free holes below the new boundary. Old work above it still belongs to
+    // the receiver, so those holes cannot admit a replacement prematurely.
+    for ticket in tickets.iter().filter(|ticket| ticket.slot < 2) {
+        inbox.complete_work(*ticket);
+    }
+    assert!(matches!(inbox.reserve_work(1, 2), Err(Error::CapacityFull)));
+    for ticket in tickets.iter().filter(|ticket| ticket.slot >= 2) {
+        inbox.watch_capacity(1, 2).unwrap();
+        let seen = inbox.capacity_generation(2).unwrap();
+        inbox.complete_work(*ticket);
+        assert_ne!(inbox.capacity_generation(2).unwrap(), seen);
+    }
+    let first = inbox.reserve_work(1, 2).unwrap().unwrap();
+    let second = inbox.reserve_work(1, 3).unwrap().unwrap();
+    assert!(first.slot < 2 && second.slot < 2);
+    assert!(matches!(inbox.reserve_work(1, 0), Err(Error::CapacityFull)));
+    // Stale completions cannot release the new claims.
+    for ticket in tickets {
+        inbox.complete_work(ticket);
+    }
+    assert!(matches!(inbox.reserve_work(1, 0), Err(Error::CapacityFull)));
+    inbox.cancel_work(first);
+    inbox.cancel_work(second);
+}
+
+#[test]
+fn resize_validation_preserves_current_policy_and_untracked_work() {
+    let bounded = memory(Some(2));
+    for limit in [0, 5] {
+        assert!(bounded.inbox.update_work_capacity(1, limit).is_err());
+        assert_eq!(bounded.inbox.work_capacity(1).unwrap(), Some(2));
+    }
+    let unbounded = memory(None);
+    assert!(unbounded.inbox.update_work_capacity(1, 1).is_err());
+    assert_eq!(unbounded.inbox.reserve_work(1, 0).unwrap(), None);
+}
+
+#[test]
+fn producer_using_an_old_policy_cannot_publish_after_shrink() {
+    let memory = memory(Some(4));
+    let inbox = &memory.inbox;
+    let policy = inbox.admission_policy(1).unwrap();
+    let epoch = inbox.lane_epoch(1).unwrap();
+    let origin_epoch = inbox.lane_epoch(0).unwrap();
+    inbox.update_work_capacity(1, 1).unwrap();
+    assert!(matches!(
+        inbox.reserve_with_policy(1, 0, epoch, origin_epoch, policy),
+        Err(Error::CapacityFull)
+    ));
+    let current = inbox.reserve_work(1, 2).unwrap().unwrap();
+    assert_eq!(current.slot, 0);
+    assert!(matches!(inbox.reserve_work(1, 3), Err(Error::CapacityFull)));
+    inbox.cancel_work(current);
+}

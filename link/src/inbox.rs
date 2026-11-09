@@ -45,6 +45,8 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 9: atomic live-bound policy and retiring admission window.
+///
 /// 8: receiver-owned work reservations and capacity-change interests.
 ///
 /// 7: producer registry, owned claims and monotonic consumer handoff.
@@ -62,7 +64,7 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 8;
+pub(crate) const INBOX_VERSION: u32 = 9;
 
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -464,6 +466,14 @@ impl Inbox {
 
     pub fn lanes(&self) -> usize {
         self.lanes
+    }
+
+    pub(crate) fn lane_epoch(
+        &self,
+        lane: usize,
+    ) -> Result<u64> {
+        self.check_lane(lane)?;
+        Ok(self.lane_header(lane).epoch.load(Ordering::Acquire))
     }
 
     /// Claim a lane after fencing out its previous reader. Discard completed

@@ -39,6 +39,18 @@ pub struct Joined {
     pub lane: usize,
     pub hold: LaneHold,
     pub reclaimed: Vec<Reclaimed>,
+    segment: String,
+    epoch: u64,
+}
+
+impl Joined {
+    pub(crate) fn belongs_to(
+        &self,
+        segment: &LinkSegment,
+    ) -> bool {
+        self.segment == segment.name
+            && segment.inbox.lane_epoch(self.lane).ok() == Some(self.epoch)
+    }
 }
 
 impl LinkSegment {
@@ -200,7 +212,8 @@ impl LinkSegment {
                 reclaimed.push(gone);
             }
         }
-        Ok(Joined { lane, hold, reclaimed })
+        let epoch = self.inbox.lane_epoch(lane)?;
+        Ok(Joined { lane, hold, reclaimed, segment: self.name.clone(), epoch })
     }
 
     fn recover_abandoned(&self) -> Result<Vec<Reclaimed>> {

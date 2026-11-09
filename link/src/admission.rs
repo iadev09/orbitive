@@ -33,10 +33,12 @@ impl WorkTicket {
 /// Kept separate from traffic counters; only bounded work touches this row.
 #[repr(C, align(64))]
 pub(crate) struct Capacity {
-    limit: AtomicU32,
-    cursor: AtomicU32,
+    // Low word: current bound. High word: slots that may still hold work
+    // admitted under an earlier, larger bound. Updated together.
+    policy: AtomicU64,
     changes: AtomicU64,
-    _padding: [u8; 48],
+    cursor: AtomicU32,
+    _padding: [u8; 44],
 }
 
 const _: () = assert!(size_of::<Capacity>() == 64);
@@ -104,7 +106,8 @@ impl Inbox {
         lane: usize,
     ) -> Result<Option<usize>> {
         self.check_lane(lane)?;
-        let limit = self.capacity_row(lane).limit.load(Ordering::Acquire);
+        let limit =
+            self.capacity_row(lane).policy.load(Ordering::SeqCst) as u32;
         Ok((limit != 0).then_some(limit as usize))
     }
 
@@ -114,10 +117,84 @@ impl Inbox {
         limit: Option<usize>,
     ) -> Result<()> {
         self.validate_work_capacity(limit)?;
+        let limit = limit.unwrap_or(0) as u64;
         self.capacity_row(lane)
-            .limit
-            .store(limit.unwrap_or(0) as u32, Ordering::Release);
+            .policy
+            .store(limit | (limit << 32), Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Change a joined receiver's positive bound without ending any work.
+    /// The caller must own the receiver lane. Switching between tracked and
+    /// untracked admission requires a new join: old untracked work has no ticket.
+    pub(crate) fn update_work_capacity(
+        &self,
+        lane: usize,
+        limit: usize,
+    ) -> Result<()> {
+        self.check_lane(lane)?;
+        self.validate_work_capacity(Some(limit))?;
+        if self.consumers(lane)? == 0 {
+            return Err(Error::NoConsumer);
+        }
+        let row = self.capacity_row(lane);
+        let mut before = row.policy.load(Ordering::SeqCst);
+        loop {
+            let previous = before as u32 as usize;
+            if previous == 0 {
+                return Err(Error::Malformed(
+                    "unbounded Link admission requires rejoin before setting a bound",
+                ));
+            }
+            if previous == limit {
+                return Ok(());
+            }
+            let window = ((before >> 32) as usize).max(limit);
+            let after = limit as u64 | ((window as u64) << 32);
+            match row.policy.compare_exchange(
+                before,
+                after,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(current) => before = current,
+            }
+        }
+        self.capacity_changed(lane);
+        Ok(())
+    }
+
+    fn admission_policy(
+        &self,
+        lane: usize,
+    ) -> Result<u64> {
+        let row = self.capacity_row(lane);
+        let mut policy = row.policy.load(Ordering::SeqCst);
+        loop {
+            let limit = policy as u32 as usize;
+            let window = (policy >> 32) as usize;
+            if limit == 0 || window == limit {
+                return Ok(policy);
+            }
+            // Claims above the new boundary retain their full lifetime. Do
+            // not refill holes below it until those retiring claims drain.
+            if (limit..window).any(|index| {
+                self.work_slot(lane, index).load(Ordering::SeqCst) & 3 != FREE
+            }) {
+                return Err(Error::CapacityFull);
+            }
+            let trimmed = limit as u64 | ((limit as u64) << 32);
+            match row.policy.compare_exchange(
+                policy,
+                trimmed,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(trimmed),
+                Err(current) => policy = current,
+            }
+        }
     }
 
     pub(crate) fn validate_work_capacity(
@@ -147,7 +224,23 @@ impl Inbox {
         let epoch = self.lane_header(lane).epoch.load(Ordering::Acquire);
         let origin_epoch =
             self.lane_header(origin).epoch.load(Ordering::Acquire);
-        let Some(limit) = self.work_capacity(lane)? else { return Ok(None) };
+        let policy = self.admission_policy(lane)?;
+        let limit = policy as u32 as usize;
+        if limit == 0 {
+            return Ok(None);
+        }
+        self.reserve_with_policy(lane, origin, epoch, origin_epoch, policy)
+    }
+
+    fn reserve_with_policy(
+        &self,
+        lane: usize,
+        origin: usize,
+        epoch: u64,
+        origin_epoch: u64,
+        policy: u64,
+    ) -> Result<Option<WorkTicket>> {
+        let limit = policy as u32 as usize;
         let row = self.capacity_row(lane);
         let start = row.cursor.fetch_add(1, Ordering::Relaxed) as usize % limit;
         let mut exhausted = 0;
@@ -183,6 +276,12 @@ impl Inbox {
                 slot: index as u32,
                 claim,
             };
+            // A producer that raced a resize cannot publish a claim made
+            // against an obsolete boundary. Existing published tickets stay valid.
+            if row.policy.load(Ordering::SeqCst) != policy {
+                self.cancel_work(ticket);
+                return Err(Error::CapacityFull);
+            }
             if self.lane_header(lane).epoch.load(Ordering::Acquire) != epoch
                 || self.lane_header(origin).epoch.load(Ordering::Acquire)
                     != origin_epoch
@@ -418,6 +517,19 @@ mod owned {
     }
 
     impl LinkSegment {
+        /// Update admission for the receiver lane held by `joined`.
+        /// Existing reservations and accepted work keep their tickets.
+        pub fn update_work_capacity(
+            &self,
+            joined: &crate::Joined,
+            limit: usize,
+        ) -> Result<()> {
+            if !joined.belongs_to(self) {
+                return Err(Error::StaleWork);
+            }
+            self.inbox().update_work_capacity(joined.lane, limit)
+        }
+
         pub fn reserve_work(
             self: &Arc<Self>,
             lane: usize,
