@@ -109,3 +109,77 @@ fn capacity_words_preserve_existing_doorbell_layout() {
     assert_eq!(std::mem::offset_of!(Doorbell, capacity_waiting), 16);
     assert_eq!(std::mem::offset_of!(Doorbell, capacity_changes), 20);
 }
+
+#[test]
+fn readiness_probes_do_not_claim_or_rearm_a_slot() {
+    let streams = streams();
+    assert!(streams.can_create());
+    let (mut origin, ticket) = streams.create().unwrap();
+    assert!(!streams.can_create());
+    assert!(matches!(
+        streams.can_rearm(ticket.id),
+        Err(crate::Error::Stale(_))
+    ));
+    let remote = streams.open(ticket).unwrap();
+    assert!(!streams.can_rearm(ticket.id).unwrap());
+    assert!(matches!(streams.create(), Err(crate::Error::Full { .. })));
+    drop(remote);
+    assert!(streams.can_rearm(ticket.id).unwrap());
+    assert!(
+        streams.can_rearm(ticket.id).unwrap(),
+        "probing leaves the released claim alone"
+    );
+    origin.rearm(&streams).unwrap();
+    assert!(matches!(
+        streams.can_rearm(ticket.id),
+        Err(crate::Error::Stale(_))
+    ));
+    let remote = streams.open(ticket).unwrap();
+    assert!(!streams.can_rearm(ticket.id).unwrap());
+    drop((origin, remote));
+    assert!(streams.can_create());
+    assert!(matches!(
+        streams.can_rearm(ticket.id),
+        Err(crate::Error::Stale(_))
+    ));
+}
+
+#[test]
+fn readiness_hint_is_revalidated_after_acquisition_or_peer_death() {
+    let streams = streams();
+    assert!(streams.can_create());
+    let (mut origin, ticket) = streams.create().unwrap();
+    assert!(matches!(streams.create(), Err(crate::Error::Full { .. })));
+    let remote = streams.open(ticket).unwrap();
+    drop(remote);
+    assert!(streams.can_rearm(ticket.id).unwrap());
+    streams.node_dead(orbit_core::NodeId::ZERO, Incarnation::new(1));
+    assert!(matches!(origin.rearm(&streams), Err(crate::Error::Stale(_))));
+    assert!(matches!(
+        streams.can_rearm(ticket.id),
+        Err(crate::Error::Stale(_))
+    ));
+}
+
+#[test]
+fn epoch_reset_invalidates_a_probe_and_wakes_its_observer() {
+    let streams = streams();
+    let (mut origin, ticket) = streams.create().unwrap();
+    let remote = streams.open(ticket).unwrap();
+    drop(remote);
+    assert!(streams.can_rearm(ticket.id).unwrap());
+    let mut changed = Box::pin(streams.capacity_changed());
+    streams.reset_all();
+    assert!(streams.can_create());
+    assert!(matches!(
+        streams.can_rearm(ticket.id),
+        Err(crate::Error::Stale(_))
+    ));
+    assert!(matches!(origin.rearm(&streams), Err(crate::Error::Stale(_))));
+    assert!(
+        changed
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_ready()
+    );
+}

@@ -732,17 +732,8 @@ impl Streams {
         &self,
         id: StreamId,
     ) -> Result<()> {
-        let index = self.locate(id)?;
-        let slot = &self.table.slots()[index];
-        if !slot.is(id.generation()) {
-            return Err(Error::Stale(id));
-        }
+        let slot = self.rearmable_slot(id)?;
         let far = Side::B.index();
-        match slot.claimed[far].load(Ordering::SeqCst) {
-            SIDE_RELEASED => {}
-            SIDE_CLAIMED => return Err(Error::WouldBlock),
-            _ => return Err(Error::Stale(id)),
-        }
         for direction in &slot.directions {
             direction.clear();
         }
@@ -760,6 +751,48 @@ impl Streams {
             )
             .map_err(|_| Error::Stale(id))?;
         Ok(())
+    }
+
+    /// Whether this creator lane has an empty slot, without allocating one.
+    ///
+    /// This is a readiness hint, not a reservation. [`Self::create`] still
+    /// validates and claims the slot; another creator may acquire it first.
+    pub fn can_create(&self) -> bool {
+        self.table.has_capacity()
+    }
+
+    /// Whether the far side has released a retained creator endpoint.
+    ///
+    /// This does not clear or re-arm the stream. `false` means the peer still
+    /// holds it; stale or never-opened streams return [`Error::Stale`]. Actual
+    /// [`Self::rearm`] revalidates ownership before changing any state.
+    pub fn can_rearm(
+        &self,
+        id: StreamId,
+    ) -> Result<bool> {
+        match self.rearmable_slot(id) {
+            Ok(_) => Ok(true),
+            Err(Error::WouldBlock) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn rearmable_slot(
+        &self,
+        id: StreamId,
+    ) -> Result<&Slot> {
+        let index = self.locate(id)?;
+        let slot = &self.table.slots()[index];
+        if !slot.is(id.generation()) {
+            return Err(Error::Stale(id));
+        }
+        let far = Side::B.index();
+        match slot.claimed[far].load(Ordering::SeqCst) {
+            SIDE_RELEASED => {}
+            SIDE_CLAIMED => return Err(Error::WouldBlock),
+            _ => return Err(Error::Stale(id)),
+        }
+        Ok(slot)
     }
 
     /// Whether the address names a live stream right now.

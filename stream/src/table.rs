@@ -212,6 +212,13 @@ impl Table {
         unsafe { self.base().add(self.geometry.buffer_offset(slot, direction)) }
     }
 
+    pub(crate) fn has_capacity(&self) -> bool {
+        let start = usize::from(self.node) * self.geometry.lane_capacity;
+        self.slots()[start..start + self.geometry.lane_capacity]
+            .iter()
+            .any(|slot| slot.state.load(Ordering::Acquire) == SLOT_EMPTY)
+    }
+
     /// Take a free slot in this process's lane and install a fresh stream.
     /// Returns the slot index and its generation.
     pub(crate) fn allocate(&self) -> Result<(usize, u32)> {

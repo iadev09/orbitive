@@ -151,6 +151,12 @@ registrations; no reader/writer waker is replaced. Both-half release precedes
 the capacity signal, so FIN or reader departure alone cannot imply reuse.
 Confirmed owner death signals the same predicate after recovery updates.
 
+`can_create()` inspects EMPTY slots in the caller's creator lane; `can_rearm(id)`
+checks the same live generation and released peer claim as `rearm`. Neither query
+reserves or clears a stream. Arm the capacity observation before rechecking these
+hints, then acquire/rearm normally: a hint does not exclude a concurrent claimant
+or recovery. These queries add no shared fields or changes to release/wake paths.
+
 Registration arms before an allocation retry with a SeqCst fence; release
 publishes state before testing the arm. A release is therefore either visible
 to the retry or changes the observed generation. Completion/cancellation
