@@ -73,6 +73,8 @@ pub(crate) struct Table {
     /// so no cross-process lock is needed here.
     allocate: Mutex<usize>,
     pub(crate) registry: Registry,
+    pub(crate) capacity: crate::capacity::Waiters,
+    capacity_seen: AtomicU32,
     driver: Mutex<Option<Driving>>,
     /// Where this table rings a node whose doorbell a socket answers.
     #[cfg(unix)]
@@ -126,7 +128,6 @@ impl Table {
         self.header().epoch.load(Ordering::Acquire)
     }
 
-    #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn own_doorbell(&self) -> &Doorbell {
         self.doorbell(usize::from(self.node))
     }
@@ -299,6 +300,26 @@ impl Table {
         }
     }
 
+    /// A creator's EMPTY slot or released peer can now be used. Unobserved
+    /// releases add no generation update or kernel notification.
+    pub(crate) fn notify_capacity(
+        &self,
+        index: usize,
+    ) {
+        let creator = index / self.geometry.lane_capacity;
+        let bell = self.doorbell(creator);
+        if bell.capacity_waiting.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        bell.capacity_changes.fetch_add(1, Ordering::SeqCst);
+        if self.is_shared() {
+            self.ring(creator, None);
+        } else {
+            self.capacity.wake();
+            self.signal_readiness();
+        }
+    }
+
     /// Put the stream in `node`'s offer bitmap and ring it.
     pub(crate) fn offer(
         &self,
@@ -436,7 +457,7 @@ impl Table {
         }
     }
 
-    fn ensure_driver(self: &Arc<Self>) -> Result<()> {
+    pub(crate) fn ensure_driver(self: &Arc<Self>) -> Result<()> {
         if self.is_shared() {
             let mut driver = lock_unpoisoned(&self.driver);
             if driver.is_none() {
@@ -471,6 +492,7 @@ impl Table {
         let doorbell = self.doorbell(usize::from(node));
         if doorbell.incarnation.load(Ordering::SeqCst) == incarnation {
             doorbell.listening.store(0, Ordering::SeqCst);
+            doorbell.capacity_waiting.store(0, Ordering::SeqCst);
             doorbell.incarnation.store(0, Ordering::SeqCst);
         }
     }
@@ -483,6 +505,7 @@ impl Table {
         let doorbell = self.doorbell(usize::from(self.node));
         if doorbell.incarnation.load(Ordering::SeqCst) != mine {
             doorbell.listening.store(0, Ordering::SeqCst);
+            doorbell.capacity_waiting.store(0, Ordering::SeqCst);
             doorbell.incarnation.store(0, Ordering::SeqCst);
         }
     }
@@ -536,6 +559,9 @@ impl Table {
                     Ordering::SeqCst,
                 );
             }
+            if touched {
+                self.notify_capacity(index);
+            }
         }
     }
 
@@ -562,6 +588,7 @@ impl Table {
             }
         }
         self.registry.clear();
+        self.capacity.wake();
     }
 
     #[cfg(unix)]
@@ -606,6 +633,12 @@ impl Doorstep for Table {
 
     fn drain(&self) {
         let node = usize::from(self.node);
+        let changed =
+            self.own_doorbell().capacity_changes.load(Ordering::SeqCst);
+        if self.capacity_seen.load(Ordering::Relaxed) != changed {
+            self.capacity_seen.store(changed, Ordering::Relaxed);
+            self.capacity.wake();
+        }
         for word in 0..self.geometry.bitmap_words {
             let mut bits =
                 self.pending_word(node, word).swap(0, Ordering::SeqCst);
@@ -846,6 +879,8 @@ fn open_inner(
         incarnation: incarnation.get(),
         allocate: Mutex::new(0),
         registry: Registry::new(geometry.total_slots),
+        capacity: crate::capacity::Waiters::default(),
+        capacity_seen: AtomicU32::new(0),
         driver: Mutex::new(None),
         #[cfg(unix)]
         bell: match &key {

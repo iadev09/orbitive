@@ -491,3 +491,47 @@ async fn a_body_behind_a_header_wakes_a_reader_that_parked_between_the_two() {
     // the other tests in this file do not.
     let _ = owner.unlink();
 }
+
+#[tokio::test]
+async fn creator_capacity_wakes_through_the_shared_bell_after_peer_release() {
+    use orbit_stream::StreamSpec;
+    use std::future::{Future, poll_fn};
+    let name = fleet_name("capacity");
+    let spec = StreamSpec::new(orbit_stream::STREAM_KIND, 1, 64);
+    let table = |node| {
+        Streams::with_spec(
+            Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(node)).unwrap()),
+            Incarnation::new(1),
+            spec,
+        )
+        .unwrap()
+    };
+    let owner = table(0);
+    let peer = table(1);
+    let (mut endpoint, ticket) = owner.create().unwrap();
+    let remote = peer.open(ticket).unwrap();
+    let changed = owner.capacity_changed();
+    let (parked, entered) = tokio::sync::oneshot::channel();
+    let waiting = tokio::spawn(async move {
+        let mut changed = std::pin::pin!(changed);
+        let mut parked = Some(parked);
+        poll_fn(|cx| {
+            let polled = changed.as_mut().poll(cx);
+            if polled.is_pending()
+                && let Some(parked) = parked.take()
+            {
+                parked.send(()).unwrap();
+            }
+            polled
+        })
+        .await
+    });
+    entered.await.unwrap();
+    assert!(matches!(owner.create(), Err(orbit_stream::Error::Full { .. })));
+    drop(remote);
+    waiting.await.unwrap().unwrap();
+    endpoint.rearm(&owner).unwrap();
+    drop(endpoint);
+    owner.create().unwrap();
+    owner.unlink().unwrap();
+}

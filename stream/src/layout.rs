@@ -113,7 +113,11 @@ pub(crate) struct Doorbell {
     /// Whose driver is listening, so a death report for that incarnation
     /// can stop writers from ringing a bell nobody answers.
     pub(crate) incarnation: AtomicU64,
-    _padding: [u8; 48],
+    /// Creator-capacity observers, separate from byte readiness. These words
+    /// use former padding; the doorbell size and following offsets stay fixed.
+    pub(crate) capacity_waiting: AtomicU32,
+    pub(crate) capacity_changes: AtomicU32,
+    _padding: [u8; 40],
 }
 
 /// One direction of a stream: a single-producer, single-consumer byte ring

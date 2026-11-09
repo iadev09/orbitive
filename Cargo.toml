@@ -132,7 +132,7 @@ orbit-link = { version = "0.6.1", path = "link", default-features = false }
 orbit-metrics = { version = "0.5.4", path = "metrics", default-features = false }
 orbit-pool = { version = "0.5.4", path = "pool", default-features = false }
 orbit-client-pool = { version = "0.5.5", path = "client-pool", default-features = false }
-orbit-stream = { version = "0.5.9", path = "stream", default-features = false }
+orbit-stream = { version = "0.6.1", path = "stream", default-features = false }
 orbit-rustls = { version = "0.5.7", path = "rustls", default-features = false }
 
 bytes = "1.12.1"

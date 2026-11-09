@@ -142,6 +142,25 @@ listening while it does. Taking is not claiming: `open` is, once per side.
 
 ## Waking
 
+`Streams::capacity_changed()` observes creator-slot availability separately
+from byte readiness. Construct it before retrying create/rearm; if the retry
+is still full, await the observer. A released peer claim or an EMPTY slot
+publication advances the creator's capacity generation only while observed,
+then rings its existing node doorbell. The driver wakes independent local
+registrations; no reader/writer waker is replaced. Both-half release precedes
+the capacity signal, so FIN or reader departure alone cannot imply reuse.
+Confirmed owner death signals the same predicate after recovery updates.
+
+Registration arms before an allocation retry with a SeqCst fence; release
+publishes state before testing the arm. A release is therefore either visible
+to the retry or changes the observed generation. Completion/cancellation
+removes only that observer, disarming when the last one leaves. There is no
+timer, polling loop or additional driver. Byte writes are unchanged; an
+unobserved release adds only the capacity-arm check. The arm and generation
+occupy former doorbell padding, preserving size, offsets and physical geometry.
+Both processes need the release-notification implementation for this wait;
+older peers with the same geometry do not publish this signal.
+
 Readiness is authoritative in the SHM rings and bitmaps. Every wake mechanism
 is only a coalescing hint to inspect that state; application bytes never ride a
 socket.

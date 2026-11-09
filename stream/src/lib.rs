@@ -44,8 +44,10 @@ use orbit_core::{Fleet, NetId64};
 
 #[cfg(unix)]
 mod bell;
+mod capacity;
 pub mod exchange;
 mod layout;
+pub use capacity::CapacityChanged;
 #[cfg(feature = "tokio")]
 mod poll;
 mod table;
@@ -625,6 +627,13 @@ impl Streams {
             Endpoint::new(handle),
             Ticket { id, side: Side::B, epoch: self.table.epoch() },
         ))
+    }
+
+    /// Observe creator-slot release without consuming stream bytes or holding
+    /// a slot. Arm before retrying create/rearm, await only after another full
+    /// result. Adds no timer and shares the table's existing readiness driver.
+    pub fn capacity_changed(&self) -> CapacityChanged {
+        CapacityChanged::new(Arc::clone(&self.table))
     }
 
     /// Hold the side a ticket names. Each side can be held once per stream.
@@ -1503,6 +1512,11 @@ impl Drop for Handle {
                 }
             }
             self.table.registry.wake(self.index);
+        }
+        // The claim must be released (and an empty slot published) before
+        // waking an allocator. Half-drop flags alone precede this transition.
+        if self.side == Side::B || other != SIDE_CLAIMED {
+            self.table.notify_capacity(self.index);
         }
     }
 }

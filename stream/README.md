@@ -217,6 +217,16 @@ claim, and each side is claimed exactly once.
 
 ## Waiting
 
+Creator capacity can be awaited separately from byte readiness. After a full
+create/rearm attempt, construct `Streams::capacity_changed()`, retry the
+operation, and await only if it is still full. A slot becoming empty or its
+peer releasing a retained endpoint wakes the observer. The notification is a
+hint, not a reservation; concurrent callers must retry. Dropping the observer
+cancels only that registration. The caller owns any deadline.
+
+This uses the existing table driver and requires release notification support
+on both peers (`orbit-stream` 0.6.1 or newer). Physical geometry is unchanged.
+
 The blocking calls (`blocking_read`, `blocking_write`, `blocking_write_all`,
 `blocking_read_chunk`, `wait_readable`, `wait_writable`) park the thread on
 the direction's own change word through the platform's shared address wait
