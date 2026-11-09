@@ -499,3 +499,91 @@ fn an_event_crosses_once_to_the_side_that_wants_it() {
     drop((edge, app));
     segment.unlink().unwrap();
 }
+
+#[test]
+fn origin_death_releases_unaccepted_admission_but_not_receiver_owned_work() {
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+
+    const CHILD: &str = "ORBIT_ADMISSION_DEATH";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let name = std::env::var("ORBIT_ADMISSION_FLEET").unwrap();
+        let segment = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+        let joined = segment.join("caller", "native", 20).unwrap();
+        let work = segment.reserve_work(0, joined.lane).unwrap().unwrap();
+        if mode == "published" {
+            work.publish(&[b"request"]).unwrap();
+        } else {
+            // Keep the unpublished reservation in scope until the parent kills us.
+            std::mem::forget(work);
+        }
+        println!("ADMISSION_READY");
+        std::io::stdout().flush().unwrap();
+        let mut byte = String::new();
+        std::io::stdin().read_line(&mut byte).unwrap();
+        panic!("parent must kill the reservation owner");
+    }
+    for mode in ["reserved", "published"] {
+        let name = fleet_name("ad");
+        let owner = Scratch::segment(&name);
+        let segment = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+        let receiver = segment
+            .join_with_capacity("worker", "native", 10, Some(1))
+            .unwrap();
+        assert_eq!(receiver.lane, 0);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "origin_death_releases_unaccepted_admission_but_not_receiver_owned_work", "--nocapture"])
+            .env(CHILD, mode).env("ORBIT_ADMISSION_FLEET", &name)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(
+                output.read_line(&mut line).unwrap(),
+                0,
+                "child exited before reservation"
+            );
+            if line.trim() == "ADMISSION_READY" {
+                break;
+            }
+        }
+        let other = segment.join("other", "native", 30).unwrap();
+        assert!(matches!(
+            segment.reserve_work(0, other.lane),
+            Err(orbit_link::Error::CapacityFull)
+        ));
+        let execution = if mode == "published" {
+            let ticket = segment
+                .inbox()
+                .read_frame(0, &mut Vec::new())
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            Some(segment.accept_work(0, ticket).unwrap())
+        } else {
+            None
+        };
+        segment.inbox().watch_capacity(0, other.lane).unwrap();
+        let before = segment.inbox().capacity_generation(other.lane).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let gone = segment.reclaim_process(child.id(), 20, |_| {}).unwrap();
+        assert_eq!(gone.len(), 1);
+        assert_ne!(
+            segment.inbox().capacity_generation(other.lane).unwrap(),
+            before
+        );
+        if execution.is_some() {
+            assert!(matches!(
+                segment.reserve_work(0, other.lane),
+                Err(orbit_link::Error::CapacityFull)
+            ));
+        }
+        drop(execution);
+        drop(segment.reserve_work(0, other.lane).unwrap().unwrap());
+        segment.inbox().release_lane(other.lane).unwrap();
+        segment.inbox().release_lane(receiver.lane).unwrap();
+        drop((other.hold, receiver.hold, owner));
+    }
+}
