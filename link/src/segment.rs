@@ -210,7 +210,55 @@ impl LinkSegment {
             segment.register_producer()?;
         }
         drop(lock);
+        if segment.region.created() && segment.group.is_none() {
+            segment.inbox.ring_adopter();
+        }
         Ok(Some(segment))
+    }
+
+    /// Wait until the owner of `name` has created its Link, then adopt it
+    /// as [`LinkSegment::adopt`] does. For a process that runs the fleet's
+    /// processes without creating their Link: it starts the process that
+    /// creates it, then waits here.
+    ///
+    /// No deadline and no poll. The adopter binds its bell before it looks;
+    /// the creator rings it once the inbox exists and again whenever a
+    /// stream table is opened through the segment, and each ring means only
+    /// "look again". One adopter per Link: a second gets
+    /// [`Error::NoWatcher`]. Owner-only Links only.
+    #[cfg(feature = "tokio")]
+    pub async fn adopt_when_created(
+        name: &str,
+        inbox_kind: u8,
+        stream_kind: u8,
+    ) -> Result<Self> {
+        validate_name(name)?;
+        let segment_name = ring_segment_name(name, inbox_kind);
+        let _hold = orbit_core::shm::try_hold_adopter(&segment_name)
+            .map_err(Error::Io)?
+            .ok_or(Error::NoWatcher)?;
+        let bell = crate::bell::Bell::with_group(&segment_name, None)
+            .map_err(Error::Io)?;
+        let socket = tokio::net::UnixDatagram::from_std(
+            bell.bind(crate::bell::Doorbell::Adopter).map_err(Error::Io)?,
+        )
+        .map_err(Error::Io)?;
+        struct Unbind(crate::bell::Bell);
+        impl Drop for Unbind {
+            fn drop(&mut self) {
+                self.0.unbind(crate::bell::Doorbell::Adopter);
+            }
+        }
+        let _unbind = Unbind(bell);
+        loop {
+            if let Some(segment) = Self::adopt(name, inbox_kind, stream_kind)?
+            {
+                return Ok(segment);
+            }
+            socket.readable().await.map_err(Error::Io)?;
+            let mut scratch = [0u8; 64];
+            while socket.try_recv(&mut scratch).is_ok() {}
+        }
     }
 
     fn register_producer(&mut self) -> Result<()> {
@@ -581,12 +629,17 @@ impl LinkSegment {
                 self.spec,
                 access.clone(),
             ),
-            None => super::LinkBodies::for_name(
-                &self.fleet_name,
-                lane,
-                incarnation,
-                self.spec,
-            ),
+            None => {
+                let bodies = super::LinkBodies::for_name(
+                    &self.fleet_name,
+                    lane,
+                    incarnation,
+                    self.spec,
+                )?;
+                // The stream table may be what an adopter still waits for.
+                self.inbox.ring_adopter();
+                Ok(bodies)
+            }
         }
     }
 

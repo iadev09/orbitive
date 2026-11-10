@@ -1409,6 +1409,15 @@ impl Inbox {
         }
     }
 
+    /// Tell the process waiting to adopt this Link to look again. Only a
+    /// hint: nobody may be waiting, and the waiter rechecks what exists.
+    #[cfg(unix)]
+    pub(crate) fn ring_adopter(&self) {
+        if let Some(bell) = &self.bell {
+            let _ = bell.ring(crate::bell::Doorbell::Adopter);
+        }
+    }
+
     #[cfg(unix)]
     pub(crate) fn install_bell_with_group(
         &mut self,

@@ -465,6 +465,45 @@ async fn a_watcher_without_a_lane_hears_lanes_claimed_and_released() {
     master.unlink().unwrap();
 }
 
+/// An owner of a fleet's processes that does not create their Link waits
+/// for it: the inbox alone is not adoptable, the stream table's opening
+/// rings the adopter again, and only one adopter waits per Link.
+#[tokio::test(flavor = "current_thread")]
+async fn an_adopter_waits_for_the_link_its_owner_creates() {
+    let name = fleet_name("adopt");
+    let waiting = {
+        let name = name.clone();
+        tokio::spawn(async move {
+            LinkSegment::adopt_when_created(
+                &name,
+                SPEC.inbox_kind,
+                SPEC.streams.kind,
+            )
+            .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        LinkSegment::adopt_when_created(
+            &name,
+            SPEC.inbox_kind,
+            SPEC.streams.kind
+        )
+        .await,
+        Err(orbit_link::Error::NoWatcher)
+    ));
+
+    let owner = LinkSegment::open(&name, SPEC).unwrap();
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished(), "no stream table yet");
+    let bodies = owner.bodies(0, 1).unwrap();
+    let adopted = waiting.await.unwrap().unwrap();
+    assert_eq!(adopted.spec(), SPEC);
+    drop(adopted);
+    bodies.unlink().unwrap();
+    owner.unlink().unwrap();
+}
+
 /// Senders that find every receiver full wake the owner once per episode;
 /// nothing is written while the owner wants no reports; the owner ends each
 /// episode, and the next report is heard again.

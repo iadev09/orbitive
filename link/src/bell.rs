@@ -59,6 +59,8 @@ pub(crate) enum Doorbell {
     Watcher(usize),
     /// A producer registration waiting for a reader to free a record.
     Producer(usize),
+    /// The process waiting for the Link's owner to create it.
+    Adopter,
 }
 
 impl Doorbell {
@@ -67,6 +69,7 @@ impl Doorbell {
             Self::Lane(lane) => lane.to_string(),
             Self::Watcher(slot) => format!("w{slot}"),
             Self::Producer(index) => format!("p{index}"),
+            Self::Adopter => "a".to_owned(),
         }
     }
 }

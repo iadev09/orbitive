@@ -1178,9 +1178,30 @@ pub fn try_hold_watcher(
     Err(error)
 }
 
+/// Take the adopter hold of segment `shm_name`: the one process waiting for
+/// the segment's owner to create it (see the Link's `adopt_when_created`).
+/// A [`WatcherHold`] on a lock file of its own; `Ok(None)` means a live
+/// process holds it. Never waits.
+pub fn try_hold_adopter(shm_name: &str) -> io::Result<Option<WatcherHold>> {
+    let name = format!("{}.watch-adopter", shm_name.trim_start_matches('/'));
+    let lock_fd = open_lock_file(&lock_file_path(&name))?;
+    // SAFETY: `lock_fd` is an open descriptor owned by this call.
+    let rc = unsafe {
+        libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+    };
+    if rc == 0 {
+        return Ok(Some(WatcherHold { lock_fd }));
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(error)
+}
+
 /// Every lock file beside segment `shm_name` of `uid`: the region's own, one
-/// per lane that was ever held ([`try_hold_lane`]) and one per watcher slot
-/// ([`try_hold_watcher`]). What removes a segment
+/// per lane that was ever held ([`try_hold_lane`]), one per watcher slot
+/// ([`try_hold_watcher`]) and the adopter's ([`try_hold_adopter`]). What removes a segment
 /// removes these with it; an unlocked one left behind is harmless, but it is
 /// one more file per lane for every segment that ever existed.
 pub fn companion_lock_files(
