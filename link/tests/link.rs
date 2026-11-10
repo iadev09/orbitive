@@ -465,6 +465,58 @@ async fn a_watcher_without_a_lane_hears_lanes_claimed_and_released() {
     master.unlink().unwrap();
 }
 
+/// Senders that find every receiver full wake the owner once per episode;
+/// nothing is written while the owner wants no reports; the owner ends each
+/// episode, and the next report is heard again.
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn unmet_demand_wakes_the_owner_once_per_episode() {
+    use orbit_link::Watched;
+
+    let name = fleet_name("press");
+    let master = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+    let sender = LinkSegment::open(&name, SPEC).unwrap();
+    let mut watcher = master.watch("worker").unwrap();
+
+    assert!(!sender.inbox().report_pressure(), "no policy, nothing written");
+    assert!(!master.inbox().pressure_pending());
+
+    master.inbox().set_pressure_wanted(true);
+    let waiting = tokio::spawn(async move {
+        let change = watcher.next_change().await.unwrap();
+        (watcher, change)
+    });
+    tokio::task::yield_now().await;
+    assert!(sender.inbox().report_pressure());
+    for _ in 0..8 {
+        assert!(!sender.inbox().report_pressure(), "one write per episode");
+    }
+    let (mut watcher, change) = waiting.await.unwrap();
+    assert_eq!(change, Watched::Pressure);
+
+    // The pending episode is not reported twice; a directory change still is.
+    let waiting = tokio::spawn(async move {
+        let change = watcher.next_change().await.unwrap();
+        (watcher, change)
+    });
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!waiting.is_finished());
+    sender.inbox().claim_lane(0, "checkout", "worker", 1).unwrap();
+    let (mut watcher, change) = waiting.await.unwrap();
+    assert_eq!(change, Watched::Directory(master.inbox().directory()));
+
+    // The owner ends the episode; a report right after starts a new one.
+    assert!(watcher.take_pressure());
+    assert!(sender.inbox().report_pressure());
+    assert_eq!(watcher.next_change().await.unwrap(), Watched::Pressure);
+
+    sender.inbox().release_lane(0).unwrap();
+    drop(watcher);
+    master.unlink().unwrap();
+}
+
 /// One event crosses to the side that wants it, once, and does not come back:
 /// the edge publishes two topics, the application wants one, and the
 /// application's republication is not sent back over the same segment.

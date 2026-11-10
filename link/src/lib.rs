@@ -53,7 +53,7 @@ pub use receiver::{InboxReceiver, Received};
 #[cfg(unix)]
 pub use segment::{Joined, LinkSegment, LinkSegmentHandle, check_name};
 #[cfg(all(unix, feature = "tokio"))]
-pub use watcher::DirectoryWatcher;
+pub use watcher::{DirectoryWatcher, Watched};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

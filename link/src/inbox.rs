@@ -45,6 +45,9 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 10: the owner's growth policy and a coalesced pressure word in the table
+/// header, in what was padding.
+///
 /// 9: atomic live-bound policy and retiring admission window.
 ///
 /// 8: receiver-owned work reservations and capacity-change interests.
@@ -64,7 +67,7 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 9;
+pub(crate) const INBOX_VERSION: u32 = 10;
 
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,6 +313,9 @@ impl InboxGeometry {
     }
 }
 
+// The header keeps its size across versions: new words take its padding.
+const _: () = assert!(size_of::<TableHeader>() == 128);
+
 /// The segment's own header, checked before a single lane is touched.
 #[repr(C, align(64))]
 pub(crate) struct TableHeader {
@@ -327,7 +333,14 @@ pub(crate) struct TableHeader {
     /// is read per request, because it is the load signal rather than the
     /// address.
     pub(crate) directory: AtomicU64,
-    _padding: [u8; 36],
+    /// Nonzero while the fleet's owner wants senders to report unmet demand:
+    /// its declared growth policy, written by the owner alone.
+    pub(crate) policy: AtomicU32,
+    /// Nonzero while a report of unmet demand is pending: set by the first
+    /// sender that finds every receiver full, cleared by the owner once it
+    /// has acted. One episode, one wake.
+    pub(crate) pressure: AtomicU32,
+    _padding: [u8; 28],
 }
 
 /// A mapped inbox table.
@@ -827,6 +840,51 @@ impl Inbox {
     /// leaves it alone.
     pub fn directory(&self) -> u64 {
         self.table_header().directory.load(Ordering::Acquire)
+    }
+
+    /// The fleet's owner declares whether senders should report unmet
+    /// demand. Without it, `report_pressure` writes nothing.
+    pub fn set_pressure_wanted(
+        &self,
+        wanted: bool,
+    ) {
+        self.table_header().policy.store(u32::from(wanted), Ordering::Release);
+    }
+
+    pub fn pressure_wanted(&self) -> bool {
+        self.table_header().policy.load(Ordering::Acquire) != 0
+    }
+
+    /// A sender that found every receiver full reports unmet demand. Only
+    /// the first report of an episode writes and rings the directory
+    /// watchers; every later one costs a load and returns `false`, so any
+    /// number of senders produce one wake. Nothing is written unless the
+    /// owner asked for reports.
+    pub fn report_pressure(&self) -> bool {
+        let header = self.table_header();
+        if header.policy.load(Ordering::Acquire) == 0
+            || header.pressure.load(Ordering::Acquire) != 0
+            || header
+                .pressure
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        for slot in 0..self.lanes {
+            self.wake_watcher(slot);
+        }
+        true
+    }
+
+    pub fn pressure_pending(&self) -> bool {
+        self.table_header().pressure.load(Ordering::Acquire) != 0
+    }
+
+    /// The owner ends the episode once it has acted; the next report starts
+    /// another. Returns whether one was pending.
+    pub fn take_pressure(&self) -> bool {
+        self.table_header().pressure.swap(0, Ordering::AcqRel) != 0
     }
 
     /// Which lanes advertise this name, live or not.
