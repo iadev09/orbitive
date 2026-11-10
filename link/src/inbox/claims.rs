@@ -29,7 +29,11 @@ struct Owner {
     generation: AtomicU64,
     pid: AtomicU32,
     active: AtomicU32,
-    _padding: [u8; 48],
+    /// Nonzero while this registration waits for a reader to free one of its
+    /// records. The reader that frees one clears it and rings the producer's
+    /// bell; nobody rings while it is zero.
+    waiting: AtomicU32,
+    _padding: [u8; 44],
 }
 
 #[repr(C, align(64))]
@@ -205,6 +209,8 @@ impl Inbox {
                 )?;
             owner.generation.store(generation, Ordering::Relaxed);
             owner.pid.store(std::process::id(), Ordering::Relaxed);
+            // A previous holder may have died waiting.
+            owner.waiting.store(0, Ordering::Relaxed);
             owner.active.store(1, Ordering::Release);
             self.producer = Some(Producer { index, generation, _hold: held });
             return Ok(());
@@ -382,7 +388,9 @@ impl Inbox {
         let Some(index) = (start..start + self.geometry.capacity)
             .find(|index| self.take_record(*index))
         else {
-            return Err(Error::InboxFull);
+            // The lane has room; this producer's frames elsewhere have not
+            // been read yet. A reader that frees one can wake it.
+            return Err(Error::ProducerBusy);
         };
         let record = self.record(index);
         let before = record.seq.load(Ordering::Relaxed);
@@ -567,7 +575,7 @@ impl Inbox {
         let next = position
             .checked_add(self.geometry.capacity as u64)
             .ok_or(Error::Malformed("inbox position exhausted"))?;
-        self.record_index(claim)?;
+        let index = self.record_index(claim)?;
         let slot = self.slot_header(lane_index, position);
         slot.seq.store(next, Ordering::Release);
         #[cfg(test)]
@@ -580,7 +588,78 @@ impl Inbox {
             .store(position + 1, Ordering::Release);
         #[cfg(test)]
         checkpoint("reader-head");
+        // FREE released the producer's record. Pairs with the fence in
+        // `wait_for_record`: either that producer sees FREE, or this reader
+        // sees it waiting.
+        fence(Ordering::SeqCst);
+        self.release_waiter(index / self.geometry.capacity);
         Ok(())
+    }
+
+    /// Ring a producer that waits for a record, on the transition only.
+    fn release_waiter(
+        &self,
+        owner_index: usize,
+    ) {
+        let owner = self.producer_owner(owner_index);
+        if owner.waiting.load(Ordering::Relaxed) == 0
+            || owner.waiting.swap(0, Ordering::AcqRel) == 0
+        {
+            return;
+        }
+        // A failed send needs nothing more: a full socket queue already holds
+        // a wake, and an unbound name belongs to a producer that is gone.
+        #[cfg(unix)]
+        if let Some(bell) = &self.bell {
+            let _ = bell.ring(crate::bell::Doorbell::Producer(owner_index));
+        }
+    }
+
+    /// This mapping's producer registration, if it publishes into SHM.
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn producer_index(&self) -> Option<usize> {
+        self.producer.as_ref().map(|producer| producer.index)
+    }
+
+    /// Ask to be rung when a reader frees one of this producer's records.
+    /// Returns false when one is already free and nothing was armed: write
+    /// again instead of waiting.
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn wait_for_record(&self) -> Result<bool> {
+        let index = self
+            .producer_index()
+            .ok_or(Error::Malformed("this inbox mapping has no producer"))?;
+        let owner = self.producer_owner(index);
+        owner.waiting.store(1, Ordering::Relaxed);
+        fence(Ordering::SeqCst);
+        let start = index * self.geometry.capacity;
+        // A free record leaves the word set: another task of this producer
+        // may be waiting on it, and a later ring is only a recheck.
+        Ok(!(start..start + self.geometry.capacity)
+            .any(|record| self.record_free(record)))
+    }
+
+    /// Whether `take_record` could take this record now, without taking it.
+    #[cfg(all(unix, feature = "tokio"))]
+    fn record_free(
+        &self,
+        index: usize,
+    ) -> bool {
+        let record = self.record(index);
+        let flags = record.flags.load(Ordering::Acquire);
+        if flags & WRITING != 0 {
+            return false;
+        }
+        flags & REFERENCED == 0
+            || record.snapshot().is_some_and(|intent| {
+                intent.lane < self.lanes
+                    && self
+                        .slot_header(intent.lane, intent.position)
+                        .claim
+                        .load(Ordering::Acquire)
+                        >> 2
+                        != index as u64 + 1
+            })
     }
 }
 

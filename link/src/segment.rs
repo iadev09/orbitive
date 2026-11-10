@@ -24,6 +24,9 @@ pub struct LinkSegment {
     reclaimed: Mutex<Vec<Reclaimed>>,
     #[cfg(feature = "tokio")]
     receivers: Mutex<HashSet<usize>>,
+    /// Bound the first time this producer waits for a record, then kept.
+    #[cfg(feature = "tokio")]
+    producer_bell: Mutex<Option<Arc<tokio::net::UnixDatagram>>>,
 }
 
 /// A lane this process holds.
@@ -190,6 +193,8 @@ impl LinkSegment {
             reclaimed: Mutex::new(Vec::new()),
             #[cfg(feature = "tokio")]
             receivers: Mutex::new(HashSet::new()),
+            #[cfg(feature = "tokio")]
+            producer_bell: Mutex::new(None),
         };
         if let Err(error) = segment.register_producer() {
             if !matches!(error, Error::InboxFull) {
@@ -514,6 +519,40 @@ impl LinkSegment {
         Err(Error::NoWatcher)
     }
 
+    /// Wait until a reader frees one of this producer's records, after a
+    /// write returned [`Error::ProducerBusy`]; then write again.
+    ///
+    /// No deadline and no poll: the reader that frees a record rings this
+    /// producer, and only while it waits. Returns at once when a record is
+    /// already free. Several tasks may wait together; a ring wakes them all
+    /// and each writes again. The bell is bound on first use and registers
+    /// with the calling Tokio runtime, so a segment waits from one runtime.
+    #[cfg(feature = "tokio")]
+    pub async fn record_released(&self) -> Result<()> {
+        let socket = {
+            let mut bell = self.producer_bell.lock().map_err(|_| {
+                Error::Malformed("Link producer bell is poisoned")
+            })?;
+            match &*bell {
+                Some(socket) => Arc::clone(socket),
+                None => {
+                    let socket = Arc::new(self.inbox.bind_producer()?);
+                    *bell = Some(Arc::clone(&socket));
+                    socket
+                }
+            }
+        };
+        // Drain obsolete rings before arming, so the next readiness is new.
+        let mut scratch = [0u8; 64];
+        while socket.try_recv(&mut scratch).is_ok() {}
+        if !self.inbox.wait_for_record()? {
+            return Ok(());
+        }
+        socket.readable().await.map_err(Error::Io)?;
+        while socket.try_recv(&mut scratch).is_ok() {}
+        Ok(())
+    }
+
     #[cfg(feature = "tokio")]
     pub(crate) fn release_receiver(
         &self,
@@ -569,6 +608,15 @@ impl LinkSegment {
 }
 
 /// A shareable lifecycle handle for registries and providers.
+#[cfg(feature = "tokio")]
+impl Drop for LinkSegment {
+    fn drop(&mut self) {
+        if self.producer_bell.get_mut().is_ok_and(|bell| bell.is_some()) {
+            self.inbox.unbind_producer();
+        }
+    }
+}
+
 pub struct LinkSegmentHandle(Arc<LinkSegment>);
 
 impl LinkSegmentHandle {

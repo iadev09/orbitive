@@ -238,11 +238,12 @@ fn many_writers_one_reader_lose_nothing() {
             std::thread::spawn(move || {
                 for n in 0..PER_WRITER {
                     let frame = format!("{writer}:{n}");
-                    // A full lane is a refusal, not a failure: retry until the
-                    // reader has made room.
+                    // A full lane, or every record of the one producer these
+                    // threads share holding an unread frame, is a refusal,
+                    // not a failure: retry until the reader has made room.
                     while matches!(
                         inbox.write(0, frame.as_bytes()),
-                        Err(Error::InboxFull)
+                        Err(Error::InboxFull | Error::ProducerBusy)
                     ) {
                         std::thread::yield_now();
                     }

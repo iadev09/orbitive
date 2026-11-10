@@ -57,6 +57,8 @@ pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
 pub(crate) enum Doorbell {
     Lane(usize),
     Watcher(usize),
+    /// A producer registration waiting for a reader to free a record.
+    Producer(usize),
 }
 
 impl Doorbell {
@@ -64,6 +66,7 @@ impl Doorbell {
         match self {
             Self::Lane(lane) => lane.to_string(),
             Self::Watcher(slot) => format!("w{slot}"),
+            Self::Producer(index) => format!("p{index}"),
         }
     }
 }
@@ -98,10 +101,18 @@ impl Bell {
         segment: &str,
         last_slot: usize,
     ) -> io::Result<()> {
-        SocketAddr::from_pathname(
-            access.bell_path(segment, &Doorbell::Watcher(last_slot).suffix()),
-        )
-        .map(|_| ())
+        for door in Self::longest(last_slot) {
+            SocketAddr::from_pathname(
+                access.bell_path(segment, &door.suffix()),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The longest names a table of `last_slot + 1` lanes binds: its last
+    /// watcher and its last producer registration (two per lane).
+    fn longest(last_slot: usize) -> [Doorbell; 2] {
+        [Doorbell::Watcher(last_slot), Doorbell::Producer(2 * last_slot + 1)]
     }
 
     fn group_path(
@@ -120,14 +131,18 @@ impl Bell {
         format!("orbit-link-{uid}/{segment}")
     }
 
-    /// Check the longest lane or watcher address before creating either SHM
-    /// resource. A watcher suffix is one byte longer than the lane suffix.
+    /// Check the longest lane, watcher or producer address before creating
+    /// either SHM resource. A watcher suffix is one byte longer than the lane
+    /// suffix; a producer index runs to twice the lane count.
     pub(crate) fn validate_address(
         segment: &str,
         last_slot: usize,
     ) -> io::Result<()> {
-        Self::address_for(&Self::prefix(segment), Doorbell::Watcher(last_slot))
-            .map(|_| ())
+        let prefix = Self::prefix(segment);
+        for door in Self::longest(last_slot) {
+            Self::address_for(&prefix, door)?;
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

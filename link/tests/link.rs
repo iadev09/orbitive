@@ -674,3 +674,41 @@ fn origin_death_releases_unaccepted_admission_but_not_receiver_owned_work() {
         drop((other.hold, receiver.hold, owner));
     }
 }
+
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn a_producer_whose_frames_are_unread_waits_for_a_reader() {
+    let name = fleet_name("rec");
+    let owner = Scratch::segment(&name);
+    let (a, b) = (1, 2);
+    owner.segment.inbox().claim_lane(a, "example-a", "edge", 1).unwrap();
+    owner.segment.inbox().claim_lane(b, "example-b", "edge", 2).unwrap();
+    let writer = Arc::new(LinkSegment::open(&name, SPEC).unwrap());
+    let capacity = SPEC.inbox.capacity;
+
+    // Half a lane each: neither lane is full, but every one of this
+    // producer's records names a frame nobody has read yet.
+    for _ in 0..capacity / 2 {
+        writer.inbox().write(a, b"reply").unwrap();
+        writer.inbox().write(b, b"reply").unwrap();
+    }
+    let error = writer.inbox().write(a, b"reply").unwrap_err();
+    assert!(matches!(error, orbit_link::Error::ProducerBusy), "{error}");
+    // The lane itself has room for another producer.
+    owner.segment.inbox().write(a, b"other").unwrap();
+
+    let waiting = tokio::spawn({
+        let writer = Arc::clone(&writer);
+        async move { writer.record_released().await }
+    });
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!waiting.is_finished(), "nothing was read yet");
+
+    // A read on the other lane frees a record and rings this producer.
+    let mut frame = Vec::new();
+    assert!(owner.segment.inbox().read(b, &mut frame).unwrap());
+    waiting.await.unwrap().unwrap();
+    writer.inbox().write(a, b"reply").unwrap();
+}

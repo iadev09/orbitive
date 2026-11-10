@@ -45,6 +45,9 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 11: a producer registration carries a waiting word, and a reader that
+/// frees one of its records rings it.
+///
 /// 10: the owner's growth policy and a coalesced pressure word in the table
 /// header, in what was padding.
 ///
@@ -67,7 +70,7 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 10;
+pub(crate) const INBOX_VERSION: u32 = 11;
 
 /// An owner's declared growth: never fewer than `min` workers, never more
 /// than `max`, `step` added per pressure episode. What a worker is, and how
@@ -1043,9 +1046,11 @@ impl Inbox {
     /// Put one frame in a node's lane.
     ///
     /// Bounded admission: claim races help the winner and try a later turn,
-    /// with at most `capacity` attempts. Full capacity, producer-record pressure
-    /// or exhausted contention budget returns `InboxFull`; callers own any
-    /// further retry. Helpers never commit another producer's bytes.
+    /// with at most `capacity` attempts. Full capacity or an exhausted
+    /// contention budget returns `InboxFull`. A producer whose every record
+    /// names a frame not read yet, on any lane, gets `ProducerBusy`: it can
+    /// wait for a reader with `LinkSegment::record_released`. Helpers never
+    /// commit another producer's bytes.
     pub fn write(
         &self,
         lane_index: usize,
@@ -1408,6 +1413,30 @@ impl Inbox {
             crate::bell::Bell::with_group(segment, group).map_err(Error::Io)?,
         );
         Ok(())
+    }
+
+    /// Bind this mapping's producer bell, rung when a reader frees one of
+    /// its records while it waits.
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn bind_producer(&self) -> Result<tokio::net::UnixDatagram> {
+        let index = self
+            .producer_index()
+            .ok_or(Error::Malformed("this inbox mapping has no producer"))?;
+        let bell = self
+            .bell
+            .as_ref()
+            .ok_or(Error::Malformed("the inbox has no reactor bell"))?;
+        let socket = bell
+            .bind(crate::bell::Doorbell::Producer(index))
+            .map_err(Error::Io)?;
+        tokio::net::UnixDatagram::from_std(socket).map_err(Error::Io)
+    }
+
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn unbind_producer(&self) {
+        if let (Some(index), Some(bell)) = (self.producer_index(), &self.bell) {
+            bell.unbind(crate::bell::Doorbell::Producer(index));
+        }
     }
 
     #[cfg(all(unix, feature = "tokio"))]

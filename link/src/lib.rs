@@ -111,6 +111,10 @@ pub enum Error {
     /// No joined receiver owns this destination.
     NoConsumer,
     InboxFull,
+    /// Every record of this producer names a frame its reader has not taken
+    /// yet, on any lane. The target lane may have room; wait with
+    /// `LinkSegment::record_released` and write again.
+    ProducerBusy,
     NoLane,
     NoWatcher,
     FrameTooLarge,
@@ -151,6 +155,9 @@ impl fmt::Display for Error {
             Self::InboxFull => {
                 formatter.write_str("the target inbox lane is full or unowned")
             }
+            Self::ProducerBusy => formatter.write_str(
+                "every frame this producer may hold unread is still unread",
+            ),
             Self::NoLane => {
                 formatter.write_str("every lane in the named fleet is held")
             }
