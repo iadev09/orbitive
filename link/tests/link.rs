@@ -468,6 +468,7 @@ async fn a_watcher_without_a_lane_hears_lanes_claimed_and_released() {
 /// An owner of a fleet's processes that does not create their Link waits
 /// for it: the inbox alone is not adoptable, the stream table's opening
 /// rings the adopter again, and only one adopter waits per Link.
+#[cfg(feature = "tokio")]
 #[tokio::test(flavor = "current_thread")]
 async fn an_adopter_waits_for_the_link_its_owner_creates() {
     let name = fleet_name("adopt");
