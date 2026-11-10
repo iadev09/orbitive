@@ -347,3 +347,36 @@ fn the_held_count_follows_every_slot_and_ignores_stale_releases() {
     inbox.reserve_work(1, 0).unwrap().unwrap();
     assert_eq!(held(), 1);
 }
+
+#[test]
+fn a_window_runs_its_execution_and_queues_the_rest_until_withdrawn() {
+    // Window 4: the receiver runs 2 and queues 2 of its own.
+    let memory = memory(Some(4));
+    let inbox = &memory.inbox;
+    assert_eq!(inbox.work_execution(1).unwrap(), Some(4));
+    inbox.set_work_execution(1, 2).unwrap();
+    assert_eq!(inbox.work_execution(1).unwrap(), Some(2));
+    assert!(inbox.set_work_execution(1, 5).is_err(), "beyond the window");
+    assert!(inbox.set_work_execution(0, 1).is_err(), "unbounded lane");
+
+    let tickets: Vec<_> =
+        (0..4).map(|_| inbox.reserve_work(1, 0).unwrap().unwrap()).collect();
+    assert_eq!(inbox.work_load(1).unwrap(), 4);
+    assert!(matches!(inbox.reserve_work(1, 2), Err(Error::CapacityFull)));
+
+    // Started work cannot be withdrawn; queued work can, once.
+    inbox.accept_work(1, tickets[0]).unwrap();
+    assert!(!inbox.withdraw_work(tickets[0]));
+    assert!(inbox.check_work(tickets[3]).is_ok());
+    assert!(inbox.withdraw_work(tickets[3]));
+    assert!(inbox.check_work(tickets[3]).is_err());
+    assert!(!inbox.withdraw_work(tickets[3]));
+    assert_eq!(inbox.work_load(1).unwrap(), 3);
+    // The receiver reaching a withdrawn entry finds it stale.
+    assert!(matches!(inbox.accept_work(1, tickets[3]), Err(Error::StaleWork)));
+
+    // A rejoin starts from a clean row.
+    inbox.configure_capacity(1, Some(4)).unwrap();
+    assert_eq!(inbox.work_load(1).unwrap(), 0);
+    assert_eq!(inbox.work_execution(1).unwrap(), Some(4));
+}

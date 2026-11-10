@@ -43,7 +43,11 @@ pub(crate) struct Capacity {
     /// high. It may say "full" only when every slot is taken; a low count
     /// costs a scan, not admission.
     occupied: AtomicU32,
-    _padding: [u8; 40],
+    /// How many of the window's slots the receiver runs at once; the rest
+    /// wait in its own queue, accepted when one of these ends. Zero: all of
+    /// them run, the window is the execution bound.
+    execution: AtomicU32,
+    _padding: [u8; 36],
 }
 
 const _: () = assert!(size_of::<Capacity>() == 64);
@@ -123,10 +127,62 @@ impl Inbox {
     ) -> Result<()> {
         self.validate_work_capacity(limit)?;
         let limit = limit.unwrap_or(0) as u64;
-        self.capacity_row(lane)
-            .policy
-            .store(limit | (limit << 32), Ordering::SeqCst);
+        let row = self.capacity_row(lane);
+        // A lane taken back from a dead holder may carry its counts. Zero
+        // keeps the held count at or below the truth.
+        row.occupied.store(0, Ordering::SeqCst);
+        row.execution.store(0, Ordering::SeqCst);
+        row.policy.store(limit | (limit << 32), Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Declare how many of this receiver's window slots run at once; the
+    /// others are a queue the receiver drains itself. Senders read it to
+    /// prefer a receiver that will start their exchange now. The caller owns
+    /// the receiver lane.
+    pub fn set_work_execution(
+        &self,
+        lane: usize,
+        execution: usize,
+    ) -> Result<()> {
+        self.check_lane(lane)?;
+        let window = self.work_capacity(lane)?.ok_or(Error::Malformed(
+            "an unbounded receiver has no window to run part of",
+        ))?;
+        if execution == 0 || execution > window {
+            return Err(Error::Malformed(
+                "work execution must be positive and within the window",
+            ));
+        }
+        let execution = if execution == window { 0 } else { execution };
+        self.capacity_row(lane)
+            .execution
+            .store(execution as u32, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// How many exchanges this receiver runs at once: its declared
+    /// execution, else its window. None for an unbounded receiver.
+    pub fn work_execution(
+        &self,
+        lane: usize,
+    ) -> Result<Option<usize>> {
+        let Some(window) = self.work_capacity(lane)? else {
+            return Ok(None);
+        };
+        let execution =
+            self.capacity_row(lane).execution.load(Ordering::SeqCst) as usize;
+        Ok(Some(if execution == 0 { window } else { execution.min(window) }))
+    }
+
+    /// Window slots held now: reserved, queued and running exchanges. Never
+    /// above the truth; a crash can leave it low.
+    pub fn work_load(
+        &self,
+        lane: usize,
+    ) -> Result<usize> {
+        self.check_lane(lane)?;
+        Ok(self.capacity_row(lane).occupied.load(Ordering::SeqCst) as usize)
     }
 
     /// Change a joined receiver's positive bound without ending any work.
@@ -351,7 +407,8 @@ impl Inbox {
         Ok(())
     }
 
-    pub(crate) fn check_work(
+    /// Whether this reservation is still held and not yet accepted.
+    pub fn check_work(
         &self,
         ticket: WorkTicket,
     ) -> Result<()> {
@@ -368,6 +425,16 @@ impl Inbox {
         self.release_work(ticket, RESERVED);
     }
 
+    /// Take back a published reservation the receiver has not accepted yet.
+    /// True: it never started and its slot is free. False: the receiver
+    /// accepted it first (or it is gone); its reply is still owed.
+    pub fn withdraw_work(
+        &self,
+        ticket: WorkTicket,
+    ) -> bool {
+        self.release_work(ticket, RESERVED)
+    }
+
     pub(crate) fn complete_work(
         &self,
         ticket: WorkTicket,
@@ -379,15 +446,15 @@ impl Inbox {
         &self,
         ticket: WorkTicket,
         state: u64,
-    ) {
-        let Ok(slot) = self.ticket_slot(ticket) else { return };
+    ) -> bool {
+        let Ok(slot) = self.ticket_slot(ticket) else { return false };
         let expected = ticket.claim ^ RESERVED ^ state;
         // Keep the reuse generation even when a receiver lane is replaced.
         // A delayed old guard must never free a successor's reservation.
         let free = ticket.claim & !((1 << GENERATION_SHIFT) - 1);
         let lane = usize::from(ticket.lane);
         if slot.load(Ordering::SeqCst) != expected {
-            return;
+            return false;
         }
         let lowered = self.lower_occupied(lane);
         if slot
@@ -400,8 +467,12 @@ impl Inbox {
             .is_ok()
         {
             self.capacity_changed(lane);
-        } else if lowered {
-            self.capacity_row(lane).occupied.fetch_add(1, Ordering::SeqCst);
+            true
+        } else {
+            if lowered {
+                self.capacity_row(lane).occupied.fetch_add(1, Ordering::SeqCst);
+            }
+            false
         }
     }
 
