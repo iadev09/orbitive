@@ -38,7 +38,12 @@ pub(crate) struct Capacity {
     policy: AtomicU64,
     changes: AtomicU64,
     cursor: AtomicU32,
-    _padding: [u8; 44],
+    /// Slots held, never more than are: it rises after a claim and falls
+    /// before a release, so a crash between the two leaves it low, never
+    /// high. It may say "full" only when every slot is taken; a low count
+    /// costs a scan, not admission.
+    occupied: AtomicU32,
+    _padding: [u8; 40],
 }
 
 const _: () = assert!(size_of::<Capacity>() == 64);
@@ -242,6 +247,11 @@ impl Inbox {
     ) -> Result<Option<WorkTicket>> {
         let limit = policy as u32 as usize;
         let row = self.capacity_row(lane);
+        // A full receiver refuses in one load instead of reading every slot:
+        // a waiting sender asks again on each release, on every receiver.
+        if row.occupied.load(Ordering::SeqCst) as usize >= limit {
+            return Err(Error::CapacityFull);
+        }
         let start = row.cursor.fetch_add(1, Ordering::Relaxed) as usize % limit;
         let mut exhausted = 0;
         for offset in 0..limit {
@@ -270,6 +280,7 @@ impl Inbox {
             {
                 continue;
             }
+            row.occupied.fetch_add(1, Ordering::SeqCst);
             let ticket = WorkTicket {
                 lane: lane as u16,
                 epoch,
@@ -374,6 +385,11 @@ impl Inbox {
         // Keep the reuse generation even when a receiver lane is replaced.
         // A delayed old guard must never free a successor's reservation.
         let free = ticket.claim & !((1 << GENERATION_SHIFT) - 1);
+        let lane = usize::from(ticket.lane);
+        if slot.load(Ordering::SeqCst) != expected {
+            return;
+        }
+        let lowered = self.lower_occupied(lane);
         if slot
             .compare_exchange(
                 expected,
@@ -383,8 +399,24 @@ impl Inbox {
             )
             .is_ok()
         {
-            self.capacity_changed(usize::from(ticket.lane));
+            self.capacity_changed(lane);
+        } else if lowered {
+            self.capacity_row(lane).occupied.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// Lower the held count before freeing a slot; false when it was already
+    /// zero (a crash left it low), so a failed free must not raise it back.
+    fn lower_occupied(
+        &self,
+        lane: usize,
+    ) -> bool {
+        self.capacity_row(lane)
+            .occupied
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+                held.checked_sub(1)
+            })
+            .is_ok()
     }
 
     /// Register interest before rechecking reservation availability. Multiple
@@ -448,14 +480,21 @@ impl Inbox {
                     || (state == RESERVED && origin == gone)
                 {
                     let free = before & !((1 << GENERATION_SHIFT) - 1);
-                    let _ = slot
+                    let lowered = self.lower_occupied(lane);
+                    if slot
                         .compare_exchange(
                             before,
                             free,
                             Ordering::SeqCst,
                             Ordering::SeqCst,
                         )
-                        .is_ok();
+                        .is_err()
+                        && lowered
+                    {
+                        self.capacity_row(lane)
+                            .occupied
+                            .fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             }
             // Recovery also repairs a crash after freeing a claim but before

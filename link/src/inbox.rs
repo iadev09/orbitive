@@ -45,6 +45,9 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// caught by Orbit, which refuses a segment sized differently from the code's;
 /// this catches a change that keeps the size and moves the meaning.
 ///
+/// 12: a receiver's capacity row counts the admission slots it holds, so a
+/// full receiver refuses a reservation in one load.
+///
 /// 11: a producer registration carries a waiting word, and a reader that
 /// frees one of its records rings it.
 ///
@@ -70,7 +73,7 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// a lane whose lock can be taken belongs to a process that is gone. A build
 /// before it holds no lock and would read as dead, so the two never share a
 /// table.
-pub(crate) const INBOX_VERSION: u32 = 11;
+pub(crate) const INBOX_VERSION: u32 = 12;
 
 /// An owner's declared growth: never fewer than `min` workers, never more
 /// than `max`, `step` added per pressure episode. What a worker is, and how

@@ -315,3 +315,35 @@ fn producer_using_an_old_policy_cannot_publish_after_shrink() {
     assert!(matches!(inbox.reserve_work(1, 3), Err(Error::CapacityFull)));
     inbox.cancel_work(current);
 }
+
+#[test]
+fn the_held_count_follows_every_slot_and_ignores_stale_releases() {
+    let memory = memory(Some(2));
+    let inbox = &memory.inbox;
+    let held = || inbox.capacity_row(1).occupied.load(Ordering::SeqCst);
+
+    let first = inbox.reserve_work(1, 0).unwrap().unwrap();
+    let second = inbox.reserve_work(1, 2).unwrap().unwrap();
+    assert_eq!(held(), 2);
+    // Full: refused by the count alone.
+    assert!(matches!(inbox.reserve_work(1, 3), Err(Error::CapacityFull)));
+
+    inbox.cancel_work(first);
+    inbox.cancel_work(first);
+    assert_eq!(held(), 1, "a stale release must not lower it twice");
+
+    inbox.accept_work(1, second).unwrap();
+    inbox.complete_work(second);
+    assert_eq!(held(), 0);
+    inbox.complete_work(second);
+    assert_eq!(held(), 0, "a stale completion must not raise it back");
+
+    // An origin's death returns its reservations and their count.
+    inbox.reserve_work(1, 3).unwrap().unwrap();
+    inbox.reserve_work(1, 3).unwrap().unwrap();
+    assert_eq!(held(), 2);
+    inbox.recover_work(3);
+    assert_eq!(held(), 0);
+    inbox.reserve_work(1, 0).unwrap().unwrap();
+    assert_eq!(held(), 1);
+}
