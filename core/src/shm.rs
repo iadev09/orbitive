@@ -328,6 +328,32 @@ impl ShmRegion {
         )
     }
 
+    /// Attach an existing region under the same initialization lock as
+    /// [`Self::open_or_create_locked`], never creating or sizing it. `Ok(None)`
+    /// when no object has this name: a caller that must not own the resource
+    /// observes its absence instead of creating it.
+    pub fn open_existing_locked(
+        name: &str,
+        size: usize,
+    ) -> io::Result<Option<(Self, ShmRegionLock)>> {
+        match Self::open_inner(
+            name,
+            size,
+            true,
+            ShmAccessPolicy::default(),
+            false,
+        ) {
+            Ok((region, lock)) => Ok(Some((
+                region,
+                lock.expect(
+                    "locked SHM open must return its initialization lock",
+                ),
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Policy-aware creation with the existing owner-local initialization lock.
     /// Group permissions do not make that lock or fleet membership cross-user.
     pub fn open_or_create_locked_with_policy(
@@ -350,6 +376,18 @@ impl ShmRegion {
         process_lock: bool,
         policy: ShmAccessPolicy,
     ) -> io::Result<(Self, Option<ShmRegionLock>)> {
+        Self::open_inner(name, size, process_lock, policy, true)
+    }
+
+    /// `create: false` attaches an existing object only and reports a missing
+    /// name as [`io::ErrorKind::NotFound`]; it never creates or sizes.
+    fn open_inner(
+        name: &str,
+        size: usize,
+        process_lock: bool,
+        policy: ShmAccessPolicy,
+        create: bool,
+    ) -> io::Result<(Self, Option<ShmRegionLock>)> {
         let cname = CString::new(name).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte")
         })?;
@@ -363,13 +401,13 @@ impl ShmRegion {
         // Darwin cannot fchmod/fchown a POSIX SHM descriptor. Grant only the
         // intended group at creation; attaching a matching existing object is OK.
         #[cfg(target_os = "macos")]
-        let can_create =
-            policy.gid().is_none_or(|gid| gid == unsafe { libc::getegid() });
+        let can_create = create
+            && policy.gid().is_none_or(|gid| gid == unsafe { libc::getegid() });
         #[cfg(target_os = "macos")]
         let creation_mode = policy.mode();
         // Elsewhere, don't expose the object to its initial group before chown.
         #[cfg(not(target_os = "macos"))]
-        let (can_create, creation_mode) = (true, 0o600u32);
+        let (can_create, creation_mode) = (create, 0o600u32);
         // Apple declares shm_open as variadic, so its mode stays promoted to u32.
         #[cfg(not(target_vendor = "apple"))]
         let creation_mode = creation_mode as libc::mode_t;
@@ -390,6 +428,12 @@ impl ShmRegion {
             } else {
                 // Could be EEXIST (already created by a peer) or another error.
                 let err = io::Error::last_os_error();
+                if !create && err.raw_os_error() == Some(libc::ENOENT) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "no SHM object has this name",
+                    ));
+                }
                 if !can_create && err.raw_os_error() == Some(libc::ENOENT) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,

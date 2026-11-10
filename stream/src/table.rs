@@ -909,6 +909,43 @@ fn open_inner(
 }
 
 #[cfg(unix)]
+pub(crate) fn persisted_spec(
+    name: &str,
+    kind: u8,
+) -> Result<Option<(u16, StreamSpec)>> {
+    use std::io;
+
+    let segment = ring_segment_name(name, kind);
+    let Some((region, _initialization_lock)) =
+        ShmRegion::open_existing_locked(&segment, size_of::<Header>())?
+    else {
+        return Ok(None);
+    };
+    // SAFETY: the region is at least a header long, and its creator wrote the
+    // header before releasing the initialization lock this call now holds.
+    let header = unsafe { &*region.as_ptr().cast::<Header>() };
+    if header.magic != crate::layout::MAGIC
+        || header.version != crate::layout::VERSION
+        || usize::from(header.header_size) != size_of::<Header>()
+        || header.slot_size as usize != size_of::<crate::layout::Slot>()
+    {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SHM segment {segment} is not a stream table of this layout"
+            ),
+        )));
+    }
+    let spec = StreamSpec::new(
+        kind,
+        header.lane_capacity as usize,
+        header.buffer_bytes as usize,
+    );
+    spec.validate()?;
+    Ok(Some((header.fleet_capacity, spec)))
+}
+
+#[cfg(unix)]
 fn open_shm(
     name: &str,
     fleet_capacity: u16,

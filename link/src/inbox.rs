@@ -410,6 +410,36 @@ impl Inbox {
         Ok(inbox)
     }
 
+    /// The fleet capacity and inbox geometry an existing table's creator
+    /// recorded in its header, so a caller can adopt the owner's shape
+    /// instead of supplying one.
+    ///
+    /// # Safety
+    ///
+    /// `base` maps at least a [`TableHeader`] of a region whose creator has
+    /// released its initialization lock.
+    pub(crate) unsafe fn persisted_shape(
+        base: *const u8
+    ) -> Result<(usize, InboxGeometry)> {
+        let header = unsafe { &*base.cast::<TableHeader>() };
+        if header.magic.load(Ordering::Acquire) != INBOX_MAGIC {
+            return Err(Error::Malformed(
+                "inbox segment is not an inbox table",
+            ));
+        }
+        if header.version.load(Ordering::Relaxed) != INBOX_VERSION {
+            return Err(Error::Malformed(
+                "inbox segment was written by another layout version",
+            ));
+        }
+        let geometry = InboxGeometry::new(
+            header.capacity.load(Ordering::Relaxed) as usize,
+            header.payload_capacity.load(Ordering::Relaxed) as usize,
+        );
+        geometry.validate()?;
+        Ok((header.fleet_capacity.load(Ordering::Relaxed) as usize, geometry))
+    }
+
     /// Attach to a table another process created, refusing anything whose
     /// header does not match this build.
     ///

@@ -147,6 +147,39 @@ fn a_named_inbox_is_shared_and_refuses_a_different_shape() {
 }
 
 #[test]
+fn a_caller_adopts_the_owners_shape_and_never_creates_it() {
+    let name = fleet_name("adopt");
+    let (inbox_kind, stream_kind) = (SPEC.inbox_kind, SPEC.streams.kind);
+    assert!(
+        LinkSegment::adopt(&name, inbox_kind, stream_kind).unwrap().is_none()
+    );
+
+    // A shape unlike SPEC's, so nothing compiled into the caller can match it.
+    let shape = LinkSpec::new(
+        SPEC.fleet_capacity,
+        inbox_kind,
+        InboxGeometry::new(16, 512),
+        StreamSpec::new(stream_kind, 4, 8 * 1024),
+    );
+    let owner = LinkSegment::open(&name, shape).unwrap();
+    assert!(owner.created(), "the absent adoption must not have created it");
+    // An inbox without its stream table is not adoptable yet.
+    assert!(
+        LinkSegment::adopt(&name, inbox_kind, stream_kind).unwrap().is_none()
+    );
+
+    let bodies = LinkBodies::for_name(&name, 0, 1, shape).unwrap();
+    let caller =
+        LinkSegment::adopt(&name, inbox_kind, stream_kind).unwrap().unwrap();
+    assert!(!caller.created());
+    assert_eq!(caller.spec(), shape);
+
+    drop(caller);
+    bodies.unlink().unwrap();
+    owner.unlink().unwrap();
+}
+
+#[test]
 fn a_ticket_in_an_inbox_frame_opens_a_reusable_duplex_session() {
     let name = fleet_name("reuse");
     let origin = Scratch::participant(&name, 0, 10);

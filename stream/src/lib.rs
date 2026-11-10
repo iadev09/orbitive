@@ -468,6 +468,18 @@ impl Streams {
         })
     }
 
+    /// The shape of an existing owner-only table, read from its persisted
+    /// header under the same initialization lock its creator held: the fleet
+    /// capacity and the spec. `Ok(None)` when no table of this kind exists;
+    /// this never creates one.
+    #[cfg(unix)]
+    pub fn persisted_spec(
+        name: &str,
+        kind: u8,
+    ) -> Result<Option<(u16, StreamSpec)>> {
+        table::persisted_spec(name, kind)
+    }
+
     /// Initialize/validate transport before its inbox becomes joinable.
     #[cfg(unix)]
     pub fn prepare_group(

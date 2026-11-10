@@ -59,7 +59,50 @@ impl LinkSegment {
         name: &str,
         spec: LinkSpec,
     ) -> Result<Self> {
-        Self::open_inner(name, spec, None)
+        Self::open_inner(name, spec, None, true)?
+            .ok_or(Error::Malformed("a created Link inbox was not opened"))
+    }
+
+    /// Attach an existing owner-only link inbox and adopt the shape its
+    /// owner declared, read from the inbox and stream-table headers. Never
+    /// creates: `Ok(None)` when the inbox or its stream table does not exist
+    /// yet, so a caller observes an absent owner instead of fixing the
+    /// fleet's shape itself.
+    pub fn adopt(
+        name: &str,
+        inbox_kind: u8,
+        stream_kind: u8,
+    ) -> Result<Option<Self>> {
+        validate_name(name)?;
+        let segment_name = ring_segment_name(name, inbox_kind);
+        let Some((region, lock)) = ShmRegion::open_existing_locked(
+            &segment_name,
+            size_of::<crate::inbox::TableHeader>(),
+        )?
+        else {
+            return Ok(None);
+        };
+        // SAFETY: the mapping holds a header, and its creator finished it
+        // before releasing the initialization lock held here.
+        let (fleet_capacity, inbox) =
+            unsafe { Inbox::persisted_shape(region.as_ptr()) }?;
+        drop(lock);
+        drop(region);
+        let Some((stream_fleet, streams)) =
+            orbit_stream::Streams::persisted_spec(name, stream_kind)?
+        else {
+            return Ok(None);
+        };
+        if usize::from(stream_fleet) != fleet_capacity {
+            return Err(Error::Malformed(
+                "link stream fleet capacity differs from its inbox",
+            ));
+        }
+        let fleet_capacity = u16::try_from(fleet_capacity).map_err(|_| {
+            Error::Malformed("inbox fleet capacity must fit a nonzero u16")
+        })?;
+        let spec = LinkSpec::new(fleet_capacity, inbox_kind, inbox, streams);
+        Self::open_inner(name, spec, None, false)
     }
 
     /// Open a dedicated group-shared Link, without sharing any fleet rings.
@@ -69,14 +112,17 @@ impl LinkSegment {
         spec: LinkSpec,
         access: orbit_core::shm::GroupAccess,
     ) -> Result<Self> {
-        Self::open_inner(name, spec, Some(access))
+        Self::open_inner(name, spec, Some(access), true)?
+            .ok_or(Error::Malformed("a created Link inbox was not opened"))
     }
 
+    /// `create: false` attaches existing owner-only resources only.
     fn open_inner(
         name: &str,
         spec: LinkSpec,
         group: Option<orbit_core::shm::GroupAccess>,
-    ) -> Result<Self> {
+        create: bool,
+    ) -> Result<Option<Self>> {
         spec.validate()?;
         let segment_name = if let Some(access) = &group {
             validate_name(name)?;
@@ -106,7 +152,15 @@ impl LinkSegment {
         let bytes = spec.inbox_segment_bytes();
         let (region, lock) = match &group {
             Some(access) => access.open_region(&segment_name, bytes)?,
-            None => ShmRegion::open_or_create_locked(&segment_name, bytes)?,
+            None if create => {
+                ShmRegion::open_or_create_locked(&segment_name, bytes)?
+            }
+            None => {
+                match ShmRegion::open_existing_locked(&segment_name, bytes)? {
+                    Some(opened) => opened,
+                    None => return Ok(None),
+                }
+            }
         };
         let mut inbox = if region.created() {
             unsafe {
@@ -151,7 +205,7 @@ impl LinkSegment {
             segment.register_producer()?;
         }
         drop(lock);
-        Ok(segment)
+        Ok(Some(segment))
     }
 
     fn register_producer(&mut self) -> Result<()> {
