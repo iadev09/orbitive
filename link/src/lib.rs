@@ -44,7 +44,8 @@ pub use body::LinkBodies;
 pub use events::{LinkEvents, Routing};
 pub use frame::{EVENT_FRAME_TAG, RESERVED_FRAME_TAGS, is_reserved};
 pub use inbox::{
-    Admission, Inbox, InboxGeometry, LANE_NAME_MAX, LANE_ROLE_MAX, Reclaimed,
+    Admission, GrowthPolicy, Inbox, InboxGeometry, LANE_NAME_MAX,
+    LANE_ROLE_MAX, Reclaimed,
 };
 #[cfg(unix)]
 pub use orbit_core::shm::GroupAccess;

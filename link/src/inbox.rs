@@ -69,6 +69,16 @@ pub(crate) const INBOX_MAGIC: u32 = 0x4f54_5849; // "OTXI"
 /// table.
 pub(crate) const INBOX_VERSION: u32 = 10;
 
+/// An owner's declared growth: never fewer than `min` workers, never more
+/// than `max`, `step` added per pressure episode. What a worker is, and how
+/// one starts, is the owner's or its supervisor's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GrowthPolicy {
+    pub min: u16,
+    pub max: u16,
+    pub step: u16,
+}
+
 /// A lane taken back from a process that is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reclaimed {
@@ -334,13 +344,19 @@ pub(crate) struct TableHeader {
     /// address.
     pub(crate) directory: AtomicU64,
     /// Nonzero while the fleet's owner wants senders to report unmet demand:
-    /// its declared growth policy, written by the owner alone.
+    /// its declared growth policy, written by the owner alone, after the
+    /// bounds below.
     pub(crate) policy: AtomicU32,
     /// Nonzero while a report of unmet demand is pending: set by the first
     /// sender that finds every receiver full, cleared by the owner once it
     /// has acted. One episode, one wake.
     pub(crate) pressure: AtomicU32,
-    _padding: [u8; 28],
+    /// The owner's declared bounds, so a supervisor of any kind reads them
+    /// from the fleet rather than from a configuration of its own.
+    pub(crate) growth_min: AtomicU32,
+    pub(crate) growth_max: AtomicU32,
+    pub(crate) growth_step: AtomicU32,
+    _padding: [u8; 16],
 }
 
 /// A mapped inbox table.
@@ -842,17 +858,39 @@ impl Inbox {
         self.table_header().directory.load(Ordering::Acquire)
     }
 
-    /// The fleet's owner declares whether senders should report unmet
-    /// demand. Without it, `report_pressure` writes nothing.
-    pub fn set_pressure_wanted(
+    /// The fleet's owner declares its growth policy: `Some` asks senders to
+    /// report unmet demand and publishes the bounds, `None` (static) asks for
+    /// nothing, and `report_pressure` then writes nothing.
+    pub fn set_growth_policy(
         &self,
-        wanted: bool,
+        policy: Option<GrowthPolicy>,
     ) {
-        self.table_header().policy.store(u32::from(wanted), Ordering::Release);
+        let header = self.table_header();
+        match policy {
+            Some(policy) => {
+                header.growth_min.store(policy.min.into(), Ordering::Relaxed);
+                header.growth_max.store(policy.max.into(), Ordering::Relaxed);
+                header.growth_step.store(policy.step.into(), Ordering::Relaxed);
+                header.policy.store(1, Ordering::Release);
+            }
+            None => header.policy.store(0, Ordering::Release),
+        }
     }
 
-    pub fn pressure_wanted(&self) -> bool {
-        self.table_header().policy.load(Ordering::Acquire) != 0
+    /// The growth policy the owner declared, if any.
+    pub fn growth_policy(&self) -> Option<GrowthPolicy> {
+        let header = self.table_header();
+        if header.policy.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let bound = |word: &AtomicU32| {
+            u16::try_from(word.load(Ordering::Relaxed)).unwrap_or(u16::MAX)
+        };
+        Some(GrowthPolicy {
+            min: bound(&header.growth_min),
+            max: bound(&header.growth_max),
+            step: bound(&header.growth_step),
+        })
     }
 
     /// A sender that found every receiver full reports unmet demand. Only

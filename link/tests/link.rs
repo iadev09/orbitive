@@ -481,7 +481,9 @@ async fn unmet_demand_wakes_the_owner_once_per_episode() {
     assert!(!sender.inbox().report_pressure(), "no policy, nothing written");
     assert!(!master.inbox().pressure_pending());
 
-    master.inbox().set_pressure_wanted(true);
+    let policy = orbit_link::GrowthPolicy { min: 2, max: 8, step: 1 };
+    master.inbox().set_growth_policy(Some(policy));
+    assert_eq!(sender.inbox().growth_policy(), Some(policy));
     let waiting = tokio::spawn(async move {
         let change = watcher.next_change().await.unwrap();
         (watcher, change)
