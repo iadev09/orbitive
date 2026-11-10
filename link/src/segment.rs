@@ -251,8 +251,7 @@ impl LinkSegment {
         }
         let _unbind = Unbind(bell);
         loop {
-            if let Some(segment) = Self::adopt(name, inbox_kind, stream_kind)?
-            {
+            if let Some(segment) = Self::adopt(name, inbox_kind, stream_kind)? {
                 return Ok(segment);
             }
             socket.readable().await.map_err(Error::Io)?;
