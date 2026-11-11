@@ -14,6 +14,24 @@ fn fleets_accepts_optional_uid_without_a_fleet_name() {
 }
 
 #[test]
+fn fleets_accepts_one_script_output_mode() {
+    for flag in ["--names", "--name"] {
+        let cli =
+            Cli::try_parse_from(["orbit", "fleets", flag, "--uid", "501"])
+                .unwrap();
+        assert!(matches!(cli.command, Command::Fleets(args)
+            if args.names && !args.paths && args.uid == Some(501)));
+        assert!(
+            Cli::try_parse_from(["orbit", "fleets", flag, "--paths"]).is_err()
+        );
+    }
+    let cli = Cli::try_parse_from(["orbit", "fleets", "--paths"]).unwrap();
+    assert!(
+        matches!(cli.command, Command::Fleets(args) if args.paths && !args.names)
+    );
+}
+
+#[test]
 fn formats_binary_sizes() {
     assert_eq!(human_size(900), "900 B");
     assert_eq!(human_size(3_200), "3.12 KiB");

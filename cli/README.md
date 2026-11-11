@@ -28,6 +28,19 @@ excluded. This is a snapshot of retained resources, not a running-process list.
 No registry is created and no fleet is joined. Objects without a companion
 lock hint, or outside the selected lock directory, cannot be discovered.
 
+For scripts, `--names` (also `--name`) prints one fleet name per line.
+`--paths` prints one POSIX SHM object name per line, such as
+`/orbit-example-231-501`. Both modes omit the table and leave stdout empty
+when nothing is found. They also accept `--uid`.
+
+```sh
+orbit fleets --names | while IFS= read -r fleet; do
+    orbit list "$fleet"
+done
+
+orbit fleets --paths
+```
+
 List every shared-memory kind for a known fleet owned by the current effective user:
 
 ```sh

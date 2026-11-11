@@ -19,7 +19,7 @@ pub struct Segment {
 #[derive(Debug, Eq, PartialEq)]
 pub struct FleetSummary {
     pub name: String,
-    pub segments: usize,
+    pub segments: Vec<Segment>,
     pub size: u64,
 }
 
@@ -70,7 +70,7 @@ fn discover_fleets_in(
                 )
             })
         })?;
-        fleets.push(FleetSummary { name, segments: segments.len(), size });
+        fleets.push(FleetSummary { name, segments, size });
     }
     Ok(fleets)
 }

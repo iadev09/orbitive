@@ -1,6 +1,6 @@
 [package]
 name = "orbitive-cli"
-version = "0.5.4"
+version = "0.6.0"
 publish.workspace = true
 edition = "2024"
 rust-version = "1.85"

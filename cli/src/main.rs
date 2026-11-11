@@ -7,6 +7,7 @@ mod cache;
 mod shm;
 
 use std::error::Error;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -40,6 +41,14 @@ struct FleetsArgs {
     /// Effective user id that owns the objects.
     #[arg(long, value_name = "UID")]
     uid: Option<u32>,
+
+    /// Print only fleet names, one per line.
+    #[arg(long, visible_alias = "name", conflicts_with = "paths")]
+    names: bool,
+
+    /// Print only POSIX SHM object names, one per line.
+    #[arg(long)]
+    paths: bool,
 }
 
 #[derive(Debug, Args)]
@@ -109,18 +118,36 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
 fn fleets(args: FleetsArgs) -> Result<(), Box<dyn Error>> {
     let uid = args.uid.unwrap_or_else(shm::effective_uid);
     let fleets = shm::discover_fleets(uid)?;
-    if fleets.is_empty() {
-        println!("No Orbit SHM fleets found for uid={uid}.");
+    let mut output = io::stdout().lock();
+    if args.names {
+        for fleet in fleets {
+            writeln!(output, "{}", fleet.name)?;
+        }
         return Ok(());
     }
-    println!("{:<24}  {:>8}  {:>12}", "FLEET", "SEGMENTS", "TOTAL SIZE");
+    if args.paths {
+        for segment in fleets.into_iter().flat_map(|fleet| fleet.segments) {
+            writeln!(output, "{}", segment.name)?;
+        }
+        return Ok(());
+    }
+    if fleets.is_empty() {
+        writeln!(output, "No Orbit SHM fleets found for uid={uid}.")?;
+        return Ok(());
+    }
+    writeln!(
+        output,
+        "{:<24}  {:>8}  {:>12}",
+        "FLEET", "SEGMENTS", "TOTAL SIZE"
+    )?;
     for fleet in fleets {
-        println!(
+        writeln!(
+            output,
             "{:<24}  {:>8}  {:>12}",
             fleet.name,
-            fleet.segments,
+            fleet.segments.len(),
             human_size(fleet.size)
-        );
+        )?;
     }
     Ok(())
 }

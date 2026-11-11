@@ -68,12 +68,10 @@ fn fleets_verify_shm_deduplicate_hints_and_skip_stale_locks() {
     let fleets = discover_fleets_in(&dir, uid).unwrap();
     assert_eq!(fleets.len(), 1);
     assert_eq!(fleets[0].name, fleet);
-    assert_eq!(fleets[0].segments, 2);
-    let actual_size: u64 = discover(&fleet, uid, None)
-        .unwrap()
-        .iter()
-        .map(|segment| segment.size)
-        .sum();
+    assert_eq!(fleets[0].segments.len(), 2);
+    assert_eq!(fleets[0].segments, discover(&fleet, uid, None).unwrap());
+    let actual_size: u64 =
+        fleets[0].segments.iter().map(|segment| segment.size).sum();
     assert_eq!(fleets[0].size, actual_size);
     assert!(actual_size >= 8192);
     for object in objects {
