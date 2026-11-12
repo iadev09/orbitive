@@ -175,7 +175,6 @@ impl<M: ClientManager> ClientPool<M> {
             let notified = self.inner.changed.notified();
             let action = {
                 let mut state = self.state();
-                self.prune_expired(&mut state);
                 match &state.status {
                     PoolState::Draining | PoolState::Closed => {
                         return Err(AcquireError::Closed);
@@ -189,7 +188,9 @@ impl<M: ClientManager> ClientPool<M> {
                         {
                             waiter.enter(&mut state)?;
                             Action::Wait
-                        } else if let Some(entry) = state.idle.pop_front() {
+                        } else if let Some(entry) =
+                            self.pop_reusable(&mut state)
+                        {
                             state.in_flight += 1;
                             waiter.leave(&mut state);
                             Action::Reuse(entry)
@@ -761,6 +762,23 @@ impl<M: ClientManager> ClientPool<M> {
     fn prune_now(&self) {
         let mut state = self.state();
         self.prune_expired(&mut state);
+    }
+
+    /// Take the oldest idle entry that has not expired, retiring the expired
+    /// ones ahead of it. Entries return to the back, so the oldest idle one
+    /// is at the front and an acquire usually checks one entry.
+    fn pop_reusable(
+        &self,
+        state: &mut State<M::Client>,
+    ) -> Option<Entry<M::Client>> {
+        let now = Instant::now();
+        while let Some(entry) = state.idle.pop_front() {
+            if !expired(&entry, now, &self.inner.options) {
+                return Some(entry);
+            }
+            state.live = state.live.saturating_sub(1);
+        }
+        None
     }
 
     fn prune_expired(
