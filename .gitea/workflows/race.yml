@@ -1,0 +1,37 @@
+name: orbit-race
+
+# The substrate's `unsafe` is several processes and several threads over the
+# same mapped bytes, and a plain test run cannot tell a correct seqlock from
+# an undefined one — both work on the hardware we ship on. This job is the one
+# that can. It runs when that code or the build around it changes, and on
+# request; a push that touches neither has nothing new for it to find.
+# Linux only: ThreadSanitizer is not available on FreeBSD.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "core/**"
+      - "lock/**"
+      - "stream/**"
+      - "link/**"
+      - "arena/**"
+      - "cell/**"
+      - "Cargo.toml"
+      - "Justfile"
+      - ".gitea/workflows/race.yml"
+
+jobs:
+  race:
+    name: Data races
+    runs-on: linux
+    container:
+      # The arena's tests can populate several default 64 MiB segments.
+      options: --shm-size=1g
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Nightly toolchain with rust-src
+        run: rustup toolchain install nightly --component rust-src --profile minimal
+      - name: ThreadSanitizer
+        run: just race

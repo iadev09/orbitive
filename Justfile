@@ -18,6 +18,16 @@ smoke-freebsd:
     test "$(uname -s)" = "FreeBSD"
     just smoke
 
+# A workspace build unifies features across members and hides code that
+# compiles only because another member enabled a feature — an import left
+# behind `cfg(feature = "tokio")`, for one. This builds what a downstream gets
+# when it asks for one package alone.
+# Check each package alone, without its default features.
+features:
+    for package in $(cargo tree --workspace --depth 0 --edges normal --prefix none | awk 'NF {print $1}' | sort -u); do \
+        cargo check --package "$package" --no-default-features --lib; \
+    done
+
 # Data races in the shared-memory substrate, found rather than reasoned about.
 #
 # This crate's `unsafe` is mostly one thing: several processes and several
@@ -31,6 +41,11 @@ smoke-freebsd:
 # Needs nightly with `rust-src`: the sanitizer has to instrument std as well,
 # or a race that passes through it is invisible. Doctests are excluded because
 # rustdoc builds them without the sanitizer and then refuses the ABI mismatch.
+# Nightly is installed for this job on the CI runner only; development hosts
+# stay on stable.
+#
+# The packages are the ones whose `unsafe` maps shared memory across processes
+# and threads: the ring, locks, streams, Link inboxes, the arena and cells.
 #
 # `halt_on_error=1` because a TSan warning does not fail a test by itself, and
 # a report nobody's exit code notices is not a check.
@@ -39,5 +54,6 @@ race:
     TSAN_OPTIONS=halt_on_error=1 \
     RUSTFLAGS=-Zsanitizer=thread \
     cargo +nightly test -p orbit-core -p orbit-lock -p orbit-stream \
+        -p orbit-link -p orbit-arena -p orbit-cell \
         --target "$(rustc +nightly -vV | awk '/^host:/{print $2}')" \
         -Zbuild-std --lib --tests -- --test-threads=1

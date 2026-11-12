@@ -16,21 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Orbit smoke test
         run: just smoke-linux
+      - name: Each package without default features
+        run: just features
 
-  # The substrate's `unsafe` is several processes and several threads over the
-  # same mapped bytes, and a plain test run cannot tell a correct seqlock from
-  # an undefined one — both work on the hardware we ship on. This job is the
-  # one that can. Linux only: ThreadSanitizer is not available on FreeBSD.
-  race:
-    name: Data races
-    runs-on: linux
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - name: Nightly toolchain with rust-src
-        run: rustup toolchain install nightly --component rust-src --profile minimal
-      - name: ThreadSanitizer
-        run: just race
+  # Data races run from race.yml, only when the shared-memory code changes.
 
   freebsd:
     name: FreeBSD
