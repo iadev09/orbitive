@@ -18,144 +18,31 @@ use std::{fmt, io};
 use super::shm::ShmRing;
 use crate::readiness::{Readiness, Signal};
 
-/// Process-local fd readiness bridge for one shared Orbit ring.
+/// Process-local fd readiness for one shared Orbit ring.
 ///
-/// The established name is retained on macOS, where a nonblocking pipe backs
-/// the fd. Native macOS readiness requires 14.4 or later; older systems return
-/// `ErrorKind::Unsupported` from construction so callers can use polling.
+/// Every subscribing process creates its own instance. A small driver thread
+/// parks on the ring's generation, counting itself in the ring header while
+/// it is parked, and marks this fd readable when the generation moves. It
+/// then waits for its consumer to [`drain`](Self::drain) before it parks
+/// again. A publisher using [`Fleet::publish_notified`](crate::Fleet) bumps
+/// the generation and wakes only when a driver is parked: while every reader
+/// is busy draining, a publish is a write and an atomic, with no syscall.
+/// Multiple publishes coalesce into one wake.
 ///
-/// Every subscribing process creates its own instance. Ring publishers bump a
-/// generation stored in SHM and wake all platform waiters; the local driver
-/// then marks this fd readable. Multiple publishes may coalesce into one wake,
-/// so a consumer must drain the fd and poll the ring through its own cursor.
-pub struct RingEventFd {
-    fd: Readiness,
-    ring: Arc<ShmRing>,
-    stop: Arc<AtomicBool>,
-    driver: Option<JoinHandle<()>>,
-}
-
-impl RingEventFd {
-    pub(crate) fn new(ring: Arc<ShmRing>) -> io::Result<Self> {
-        let (fd, driver_fd) = local_notification_pair()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let driver_stop = stop.clone();
-        let driver_ring = ring.clone();
-        let mut observed =
-            ring.notification_generation().load(Ordering::Acquire);
-
-        // A pipe has two distinct ends; an eventfd is one descriptor cloned.
-        #[cfg(target_os = "macos")]
-        debug_assert_ne!(fd.as_raw_fd(), driver_fd.as_raw_fd());
-
-        let driver = std::thread::Builder::new()
-            .name(format!("orbit-ring-{}-eventfd", ring.kind()))
-            .spawn(move || {
-                while !driver_stop.load(Ordering::Acquire) {
-                    let current = driver_ring
-                        .notification_generation()
-                        .load(Ordering::Acquire);
-                    if current != observed {
-                        observed = current;
-                        if driver_fd.signal().is_err() {
-                            break;
-                        }
-                        continue;
-                    }
-                    if crate::sync::wait_word(
-                        driver_ring.notification_generation(),
-                        observed,
-                    )
-                    .is_err()
-                    {
-                        break;
-                    }
-                }
-            })?;
-
-        Ok(Self { fd, ring, stop, driver: Some(driver) })
-    }
-
-    pub(crate) fn notify(ring: &ShmRing) -> io::Result<()> {
-        ring.notification_generation().fetch_add(1, Ordering::Release);
-        crate::sync::wake_word(ring.notification_generation())
-    }
-
-    /// Drain coalesced readiness tokens from the nonblocking local fd.
-    ///
-    /// Ring events themselves remain in SHM; the returned number is only the
-    /// local wake count and must not be interpreted as an event count.
-    pub fn drain(&self) -> io::Result<u64> {
-        self.fd.drain()
-    }
-}
-
-impl AsRawFd for RingEventFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
-    }
-}
-
-impl AsFd for RingEventFd {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
-impl fmt::Debug for RingEventFd {
-    fn fmt(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-    ) -> fmt::Result {
-        f.debug_struct("RingEventFd")
-            .field("fd", &self.fd.as_raw_fd())
-            .field("ring_kind", &self.ring.kind())
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for RingEventFd {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        // Change the generation before waking. If the driver passed its stop
-        // check but has not entered the platform wait yet, the atomic compare
-        // prevents it from parking after our wake and deadlocking join.
-        self.ring.notification_generation().fetch_add(1, Ordering::Release);
-        let _ = crate::sync::wake_word(self.ring.notification_generation());
-        if let Some(driver) = self.driver.take() {
-            let _ = driver.join();
-        }
-    }
-}
-
-/// Readiness for a ring whose publishers wake only parked readers.
+/// The fd is backed by an `eventfd` on Linux and FreeBSD and by a nonblocking
+/// pipe on macOS, where native readiness needs 14.4 or later; older systems
+/// return `ErrorKind::Unsupported` from construction so callers can poll.
 ///
-/// [`RingEventFd`]'s driver parks on the generation again as soon as it has
-/// marked its fd readable, so a publisher cannot tell a busy reader from an
-/// idle one and must wake on every publish: one syscall per frame, and one
-/// driver wake and fd signal on the reading side. This driver instead waits
-/// for its consumer to [`drain`](Self::drain) before it parks again, and
-/// counts itself in the ring header while it is parked. A publisher using
-/// [`Fleet::publish_notified_parked`](crate::Fleet::publish_notified_parked)
-/// reads that count and wakes only when it is non-zero — under load the
-/// reader is busy draining and publishing costs no syscall at all.
-///
-/// Every reader of a ring published with the parked variant must use this
-/// type: a [`RingEventFd`] driver does not count itself and would not be
-/// woken. Rings published with [`Fleet::publish_notified`](crate::Fleet)
-/// are unaffected by this type's existence.
-///
-/// The contract is [`RingEventFd`]'s plus one step: drain the fd, then poll
-/// the ring through your own cursor. Draining is what lets the driver park.
+/// The contract: drain the fd, then poll the ring through your own cursor.
+/// Draining is what lets the driver park.
 ///
 /// **Clear the reactor's readiness before draining, not after.** The driver
 /// signals once per drain: a signal that arrives just after [`drain`](Self::drain)
 /// is the only one until the next drain, and a reactor that clears readiness
 /// after draining (tokio's `clear_ready`) erases it — the consumer then waits
 /// for an edge that never comes, and the driver for a drain that never
-/// happens. [`RingEventFd`] tolerates either order because its driver
-/// signals on every publish.
-pub struct ParkedRingEventFd {
+/// happens.
+pub struct RingEventFd {
     fd: Readiness,
     ring: Arc<ShmRing>,
     stop: Arc<AtomicBool>,
@@ -171,7 +58,7 @@ struct Drained {
     taken: Condvar,
 }
 
-impl ParkedRingEventFd {
+impl RingEventFd {
     pub(crate) fn new(ring: Arc<ShmRing>) -> io::Result<Self> {
         let (fd, driver_fd) = local_notification_pair()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -182,7 +69,7 @@ impl ParkedRingEventFd {
             ring.notification_generation().load(Ordering::Acquire);
 
         let driver = std::thread::Builder::new()
-            .name(format!("orbit-ring-{}-parked", ring.kind()))
+            .name(format!("orbit-ring-{}-eventfd", ring.kind()))
             .spawn(move || {
                 let generation = driver_ring.notification_generation();
                 let waiters = driver_ring.notification_waiters();
@@ -222,7 +109,7 @@ impl ParkedRingEventFd {
         Ok(Self { fd, ring, stop, drained, driver: Some(driver) })
     }
 
-    /// Wake parked readers of `ring`, and only them.
+    /// Wake the ring's parked readers, and only them.
     pub(crate) fn notify(ring: &ShmRing) -> io::Result<()> {
         ring.notification_generation().fetch_add(1, Ordering::SeqCst);
         if ring.notification_waiters().load(Ordering::SeqCst) == 0 {
@@ -240,31 +127,31 @@ impl ParkedRingEventFd {
     }
 }
 
-impl AsRawFd for ParkedRingEventFd {
+impl AsRawFd for RingEventFd {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl AsFd for ParkedRingEventFd {
+impl AsFd for RingEventFd {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl fmt::Debug for ParkedRingEventFd {
+impl fmt::Debug for RingEventFd {
     fn fmt(
         &self,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        f.debug_struct("ParkedRingEventFd")
+        f.debug_struct("RingEventFd")
             .field("fd", &self.fd.as_raw_fd())
             .field("ring_kind", &self.ring.kind())
             .finish_non_exhaustive()
     }
 }
 
-impl Drop for ParkedRingEventFd {
+impl Drop for RingEventFd {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         // Release a driver waiting for a drain, then one parked on the word:

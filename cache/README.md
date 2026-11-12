@@ -47,7 +47,8 @@ valid across eviction or invalidation.
 
 On Linux, FreeBSD and macOS 14.4 or later, `Cache::event_fd` supplies a readiness
 signal. Register it before the first drain, then drain coalesced signals and
-call `Cache::poll`. Direct callers may drive polling explicitly. The cache
+call `Cache::poll`; with an async reactor, clear its readiness before each
+drain, because the fd signals once per drain. Direct callers may drive polling explicitly. The cache
 provides fleet-wide last-write-wins revisions, explicit payload-overwrite
 and lag reporting, and store-scoped invalidation.
 

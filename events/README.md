@@ -56,7 +56,10 @@ let bus = FleetEventBus::<ApplicationEvents>::with_layout(fleet)?;
 On Linux, FreeBSD, and macOS 14.4 or later, an SHM-backed bus can create a
 process-local
 `RingEventFd`. Consumers drain that readiness signal and then poll the ring;
-the fd does not carry event data, and wakeups may coalesce.
+the fd does not carry event data, and wakeups may coalesce. A publish wakes a
+reader only while its readiness is waiting, so an async consumer clears its
+reactor's readiness before draining, never after: the fd signals once per
+drain.
 
 The crate does not provide acknowledgement, durable replay, consumer groups,
 typed serialization, handler dispatch, or network transport.

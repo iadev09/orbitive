@@ -109,7 +109,9 @@ The reader takes one snapshot of retained events and exits. Each run starts a
 new cursor, so repeated runs can read earlier retained messages again. In a
 long-lived consumer, keep the cursor between reads; use `cursor_at_head()` to
 start after existing events. For event-driven waiting, the event bus exposes
-`event_fd()`; drain readiness and then poll the ring.
+`event_fd()`; drain readiness and then poll the ring. With an async reactor,
+clear its readiness before draining: the fd signals once per drain, and a
+signal cleared after the drain is not repeated.
 
 Only run one publisher for node 0 and one reader for node 1 at a time in this
 example. Use a different fleet name if `demo` already belongs to an application.

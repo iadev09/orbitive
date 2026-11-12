@@ -90,10 +90,9 @@ struct ShmRingHeader {
     /// layout remains compatible with already-created segments.
     notification_generation: AtomicU32,
     /// Readers parked on `notification_generation` through
-    /// [`ParkedRingEventFd`](super::ParkedRingEventFd), so a publisher using
-    /// the parked variant wakes only when one is waiting. Taken from the
-    /// reserved space like the generation: segments created before it read
-    /// zero, and publishers that always wake never look at it.
+    /// [`RingEventFd`](super::RingEventFd), so a publisher wakes only when
+    /// one is waiting. Taken from the reserved space like the generation:
+    /// segments created before it read zero.
     notification_waiters: AtomicU32,
     /// Explicitly fills one cache line; field order avoids implicit
     /// alignment padding that would otherwise make this header 128B.

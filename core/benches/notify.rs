@@ -1,13 +1,11 @@
 //! What a ring publish costs with each readiness form, on this kernel.
 //!
 //! One thread publishes 64-byte frames into a shared SHM ring as fast as it
-//! can, through one of three calls:
+//! can, through one of two calls:
 //!
 //! - `plain`: `Fleet::publish`, no wake at all. The floor.
 //! - `notified`: `Fleet::publish_notified`, which bumps the generation and
-//!   makes the platform wake call on every publish (cache, events, lock).
-//! - `parked`: `Fleet::publish_notified_parked`, which wakes only when a
-//!   reader is counted as parked.
+//!   makes the platform wake call only when a reader's driver is parked.
 //!
 //! `reader` is `none` (nobody subscribed) or `busy` (one thread of this
 //! process holds the matching readiness fd and drains it as fast as it
@@ -38,12 +36,6 @@ impl OrbitTyped for Plain {
 struct Notified;
 impl OrbitTyped for Notified {
     const KIND: u8 = 241;
-    const RING_SPEC: RingSpec = RingSpec::new(4096, 64);
-}
-#[derive(Clone)]
-struct Parked;
-impl OrbitTyped for Parked {
-    const KIND: u8 = 242;
     const RING_SPEC: RingSpec = RingSpec::new(4096, 64);
 }
 
@@ -108,16 +100,6 @@ fn sample(
                     wakes.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            "parked" => {
-                let fd = fleet.ring_event_fd_parked::<Parked>().unwrap();
-                ready_tx.send(()).unwrap();
-                while !stop.load(Ordering::Acquire) {
-                    readable(fd.as_raw_fd());
-                    fd.drain().unwrap();
-                    black_box(fleet.read_head::<Parked>());
-                    wakes.fetch_add(1, Ordering::Relaxed);
-                }
-            }
             _ => unreachable!(),
         });
         ready_rx.recv().unwrap();
@@ -131,15 +113,6 @@ fn sample(
         "notified" => {
             fleet
                 .publish_notified::<Notified>(
-                    0,
-                    ver,
-                    Bytes::from_static(PAYLOAD),
-                )
-                .unwrap();
-        }
-        "parked" => {
-            fleet
-                .publish_notified_parked::<Parked>(
                     0,
                     ver,
                     Bytes::from_static(PAYLOAD),
@@ -191,13 +164,9 @@ fn main() {
         "| publish | reader | wall ns/publish per sample | median wall | publisher CPU ns | process CPU ns | switches/publish | reader wakes/publish |"
     );
     println!("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |");
-    for (mode, reader) in [
-        ("plain", false),
-        ("notified", false),
-        ("parked", false),
-        ("notified", true),
-        ("parked", true),
-    ] {
+    for (mode, reader) in
+        [("plain", false), ("notified", false), ("notified", true)]
+    {
         let _ = sample(&fleet, mode, reader, publishes / 10);
         let mut rows = (0..samples)
             .map(|_| sample(&fleet, mode, reader, publishes))
@@ -222,7 +191,6 @@ fn main() {
 
     let _ = fleet.shm_ring::<Plain>().and_then(|r| r.unlink());
     let _ = fleet.shm_ring::<Notified>().and_then(|r| r.unlink());
-    let _ = fleet.shm_ring::<Parked>().and_then(|r| r.unlink());
     drop(fleet);
     let prefix = format!("orbit-{name}-");
     for entry in std::fs::read_dir("/dev/shm").into_iter().flatten().flatten() {

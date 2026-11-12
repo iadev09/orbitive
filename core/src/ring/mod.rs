@@ -65,7 +65,7 @@ pub mod shm;
     target_os = "freebsd",
     target_os = "macos"
 ))]
-pub use readiness::{ParkedRingEventFd, RingEventFd};
+pub use readiness::RingEventFd;
 
 /// Writer ownership for one [`OrbitTyped`] ring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
