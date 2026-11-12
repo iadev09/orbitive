@@ -4,9 +4,10 @@
 //! byte and exists only so an async runtime can sleep on a descriptor instead
 //! of waking a dedicated thread that then wakes the runtime.
 
+use std::borrow::Cow;
 use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// Empty obsolete bells only when the receiver has no shared work left.
 /// Callers disarm first and recheck the shared generation after rearming.
@@ -140,6 +141,10 @@ pub(crate) struct Bell {
     /// ring and for a bell that was replaced. Only the writer that took the
     /// lane's arm rings it, so a lane's entry is not contended.
     lanes: Box<[Mutex<Option<Connected>>]>,
+    /// Each door's address, built on its first ring: a door's name is fixed
+    /// for the bell's life, so a ring is one send rather than a name to
+    /// format again. Indexed by [`Bell::door_index`].
+    addresses: Box<[OnceLock<SocketAddr>]>,
 }
 
 impl Bell {
@@ -162,8 +167,10 @@ impl Bell {
         } else {
             Self::prefix(segment)
         };
+        let addresses =
+            (0..Self::door_count(lanes)).map(|_| OnceLock::new()).collect();
         let lanes = (0..lanes).map(|_| Mutex::new(None)).collect();
-        Ok(Self { prefix, sender, group, lanes })
+        Ok(Self { prefix, sender, group, lanes, addresses })
     }
 
     pub(crate) fn validate_group_address(
@@ -297,7 +304,7 @@ impl Bell {
         *kept = None;
         let socket = UnixDatagram::unbound()?;
         socket.set_nonblocking(true)?;
-        socket.connect_addr(&self.address(Doorbell::Lane(lane))?)?;
+        socket.connect_addr(&*self.door_address(Doorbell::Lane(lane))?)?;
         crate::probe::ring(|| socket.send(&[1]))?;
         *kept = Some(Connected { epoch, socket });
         Ok(())
@@ -307,9 +314,48 @@ impl Bell {
         &self,
         door: Doorbell,
     ) -> io::Result<()> {
-        let address = self.address(door)?;
+        let address = self.door_address(door)?;
         crate::probe::ring(|| self.sender.send_to_addr(&[1], &address))
             .map(|_| ())
+    }
+
+    /// Doors a bell of `lanes` lanes can ring: each lane, each watcher slot,
+    /// two producer registrations per lane, and the adopter.
+    fn door_count(lanes: usize) -> usize {
+        if lanes == 0 { 0 } else { 4 * lanes + 1 }
+    }
+
+    fn door_index(
+        &self,
+        door: Doorbell,
+    ) -> Option<usize> {
+        let lanes = self.lanes.len();
+        let index = match door {
+            Doorbell::Lane(lane) if lane < lanes => lane,
+            Doorbell::Watcher(slot) if slot < lanes => lanes + slot,
+            Doorbell::Producer(index) if index < 2 * lanes => 2 * lanes + index,
+            Doorbell::Adopter => 4 * lanes,
+            _ => return None,
+        };
+        (index < self.addresses.len()).then_some(index)
+    }
+
+    /// The door's address, built once and kept. A name the platform refuses
+    /// is not kept, so it is refused again on the next ring.
+    fn door_address(
+        &self,
+        door: Doorbell,
+    ) -> io::Result<Cow<'_, SocketAddr>> {
+        let Some(kept) =
+            self.door_index(door).and_then(|index| self.addresses.get(index))
+        else {
+            return self.address(door).map(Cow::Owned);
+        };
+        if let Some(address) = kept.get() {
+            return Ok(Cow::Borrowed(address));
+        }
+        let address = self.address(door)?;
+        Ok(Cow::Borrowed(kept.get_or_init(|| address)))
     }
 
     #[cfg(feature = "tokio")]
