@@ -1373,11 +1373,9 @@ impl Inbox {
         watcher.changes.fetch_add(1, Ordering::SeqCst);
         #[cfg(unix)]
         if let Some(bell) = &self.bell
-            && let Err(error) = ring_armed(
-                &watcher.reactor,
-                bell,
-                crate::bell::Doorbell::Watcher(slot),
-            )
+            && let Err(error) = ring_armed(&watcher.reactor, || {
+                bell.ring(crate::bell::Doorbell::Watcher(slot))
+            })
         {
             tracing::warn!(slot, %error, "Link watcher wake failed");
         }
@@ -1399,11 +1397,9 @@ impl Inbox {
         }
         #[cfg(unix)]
         if let Some(bell) = &self.bell
-            && let Err(error) = ring_armed(
-                &lane.reactor,
-                bell,
-                crate::bell::Doorbell::Lane(lane_index),
-            )
+            && let Err(error) = ring_armed(&lane.reactor, || {
+                bell.ring_lane(lane_index, lane.epoch.load(Ordering::Acquire))
+            })
         {
             tracing::warn!(lane = lane_index, %error, "Link lane wake failed");
         }
@@ -1425,7 +1421,8 @@ impl Inbox {
         group: Option<orbit_core::shm::GroupAccess>,
     ) -> Result<()> {
         self.bell = Some(
-            crate::bell::Bell::with_group(segment, group).map_err(Error::Io)?,
+            crate::bell::Bell::with_group(segment, group, self.lanes)
+                .map_err(Error::Io)?,
         );
         Ok(())
     }
@@ -1805,13 +1802,12 @@ fn check_identity(
 #[cfg(unix)]
 fn ring_armed(
     reactor: &AtomicU32,
-    bell: &crate::bell::Bell,
-    door: crate::bell::Doorbell,
+    ring: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     if reactor.swap(0, Ordering::SeqCst) == 0 {
         return Ok(());
     }
-    if let Err(error) = bell.ring(door) {
+    if let Err(error) = ring() {
         reactor.fetch_or(1, Ordering::SeqCst);
         return Err(error);
     }

@@ -229,3 +229,36 @@ async fn a_receiver_that_read_its_bell_exactly_is_woken_again() {
     // The last wake's bell is the only one still unread.
     assert_eq!(peek(&receiver.socket).unwrap(), 1);
 }
+
+/// A writer keeps a socket connected to the lane's bell. When the lane's
+/// receiver is replaced, that connection leads to a bell nobody reads: the
+/// ring must find the new one, or the new receiver sleeps through its frame.
+#[tokio::test(flavor = "current_thread")]
+async fn a_replaced_receiver_is_still_rung() {
+    let scratch = Scratch::new();
+    for turn in 0..3u8 {
+        let mut receiver = scratch.0.receiver(0).unwrap();
+        let (parked, waiting) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let mut frame = Vec::new();
+            let mut next = Box::pin(receiver.recv(&mut frame));
+            let mut parked = Some(parked);
+            std::future::poll_fn(|cx| {
+                let result = next.as_mut().poll(cx);
+                if result.is_pending()
+                    && let Some(parked) = parked.take()
+                {
+                    parked.send(()).unwrap();
+                }
+                result
+            })
+            .await
+            .unwrap();
+            drop(next);
+            frame
+        });
+        waiting.await.unwrap();
+        scratch.0.inbox().write(0, &[b'z', turn]).unwrap();
+        assert_eq!(reader.await.unwrap(), [b'z', turn]);
+    }
+}

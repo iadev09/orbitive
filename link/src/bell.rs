@@ -6,6 +6,7 @@
 
 use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
+use std::sync::{Mutex, PoisonError};
 
 /// Empty obsolete bells only when the receiver has no shared work left.
 /// Callers disarm first and recheck the shared generation after rearming.
@@ -94,6 +95,12 @@ pub(crate) fn forget_readiness(socket: &tokio::net::UnixDatagram) {
     });
 }
 
+/// Whether a send was refused because the far side's queue is full.
+fn queue_full(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == Some(libc::ENOBUFS)
+}
+
 /// Who a datagram wakes. Lanes and watchers have separate addresses because a
 /// named socket has exactly one binder.
 #[derive(Clone, Copy)]
@@ -117,20 +124,36 @@ impl Doorbell {
     }
 }
 
+/// A socket connected to one lane's bell, and the lane epoch it was connected
+/// under.
+struct Connected {
+    epoch: u64,
+    socket: UnixDatagram,
+}
+
 pub(crate) struct Bell {
     prefix: String,
     sender: UnixDatagram,
     group: Option<orbit_core::shm::GroupAccess>,
+    /// One entry for each lane this process may ring. A ring over a kept
+    /// connection is a plain send; naming the lane again is for the first
+    /// ring and for a bell that was replaced. Only the writer that took the
+    /// lane's arm rings it, so a lane's entry is not contended.
+    lanes: Box<[Mutex<Option<Connected>>]>,
 }
 
 impl Bell {
     #[cfg(test)]
     pub(crate) fn new(segment: &str) -> io::Result<Self> {
-        Self::with_group(segment, None)
+        Self::with_group(segment, None, 1)
     }
+
+    /// `lanes` is how many lane bells this one may keep a connection to;
+    /// zero for a bell that only binds.
     pub(crate) fn with_group(
         segment: &str,
         group: Option<orbit_core::shm::GroupAccess>,
+        lanes: usize,
     ) -> io::Result<Self> {
         let sender = UnixDatagram::unbound()?;
         sender.set_nonblocking(true)?;
@@ -139,7 +162,8 @@ impl Bell {
         } else {
             Self::prefix(segment)
         };
-        Ok(Self { prefix, sender, group })
+        let lanes = (0..lanes).map(|_| Mutex::new(None)).collect();
+        Ok(Self { prefix, sender, group, lanes })
     }
 
     pub(crate) fn validate_group_address(
@@ -244,6 +268,39 @@ impl Bell {
         door: Doorbell,
     ) -> io::Result<SocketAddr> {
         SocketAddr::from_pathname(Self::path_for(prefix, door))
+    }
+
+    /// Ring a lane's bell over the socket connected to it, connecting first
+    /// when there is none, when the lane has changed hands since (`epoch`),
+    /// or when the send says the far side is gone.
+    pub(crate) fn ring_lane(
+        &self,
+        lane: usize,
+        epoch: u64,
+    ) -> io::Result<()> {
+        let Some(kept) = self.lanes.get(lane) else {
+            return self.ring(Doorbell::Lane(lane));
+        };
+        let mut kept = kept.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(connected) = kept.as_ref()
+            && connected.epoch == epoch
+        {
+            match crate::probe::ring(|| connected.socket.send(&[1])) {
+                Ok(_) => return Ok(()),
+                // A full queue is not a lost bell: the far side has not read
+                // the ones it has.
+                Err(error) if queue_full(&error) => return Err(error),
+                // Closed or replaced: find the lane's bell again.
+                Err(_) => {}
+            }
+        }
+        *kept = None;
+        let socket = UnixDatagram::unbound()?;
+        socket.set_nonblocking(true)?;
+        socket.connect_addr(&self.address(Doorbell::Lane(lane))?)?;
+        crate::probe::ring(|| socket.send(&[1]))?;
+        *kept = Some(Connected { epoch, socket });
+        Ok(())
     }
 
     pub(crate) fn ring(

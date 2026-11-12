@@ -7,11 +7,11 @@ fn a_failed_send_keeps_the_next_wake_attempt_armed() {
     let door = crate::bell::Doorbell::Lane(0);
     let reactor = AtomicU32::new(1);
 
-    assert!(ring_armed(&reactor, &bell, door).is_err());
+    assert!(ring_armed(&reactor, || bell.ring_lane(0, 0)).is_err());
     assert_eq!(reactor.load(Ordering::SeqCst), 1);
 
     let socket = bell.bind(door).unwrap();
-    ring_armed(&reactor, &bell, door).unwrap();
+    ring_armed(&reactor, || bell.ring_lane(0, 0)).unwrap();
     assert_eq!(reactor.load(Ordering::SeqCst), 0);
     let mut byte = [0];
     assert_eq!(socket.recv(&mut byte).unwrap(), 1);

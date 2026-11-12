@@ -237,7 +237,7 @@ impl LinkSegment {
         let _hold = orbit_core::shm::try_hold_adopter(&segment_name)
             .map_err(Error::Io)?
             .ok_or(Error::NoWatcher)?;
-        let bell = crate::bell::Bell::with_group(&segment_name, None)
+        let bell = crate::bell::Bell::with_group(&segment_name, None, 0)
             .map_err(Error::Io)?;
         let socket = tokio::net::UnixDatagram::from_std(
             bell.bind(crate::bell::Doorbell::Adopter).map_err(Error::Io)?,
