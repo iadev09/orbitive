@@ -47,7 +47,7 @@
 //! clients receive ids; they do not generate them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use bytes::Bytes;
 
@@ -630,27 +630,70 @@ impl std::fmt::Debug for Ring {
     }
 }
 
+/// One slot per `OrbitTyped::KIND` byte.
+///
+/// What a kind resolves to is fixed once it is installed, so a hot-path
+/// lookup is an index and one atomic load: no hashing, no shard lock and no
+/// reference-count traffic.
+pub(crate) struct ByKind<V> {
+    slots: Box<[OnceLock<V>; 256]>,
+}
+
+impl<V> ByKind<V> {
+    pub(crate) fn new() -> Self {
+        Self { slots: Box::new(std::array::from_fn(|_| OnceLock::new())) }
+    }
+
+    pub(crate) fn get(
+        &self,
+        kind: u8,
+    ) -> Option<&V> {
+        self.slots[usize::from(kind)].get()
+    }
+
+    pub(crate) fn get_or_init(
+        &self,
+        kind: u8,
+        init: impl FnOnce() -> V,
+    ) -> &V {
+        self.slots[usize::from(kind)].get_or_init(init)
+    }
+
+    /// Install `value` unless another caller installed one first, and return
+    /// whichever is installed.
+    pub(crate) fn get_or_insert(
+        &self,
+        kind: u8,
+        value: V,
+    ) -> &V {
+        let slot = &self.slots[usize::from(kind)];
+        let _ = slot.set(value);
+        slot.get().expect("a kind slot holds a value once set")
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.get().is_some()).count()
+    }
+}
+
 /// Type-keyed registry of rings. A `Fleet` holds one of these and
-/// hands out `Arc<Ring>` per `OrbitTyped` kind on demand.
+/// hands out the ring per `OrbitTyped` kind on demand.
 pub(crate) struct RingRegistry {
     fleet_capacity: u16,
-    rings: dashmap::DashMap<u8, Arc<Ring>>,
+    rings: ByKind<Arc<Ring>>,
 }
 
 impl RingRegistry {
     pub fn new(fleet_capacity: u16) -> Self {
-        Self { fleet_capacity, rings: dashmap::DashMap::new() }
+        Self { fleet_capacity, rings: ByKind::new() }
     }
 
-    /// Get-or-create the ring declared by `T`.
-    pub fn get_or_create<T: OrbitTyped>(&self) -> Arc<Ring> {
-        let ring = self
-            .rings
-            .entry(T::KIND)
-            .or_insert_with(|| {
-                Arc::new(Ring::new_for_fleet::<T>(self.fleet_capacity))
-            })
-            .clone();
+    /// Get-or-create the ring declared by `T`, borrowed for the registry's
+    /// lifetime.
+    pub fn ring_for<T: OrbitTyped>(&self) -> &Arc<Ring> {
+        let ring = self.rings.get_or_init(T::KIND, || {
+            Arc::new(Ring::new_for_fleet::<T>(self.fleet_capacity))
+        });
         assert_eq!(
             ring.spec(),
             T::RING_SPEC,
@@ -660,11 +703,16 @@ impl RingRegistry {
         ring
     }
 
+    /// Get-or-create the ring declared by `T` as an owned handle.
+    pub fn get_or_create<T: OrbitTyped>(&self) -> Arc<Ring> {
+        self.ring_for::<T>().clone()
+    }
+
     /// Look up a ring by KIND byte (e.g. when only the id is known).
     pub fn lookup(
         &self,
         kind: u8,
     ) -> Option<Arc<Ring>> {
-        self.rings.get(&kind).map(|e| e.clone())
+        self.rings.get(kind).cloned()
     }
 }

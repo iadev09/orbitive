@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use dashmap::DashMap;
 
 use crate::OrbitTyped;
 use crate::error::{Error, Result};
@@ -178,7 +177,7 @@ struct FleetInner {
     /// ring (i.e. when the caller wants a fleet-unique id without
     /// allocating a ring slot). V0: process-local atomic. V1: still
     /// here, parallel to the ring's own write-position.
-    id_counters: DashMap<u8, Arc<AtomicU64>>,
+    id_counters: crate::ring::ByKind<AtomicU64>,
     /// Per-KIND ring buffers — orbit's runtime substrate. Either
     /// in-process for unit-test / single-process use, or POSIX SHM
     /// for real cross-process visibility (V1, master+worker fleet).
@@ -195,7 +194,7 @@ struct FleetInner {
 /// `Fleet::join` / `Fleet::join_shm` time and frozen for the
 /// fleet's lifetime.
 enum RingBacking {
-    /// Process-local DashMap of `Ring` instances. No cross-process
+    /// Process-local table of `Ring` instances. No cross-process
     /// visibility — peers running other processes do not see this
     /// fleet's writes. Useful for unit tests and embedded scenarios.
     InMemory(RingRegistry),
@@ -236,7 +235,7 @@ impl Fleet {
                 name: Arc::from(name),
                 fleet_capacity,
                 node_id,
-                id_counters: DashMap::new(),
+                id_counters: crate::ring::ByKind::new(),
                 backing: RingBacking::InMemory(RingRegistry::new(
                     fleet_capacity,
                 )),
@@ -306,7 +305,7 @@ impl Fleet {
                 name: Arc::clone(&name),
                 fleet_capacity,
                 node_id,
-                id_counters: DashMap::new(),
+                id_counters: crate::ring::ByKind::new(),
                 backing: RingBacking::Shm(ShmRingRegistry::with_policies(
                     name.as_ref(),
                     fleet_capacity,
@@ -348,13 +347,11 @@ impl Fleet {
     /// For most use cases prefer [`Fleet::publish`] — it mints AND
     /// stores in a single atomic step.
     pub fn next_id<T: OrbitTyped>(&self) -> NetId64 {
-        let counter_arc = self
+        let counter = self
             .inner
             .id_counters
-            .entry(T::KIND)
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-            .clone();
-        let counter = counter_arc.fetch_add(1, Ordering::Relaxed);
+            .get_or_init(T::KIND, || AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
         NetId64::make(T::KIND, self.node_id().get(), counter)
     }
 
@@ -430,13 +427,13 @@ impl Fleet {
     ) -> NetId64 {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                let ring = r.get_or_create::<T>();
+                let ring = r.ring_for::<T>();
                 ring.write(self.node_id(), frame_kind, ver, payload)
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
                 let ring = r
-                    .get_or_create_for::<T>()
+                    .ring_for::<T>()
                     .expect("SHM ring open failed — fleet unusable");
                 ring.write(self.node_id(), frame_kind, ver, payload)
                     .expect("SHM ring write failed")
@@ -464,13 +461,13 @@ impl Fleet {
     ) -> Vec<NetId64> {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                let ring = r.get_or_create::<T>();
+                let ring = r.ring_for::<T>();
                 ring.write_batch(self.node_id(), frame_kind, ver, payloads)
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
                 let ring = r
-                    .get_or_create_for::<T>()
+                    .ring_for::<T>()
                     .expect("SHM ring open failed — fleet unusable");
                 ring.write_batch(self.node_id(), frame_kind, ver, payloads)
                     .expect("SHM ring batch write failed")
@@ -503,12 +500,12 @@ impl Fleet {
         }
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                let ring = r.get_or_create::<T>();
+                let ring = r.ring_for::<T>();
                 ring.read_head()
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                let ring = r.get_or_create_for::<T>().ok()?;
+                let ring = r.ring_for::<T>().ok()?;
                 ring.read_head()
             }
         }
@@ -527,10 +524,10 @@ impl Fleet {
             return self.lane_head::<T>(self.node_id());
         }
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().head(),
+            RingBacking::InMemory(r) => r.ring_for::<T>().head(),
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                r.get_or_create_for::<T>().map(|ring| ring.head()).unwrap_or(0)
+                r.ring_for::<T>().map(|ring| ring.head()).unwrap_or(0)
             }
         }
     }
@@ -550,11 +547,9 @@ impl Fleet {
             return self.read_lane_at::<T>(self.node_id(), counter);
         }
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().read_at(counter),
+            RingBacking::InMemory(r) => r.ring_for::<T>().read_at(counter),
             #[cfg(unix)]
-            RingBacking::Shm(r) => {
-                r.get_or_create_for::<T>().ok()?.read_at(counter)
-            }
+            RingBacking::Shm(r) => r.ring_for::<T>().ok()?.read_at(counter),
         }
     }
 
@@ -567,11 +562,11 @@ impl Fleet {
         }
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                r.get_or_create::<T>().read_state_at(counter)
+                r.ring_for::<T>().read_state_at(counter)
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for::<T>()
+                .ring_for::<T>()
                 .map(|ring| ring.read_state_at(counter))
                 .unwrap_or(crate::ring::cursor::RingRead::Unavailable),
         }
@@ -585,12 +580,10 @@ impl Fleet {
         node_id: NodeId,
     ) -> u64 {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => {
-                r.get_or_create::<T>().lane_head(node_id)
-            }
+            RingBacking::InMemory(r) => r.ring_for::<T>().lane_head(node_id),
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for::<T>()
+                .ring_for::<T>()
                 .map(|ring| ring.lane_head(node_id))
                 .unwrap_or(0),
         }
@@ -604,11 +597,11 @@ impl Fleet {
     ) -> Option<Frame> {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                r.get_or_create::<T>().read_lane_at(node_id, counter)
+                r.ring_for::<T>().read_lane_at(node_id, counter)
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                r.get_or_create_for::<T>().ok()?.read_lane_at(node_id, counter)
+                r.ring_for::<T>().ok()?.read_lane_at(node_id, counter)
             }
         }
     }
@@ -620,11 +613,11 @@ impl Fleet {
     ) -> crate::ring::cursor::RingRead {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                r.get_or_create::<T>().read_lane_state_at(node_id, counter)
+                r.ring_for::<T>().read_lane_state_at(node_id, counter)
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for::<T>()
+                .ring_for::<T>()
                 .map(|ring| ring.read_lane_state_at(node_id, counter))
                 .unwrap_or(crate::ring::cursor::RingRead::Unavailable),
         }
@@ -635,10 +628,10 @@ impl Fleet {
     /// SHM attach fails.
     pub fn ring_capacity<T: OrbitTyped>(&self) -> usize {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().capacity(),
+            RingBacking::InMemory(r) => r.ring_for::<T>().capacity(),
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for::<T>()
+                .ring_for::<T>()
                 .map(|ring| ring.capacity())
                 .unwrap_or(T::RING_SPEC.capacity),
         }
@@ -651,10 +644,10 @@ impl Fleet {
     /// a deterministic fleet-wide last-write-wins order.
     pub fn next_ring_version<T: OrbitTyped>(&self) -> u64 {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>().next_version(),
+            RingBacking::InMemory(r) => r.ring_for::<T>().next_version(),
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for::<T>()
+                .ring_for::<T>()
                 .expect("SHM ring open failed — fleet unusable")
                 .next_version(),
         }
@@ -663,12 +656,10 @@ impl Fleet {
     /// Return the last semantic version allocated for `T` without advancing it.
     pub fn current_ring_version<T: OrbitTyped>(&self) -> u64 {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => {
-                r.get_or_create::<T>().current_version()
-            }
+            RingBacking::InMemory(r) => r.ring_for::<T>().current_version(),
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for::<T>()
+                .ring_for::<T>()
                 .expect("SHM ring open failed — fleet unusable")
                 .current_version(),
         }
@@ -702,7 +693,7 @@ impl Fleet {
         self.assert_per_node::<T>();
         match &self.inner.backing {
             RingBacking::InMemory(rings) => {
-                let ring = rings.get_or_create::<T>();
+                let ring = rings.ring_for::<T>();
                 if exclusive {
                     let _guard = ring
                         .publication
@@ -719,7 +710,7 @@ impl Fleet {
             }
             #[cfg(unix)]
             RingBacking::Shm(rings) => {
-                let ring = rings.get_or_create_for::<T>()?;
+                let ring = rings.ring_for::<T>()?;
                 let _guard = ring.publication_lock(exclusive)?;
                 Ok(operation())
             }
@@ -736,12 +727,12 @@ impl Fleet {
     pub fn reset_ring<T: OrbitTyped>(&self) -> std::io::Result<()> {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                r.get_or_create::<T>().reset();
+                r.ring_for::<T>().reset();
                 Ok(())
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                r.get_or_create_for::<T>()?.reset();
+                r.ring_for::<T>()?.reset();
                 Ok(())
             }
         }
@@ -783,16 +774,19 @@ impl Fleet {
     ) -> std::io::Result<NetId64> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
-                let ring = rings.get_or_create_for::<T>()?;
+                let ring = rings.ring_for::<T>()?;
                 let id =
                     ring.write(self.node_id(), frame_kind, ver, payload)?;
-                RingEventFd::notify(&ring)?;
+                RingEventFd::notify(ring)?;
                 Ok(id)
             }
             // Process-local fleets do not need a kernel wake bridge.
-            RingBacking::InMemory(rings) => Ok(rings
-                .get_or_create::<T>()
-                .write(self.node_id(), frame_kind, ver, payload)),
+            RingBacking::InMemory(rings) => Ok(rings.ring_for::<T>().write(
+                self.node_id(),
+                frame_kind,
+                ver,
+                payload,
+            )),
         }
     }
 
@@ -838,15 +832,18 @@ impl Fleet {
     ) -> std::io::Result<NetId64> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
-                let ring = rings.get_or_create_for::<T>()?;
+                let ring = rings.ring_for::<T>()?;
                 let id =
                     ring.write(self.node_id(), frame_kind, ver, payload)?;
-                ParkedRingEventFd::notify(&ring)?;
+                ParkedRingEventFd::notify(ring)?;
                 Ok(id)
             }
-            RingBacking::InMemory(rings) => Ok(rings
-                .get_or_create::<T>()
-                .write(self.node_id(), frame_kind, ver, payload)),
+            RingBacking::InMemory(rings) => Ok(rings.ring_for::<T>().write(
+                self.node_id(),
+                frame_kind,
+                ver,
+                payload,
+            )),
         }
     }
 
@@ -867,7 +864,7 @@ impl Fleet {
     ) -> std::io::Result<Vec<NetId64>> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
-                let ring = rings.get_or_create_for::<T>()?;
+                let ring = rings.ring_for::<T>()?;
                 let ids = ring.write_batch(
                     self.node_id(),
                     frame_kind,
@@ -875,12 +872,12 @@ impl Fleet {
                     payloads,
                 )?;
                 if !ids.is_empty() {
-                    ParkedRingEventFd::notify(&ring)?;
+                    ParkedRingEventFd::notify(ring)?;
                 }
                 Ok(ids)
             }
             RingBacking::InMemory(rings) => Ok(rings
-                .get_or_create::<T>()
+                .ring_for::<T>()
                 .write_batch(self.node_id(), frame_kind, ver, payloads)),
         }
     }
@@ -900,7 +897,7 @@ impl Fleet {
     ) -> std::io::Result<Vec<NetId64>> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => {
-                let ring = rings.get_or_create_for::<T>()?;
+                let ring = rings.ring_for::<T>()?;
                 let ids = ring.write_batch(
                     self.node_id(),
                     frame_kind,
@@ -908,12 +905,12 @@ impl Fleet {
                     payloads,
                 )?;
                 if !ids.is_empty() {
-                    RingEventFd::notify(&ring)?;
+                    RingEventFd::notify(ring)?;
                 }
                 Ok(ids)
             }
             RingBacking::InMemory(rings) => Ok(rings
-                .get_or_create::<T>()
+                .ring_for::<T>()
                 .write_batch(self.node_id(), frame_kind, ver, payloads)),
         }
     }

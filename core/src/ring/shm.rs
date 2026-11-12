@@ -1484,7 +1484,7 @@ pub struct ShmRingRegistry {
     fleet_name: String,
     fleet_capacity: u16,
     policies: std::collections::BTreeMap<u8, shm::ShmAccessPolicy>,
-    rings: dashmap::DashMap<u8, std::sync::Arc<ShmRing>>,
+    rings: crate::ring::ByKind<std::sync::Arc<ShmRing>>,
 }
 
 impl ShmRingRegistry {
@@ -1506,7 +1506,7 @@ impl ShmRingRegistry {
             fleet_name: fleet_name.into(),
             fleet_capacity,
             policies: policies.into_iter().collect(),
-            rings: dashmap::DashMap::new(),
+            rings: crate::ring::ByKind::new(),
         }
     }
 
@@ -1516,41 +1516,41 @@ impl ShmRingRegistry {
     pub fn get_or_create_for<T: crate::OrbitTyped>(
         &self
     ) -> std::io::Result<std::sync::Arc<ShmRing>> {
-        if let Some(entry) = self.rings.get(&T::KIND) {
-            if entry.spec() != T::RING_SPEC {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "OrbitTyped KIND {} was reused with ring spec {:?}; existing spec is {:?}",
-                        T::KIND,
-                        T::RING_SPEC,
-                        entry.spec()
-                    ),
-                ));
+        self.ring_for::<T>().cloned()
+    }
+
+    /// Get-or-create the SHM ring for `T`, borrowed for the registry's
+    /// lifetime. A kind's ring is fixed once opened, so after the first call
+    /// this is an index, an atomic load and a comparison of constants.
+    pub(crate) fn ring_for<T: crate::OrbitTyped>(
+        &self
+    ) -> std::io::Result<&std::sync::Arc<ShmRing>> {
+        let ring = match self.rings.get(T::KIND) {
+            Some(ring) => ring,
+            None => {
+                let opened = ShmRing::open_or_create_for_fleet_with_policy(
+                    &self.fleet_name,
+                    T::KIND,
+                    T::RING_SPEC,
+                    self.fleet_capacity,
+                    self.policies.get(&T::KIND).copied().unwrap_or_default(),
+                )?;
+                // Two first callers may both open it; one mapping stays.
+                self.rings.get_or_insert(T::KIND, std::sync::Arc::new(opened))
             }
-            return Ok(entry.clone());
-        }
-        let ring =
-            std::sync::Arc::new(ShmRing::open_or_create_for_fleet_with_policy(
-                &self.fleet_name,
-                T::KIND,
-                T::RING_SPEC,
-                self.fleet_capacity,
-                self.policies.get(&T::KIND).copied().unwrap_or_default(),
-            )?);
-        let entry = self.rings.entry(T::KIND).or_insert_with(|| ring.clone());
-        if entry.spec() != T::RING_SPEC {
+        };
+        if ring.spec() != T::RING_SPEC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "OrbitTyped KIND {} raced with ring spec {:?}; installed spec is {:?}",
+                    "OrbitTyped KIND {} was reused with ring spec {:?}; existing spec is {:?}",
                     T::KIND,
                     T::RING_SPEC,
-                    entry.spec()
+                    ring.spec()
                 ),
             ));
         }
-        Ok(entry.clone())
+        Ok(ring)
     }
 
     /// Look up a ring that has already been created for `kind`.
@@ -1559,7 +1559,7 @@ impl ShmRingRegistry {
         &self,
         kind: u8,
     ) -> Option<std::sync::Arc<ShmRing>> {
-        self.rings.get(&kind).map(|e| e.clone())
+        self.rings.get(kind).cloned()
     }
 }
 

@@ -16,7 +16,6 @@ exclude.workspace = true
 bench-timing = []
 
 [dependencies]
-dashmap.workspace = true
 bytes.workspace = true
 blake3.workspace = true
 netid64.workspace = true
