@@ -556,7 +556,12 @@ impl Doorstep for Arena {
 
 impl Drop for Arena {
     fn drop(&mut self) {
-        if let Some(mut driver) = lock_unpoisoned(&self.driver).take() {
+        if let Some(mut driver) = self
+            .driver
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
             driver.stop(&self.local_credit().generation);
         }
     }

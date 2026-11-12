@@ -10,6 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::task::Waker;
 use std::thread::JoinHandle;
 
+use orbit_core::process::ProcessOwner;
 use orbit_core::readiness::{Readiness, Signal};
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
@@ -60,7 +61,7 @@ unsafe impl Sync for AlignedBytes {}
 struct Driver {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    pid: u32,
+    owner: ProcessOwner,
 }
 
 pub(crate) struct Table {
@@ -567,6 +568,7 @@ impl Table {
     }
 
     fn start_driver(self: &Arc<Self>) -> std::io::Result<Driver> {
+        let owner = ProcessOwner::current()?;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let target = SendPtr(Arc::as_ptr(self));
@@ -579,7 +581,7 @@ impl Table {
                 let table = unsafe { &*target.0 };
                 table.run_driver(&thread_stop);
             })?;
-        Ok(Driver { stop, thread: Some(thread), pid: std::process::id() })
+        Ok(Driver { stop, thread: Some(thread), owner })
     }
 
     fn run_driver(
@@ -785,14 +787,18 @@ impl Table {
 
 impl Drop for Table {
     fn drop(&mut self) {
-        if let Some(mut driver) = lock_unpoisoned(&self.driver).take() {
+        if let Some(mut driver) = self
+            .driver
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            && driver.owner.is_current()
+        {
             driver.stop.store(true, Ordering::Release);
             let generation = &self.doorbell(usize::from(self.node)).generation;
             generation.fetch_add(1, Ordering::SeqCst);
             crate::wake_on(generation);
-            if let Some(thread) = driver.thread.take()
-                && driver.pid == std::process::id()
-            {
+            if let Some(thread) = driver.thread.take() {
                 let _ = thread.join();
             }
         }
@@ -976,4 +982,36 @@ pub fn segment_size_for(
     spec: PoolSpec,
 ) -> usize {
     Geometry::new(fleet_capacity, spec).segment_size
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "freebsd", target_os = "macos")
+))]
+#[test]
+fn forked_pool_driver_drop_does_not_wake_parent() {
+    let name = format!("plf{:x}", std::process::id());
+    let fleet = Arc::new(
+        Fleet::join_shm_as(&name, 2, orbit_core::NodeId::ZERO).unwrap(),
+    );
+    let table =
+        open(&fleet, Incarnation::new(1), PoolSpec::new(197, 8, 4)).unwrap();
+    let _readiness = table.take_readiness().unwrap();
+    let generation = &table.doorbell(0).generation;
+    let before = generation.load(Ordering::SeqCst);
+    // SAFETY: the child drops only its table copy and exits.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork failed");
+    if child == 0 {
+        drop(table);
+        // SAFETY: bypass the inherited test harness at exit.
+        unsafe { libc::_exit(0) };
+    }
+    let mut status = 0;
+    // SAFETY: child is the PID returned by fork and status is writable.
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+    assert_eq!(generation.load(Ordering::SeqCst), before);
+    table.unlink().unwrap();
 }

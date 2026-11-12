@@ -23,6 +23,39 @@ fn fleet_name(tag: &str) -> String {
     )
 }
 
+#[test]
+fn forked_process_join_publishes_the_child_pid() {
+    let name = fleet_name("pid");
+    let parent = LinkSegment::open(&name, SPEC).unwrap();
+    let joined = parent.join("parent", "worker", 1).unwrap();
+    assert_eq!(
+        parent.inbox().last_owner(joined.lane).unwrap(),
+        Some((std::process::id(), 1))
+    );
+    // SAFETY: the child opens its own segment handle and exits directly.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork failed");
+    if child == 0 {
+        let fresh = LinkSegment::open(&name, SPEC).unwrap();
+        let joined = fresh.join("child", "worker", 2).unwrap();
+        fresh.inbox().release_lane(joined.lane).unwrap();
+        drop((joined, fresh));
+        // SAFETY: bypass the inherited test harness at exit.
+        unsafe { libc::_exit(0) };
+    }
+    let mut status = 0;
+    // SAFETY: child is the PID returned by fork and status is writable.
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+    let owners: Vec<_> = (0..parent.inbox().lanes())
+        .filter_map(|lane| parent.inbox().last_owner(lane).unwrap())
+        .collect();
+    assert!(owners.contains(&(child as u32, 2)));
+    parent.inbox().release_lane(joined.lane).unwrap();
+    parent.unlink().unwrap();
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn an_abstract_bell_name_must_fit_before_a_link_is_opened() {

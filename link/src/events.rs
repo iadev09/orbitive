@@ -81,7 +81,8 @@ impl<L: EventLayout> LinkEvents<L> {
         far: fn(&str) -> bool,
         routing: Routing,
     ) -> Result<Self> {
-        if segment.inbox().owner(lane)? != Some(std::process::id()) {
+        let pid = orbit_core::process::ProcessOwner::current()?.pid();
+        if segment.inbox().owner(lane)? != Some(pid) {
             return Err(Error::Malformed(
                 "this process does not hold the lane",
             ));

@@ -32,6 +32,7 @@ use std::mem::{ManuallyDrop, size_of};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{io, ptr, slice};
 
+use orbit_core::process::ProcessOwner;
 use orbit_core::shm::{LaneHold, ShmRegion, try_hold_lane};
 
 use super::{
@@ -80,7 +81,7 @@ pub(super) struct ClaimTable<const KEY_CAPACITY: usize> {
     name: Box<str>,
     /// The process that registered. A fork child inherits the description
     /// holding the registration's lock and must not unlock it.
-    pid: u32,
+    process: ProcessOwner,
     owner: usize,
     generation: u64,
     identity: u64,
@@ -89,6 +90,7 @@ pub(super) struct ClaimTable<const KEY_CAPACITY: usize> {
 
 impl<const KEY_CAPACITY: usize> ClaimTable<KEY_CAPACITY> {
     pub(super) fn open_or_create(name: &str) -> io::Result<Self> {
+        let process = ProcessOwner::current()?;
         let size = segment_size::<KEY_CAPACITY>();
         let (region, initialization) =
             ShmRegion::open_or_create_locked(name, size)?;
@@ -119,7 +121,7 @@ impl<const KEY_CAPACITY: usize> ClaimTable<KEY_CAPACITY> {
         let table = Self {
             region,
             name: name.into(),
-            pid: std::process::id(),
+            process,
             owner,
             generation,
             identity: identity(owner, generation),
@@ -348,7 +350,7 @@ impl<const KEY_CAPACITY: usize> Drop for ClaimTable<KEY_CAPACITY> {
         // Unlocking in a fork child would release the registration under the
         // parent, which shares the description. The child's copy stays locked
         // until that child is gone, which only delays a take back.
-        if self.pid == std::process::id() {
+        if self.process.is_current() {
             // SAFETY: dropped once, here, and not used afterwards.
             unsafe { ManuallyDrop::drop(&mut self.hold) };
         }
@@ -650,10 +652,11 @@ mod tests {
         let key = 4_u64.to_le_bytes();
         let set = set_of(&key);
 
-        // SAFETY: the child only drops what it inherited and exits.
+        // SAFETY: the child opens a fresh registration and exits directly.
         match unsafe { fork() }.expect("fork") {
             ForkResult::Child => {
-                drop(parent);
+                let fresh = segment.open();
+                drop((parent, fresh));
                 // SAFETY: leaves without running the harness's own exit path.
                 unsafe { libc::_exit(0) };
             }

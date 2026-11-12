@@ -194,6 +194,7 @@ impl Inbox {
         &mut self,
         mut hold: impl FnMut(usize) -> Result<Option<orbit_core::shm::LaneHold>>,
     ) -> Result<()> {
+        let pid = orbit_core::process::ProcessOwner::current()?.pid();
         for index in 0..2 * self.lanes {
             let Some(held) = hold(index)? else {
                 continue;
@@ -208,7 +209,7 @@ impl Inbox {
                     Error::Malformed("inbox producer generation exhausted"),
                 )?;
             owner.generation.store(generation, Ordering::Relaxed);
-            owner.pid.store(std::process::id(), Ordering::Relaxed);
+            owner.pid.store(pid, Ordering::Relaxed);
             // A previous holder may have died waiting.
             owner.waiting.store(0, Ordering::Relaxed);
             owner.active.store(1, Ordering::Release);

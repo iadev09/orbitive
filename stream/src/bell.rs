@@ -190,6 +190,7 @@ impl Bell {
 pub(crate) struct ReactorDriver {
     task: tokio::task::JoinHandle<()>,
     node: usize,
+    owner: orbit_core::process::ProcessOwner,
 }
 
 #[cfg(feature = "tokio")]
@@ -199,6 +200,7 @@ impl ReactorDriver {
         bell: &Bell,
         runtime: &tokio::runtime::Handle,
     ) -> io::Result<Self> {
+        let owner = orbit_core::process::ProcessOwner::current()?;
         let node = usize::from(table.node());
         let socket = {
             let _entered = runtime.enter();
@@ -210,7 +212,7 @@ impl ReactorDriver {
             .store(table.incarnation(), Ordering::SeqCst);
         let weak = Arc::downgrade(table);
         let task = runtime.spawn(answer(weak, socket));
-        Ok(Self { task, node })
+        Ok(Self { task, node, owner })
     }
 
     pub(crate) fn stop(
@@ -218,6 +220,9 @@ impl ReactorDriver {
         doorbell: &Doorbell,
         bell: &Bell,
     ) {
+        if !self.owner.is_current() {
+            return;
+        }
         self.task.abort();
         doorbell.listening.fetch_and(!ARMED, Ordering::SeqCst);
         bell.unbind(self.node);

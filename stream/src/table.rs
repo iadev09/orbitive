@@ -670,7 +670,12 @@ impl Doorstep for Table {
 
 impl Drop for Table {
     fn drop(&mut self) {
-        match lock_unpoisoned(&self.driver).take() {
+        match self
+            .driver
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
             Some(Driving::Thread(mut driver)) => driver.stop(self.generation()),
             #[cfg(all(unix, feature = "tokio"))]
             Some(Driving::Reactor(driver)) => {
@@ -1029,4 +1034,79 @@ pub(crate) enum Ring {
     Side(usize),
     /// A death report, on behalf of a process that is gone: both.
     Both,
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "freebsd", target_os = "macos")
+))]
+mod fork_tests {
+    use super::*;
+
+    fn check_child_drop(
+        table: Arc<Table>,
+        expected_listening: Option<u32>,
+    ) {
+        let doorbell = table.own_doorbell();
+        let generation = doorbell.generation.load(Ordering::SeqCst);
+        // SAFETY: the child drops only its table copy and exits.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            drop(table);
+            // SAFETY: bypass the inherited test harness at exit.
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        // SAFETY: child is the PID returned by fork and status is writable.
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+        assert_eq!(doorbell.generation.load(Ordering::SeqCst), generation);
+        if let Some(listening) = expected_listening {
+            assert_eq!(doorbell.listening.load(Ordering::SeqCst), listening);
+        }
+        table.unlink().unwrap();
+    }
+
+    fn table(tag: &str) -> Arc<Table> {
+        let name = format!("st{tag}{:x}", std::process::id());
+        let fleet = Arc::new(
+            Fleet::join_shm_as(&name, 2, orbit_core::NodeId::ZERO).unwrap(),
+        );
+        open(&fleet, Incarnation::new(1), StreamSpec::new(197, 2, 4096))
+            .unwrap()
+    }
+
+    #[test]
+    fn forked_thread_driver_drop_does_not_wake_parent() {
+        let table = table("ft");
+        table.ensure_driver().unwrap();
+        assert!(matches!(
+            &*lock_unpoisoned(&table.driver),
+            Some(Driving::Thread(_))
+        ));
+        check_child_drop(table, None);
+    }
+
+    #[cfg(feature = "tokio")]
+    #[test]
+    fn forked_reactor_driver_drop_does_not_disarm_parent() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let table = table("fr");
+        table.ensure_driver().unwrap();
+        assert!(matches!(
+            &*lock_unpoisoned(&table.driver),
+            Some(Driving::Reactor(_))
+        ));
+        table
+            .own_doorbell()
+            .listening
+            .store(crate::bell::ARMED, Ordering::SeqCst);
+        check_child_drop(table, Some(crate::bell::ARMED));
+    }
 }

@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::thread::JoinHandle;
 
+use orbit_core::process::ProcessOwner;
+
 use crate::lock_unpoisoned;
 
 /// Reader, writer or reset observer of one direction. Reset observation must
@@ -136,7 +138,7 @@ pub(crate) struct Driver {
     thread: Option<JoinHandle<()>>,
     /// The process that spawned the thread; a forked child inherits this
     /// struct and no thread, and must not try to join one.
-    pid: u32,
+    owner: ProcessOwner,
 }
 
 impl Driver {
@@ -147,6 +149,7 @@ impl Driver {
         target: *const T,
         name: String,
     ) -> std::io::Result<Self> {
+        let owner = ProcessOwner::current()?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let target = SendPtr(target);
@@ -158,22 +161,23 @@ impl Driver {
                 let table = unsafe { &*target.0 };
                 run(table, &thread_stop);
             })?;
-        Ok(Self { stop, thread: Some(thread), pid: std::process::id() })
+        Ok(Self { stop, thread: Some(thread), owner })
     }
 
     pub(crate) fn stop(
         &mut self,
         generation: &AtomicU32,
     ) {
+        if !self.owner.is_current() {
+            return;
+        }
         self.stop.store(true, Ordering::Release);
         // Change the word before waking, as the ring bridge does: a driver
         // between its stop check and its park then fails the compare and
         // never parks after our wake.
         generation.fetch_add(1, Ordering::SeqCst);
         crate::wake_on(generation);
-        if let Some(thread) = self.thread.take()
-            && self.pid == std::process::id()
-        {
+        if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }

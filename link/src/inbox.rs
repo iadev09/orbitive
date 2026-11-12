@@ -31,6 +31,8 @@
 use std::io;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
+use orbit_core::process::ProcessOwner;
+
 #[path = "inbox/claims.rs"]
 mod claims;
 use claims::{CANCELLED, COMMITTED};
@@ -576,11 +578,12 @@ impl Inbox {
         self.check_lane(lane_index)?;
         check_identity(service, role)?;
         self.validate_work_capacity(capacity)?;
+        let pid = ProcessOwner::current()?.pid();
         self.reset_lane(lane_index)?;
         self.configure_capacity(lane_index, capacity)?;
         let lane = self.lane_header(lane_index);
         lane.consumers.store(1, Ordering::Release);
-        self.publish_identity(lane, service, role, incarnation);
+        self.publish_identity(lane, service, role, incarnation, pid);
         self.wake(lane_index, lane);
         Ok(())
     }
@@ -637,6 +640,7 @@ impl Inbox {
         check_identity(service, role)?;
         self.validate_work_capacity(capacity)?;
         self.refuse_other_role(service, role, None)?;
+        let pid = ProcessOwner::current()?.pid();
         for lane_index in 0..self.lanes {
             let lane = self.lane_header(lane_index);
             if lane.consumers.load(Ordering::Acquire) != 0 {
@@ -654,7 +658,7 @@ impl Inbox {
             }
             self.reset_lane(lane_index)?;
             self.configure_capacity(lane_index, capacity)?;
-            self.publish_identity(lane, service, role, incarnation);
+            self.publish_identity(lane, service, role, incarnation, pid);
             if let Err(conflict) =
                 self.refuse_other_role(service, role, Some(lane_index))
             {
@@ -1320,6 +1324,7 @@ impl Inbox {
         service: &str,
         role: &str,
         incarnation: u64,
+        pid: u32,
     ) {
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -1338,7 +1343,7 @@ impl Inbox {
         lane.role_len.store(role.len() as u8, Ordering::Release);
         lane.service_len.store(service.len() as u8, Ordering::Release);
         lane.incarnation.store(incarnation, Ordering::Release);
-        lane.pid.store(std::process::id(), Ordering::Release);
+        lane.pid.store(pid, Ordering::Release);
         // Last, and after the name: a caller that sees the new number sees
         // every byte that made it new.
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
@@ -1536,6 +1541,7 @@ impl Inbox {
             .as_ref()
             .ok_or(Error::Malformed("the inbox has no reactor bell"))?;
         let watcher = self.watcher_header(slot);
+        let pid = ProcessOwner::current()?.pid();
         watcher.reactor.store(0, Ordering::SeqCst);
         self.clear_interest(self.lanes + slot);
         let socket = bell
@@ -1549,7 +1555,7 @@ impl Inbox {
             );
         }
         watcher.role_len.store(role.len() as u8, Ordering::Release);
-        watcher.pid.store(std::process::id(), Ordering::Release);
+        watcher.pid.store(pid, Ordering::Release);
         tokio::net::UnixDatagram::from_std(socket).map_err(Error::Io)
     }
 
