@@ -266,6 +266,16 @@ impl<L: EventLayout> FleetEventBus<L> {
         &self,
         cursor: &mut FleetEventCursor,
     ) -> FleetEventPoll {
+        self.poll_where(cursor, |_| true)
+    }
+
+    /// Poll, building an event only for frames whose topic `keep` takes; a
+    /// skipped frame costs a comparison, not a copy of its topic and payload.
+    fn poll_where(
+        &self,
+        cursor: &mut FleetEventCursor,
+        keep: impl Fn(&[u8]) -> bool,
+    ) -> FleetEventPoll {
         let ring_poll =
             self.fleet.poll_lanes::<EventRecord<L>>(&mut cursor.inner);
         let mut lagged = ring_poll.loss.total();
@@ -275,6 +285,9 @@ impl<L: EventLayout> FleetEventBus<L> {
                 lagged = lagged.saturating_add(1);
                 continue;
             };
+            if !keep(decoded.topic) {
+                continue;
+            }
             events.push(FleetEvent {
                 id: frame.id,
                 topic: String::from_utf8_lossy(decoded.topic).into_owned(),
@@ -295,9 +308,7 @@ impl<L: EventLayout> FleetEventBus<L> {
         cursor: &mut FleetEventCursor,
         topic: &str,
     ) -> FleetEventPoll {
-        let mut poll = self.poll(cursor);
-        poll.events.retain(|event| event.topic == topic);
-        poll
+        self.poll_where(cursor, |candidate| candidate == topic.as_bytes())
     }
 }
 
