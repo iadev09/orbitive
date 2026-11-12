@@ -29,10 +29,11 @@
 
 use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
+use std::sync::OnceLock;
 #[cfg(feature = "tokio")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "tokio")]
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 
 #[cfg(feature = "tokio")]
 use crate::layout::Doorbell;
