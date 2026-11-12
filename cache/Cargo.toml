@@ -26,5 +26,13 @@ libc.workspace = true
 nix.workspace = true
 
 [[bench]]
-name = "multi_writer"
+name = "replicated_write"
+harness = false
+
+[[bench]]
+name = "get"
+harness = false
+
+[[bench]]
+name = "fleet_write"
 harness = false

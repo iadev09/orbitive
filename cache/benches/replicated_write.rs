@@ -83,7 +83,7 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
         .collect::<Vec<_>>();
     let writes_per_batch = (WRITER_COUNT * WRITES_PER_WRITER) as u64;
 
-    let mut group = criterion.benchmark_group("cache_shm");
+    let mut group = criterion.benchmark_group("replicated_write");
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(writes_per_batch));

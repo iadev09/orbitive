@@ -68,3 +68,59 @@ including loss and concurrent-change accounting. This is not an authoritative
 list of worker L1 entries; missing retained history cannot prove a cache miss.
 Use an existing arena reader capability only when selecting a value, and
 handle exact-address reuse as unavailable rather than replacement data.
+
+## Benchmarks
+
+With `orbitive-cli` installed, run `cargo bench -p orbit-cache --bench get`
+to compare warmed hits and misses across 16 independent processes on Unix.
+Each phase performs five million reads per worker against the same 256 keys.
+Setup and mutation draining happen before timing. Output reports fleet-wide
+gets per second and summed worker CPU time per get. Each run removes its
+temporary fleet after all workers exit.
+
+Run `cargo bench -p orbit-cache --bench replicated_write` to measure the
+replicated cache with concurrent writers on one key.
+
+Run `cargo bench -p orbit-cache --bench fleet_write -- --rate 128` to
+compare both modes at 128 puts per worker per second. Sixteen processes
+write 128 distinct keys each, using 256-byte values without expiry. The
+coordinator releases one write per worker per tick and rotates dispatch
+order. Each mode runs three times.
+
+Throughput uses the scheduled window, extended if puts complete late. CPU
+per put includes all workers and the replicated readiness bridge. Receiver
+probe CPU is measured separately and subtracted. Replicated visibility is
+timed from put entry through the drain that made the value readable on the
+last peer. SHM visibility uses put completion and verifies peer reads after
+timing. The benchmark reports dispatch latency, ring loss, and writes
+whose visibility could not be verified on every peer.
+
+Pass `--hot-key` after `--rate 128` to make all writers update the same key.
+Each value identifies its writer and round. After the last put, every worker
+reads the key and reports its value and revision. The coordinator checks the
+highest published revision for replicated mode and the last arena generation
+for SHM mode. The run fails if any worker reads a different value or revision.
+
+### Reference run
+
+macOS arm64, 16 worker processes, three runs per mode. Each row reports the
+median across the runs. The read phases performed 80 million gets each.
+
+| Mode | Hit/s | CPU/hit | Miss/s | CPU/miss |
+| --- | ---: | ---: | ---: | ---: |
+| Replicated | 19.1 M | 767 ns | 28.3 M | 522 ns |
+| SHM | 133.1 M | 105 ns | 202.9 M | 72 ns |
+
+Each write phase completed 2,048 puts at an offered load of 2,048 puts/s.
+
+| Keys | Mode | CPU/put | Put p99 | All-peer visibility p99 |
+| --- | --- | ---: | ---: | ---: |
+| Distinct | Replicated | 479 µs | 2.76 ms | 4.07 ms |
+| Distinct | SHM | 185 µs | 1.86 ms | 1.86 ms |
+| Hot | Replicated | 462 µs | 2.43 ms | |
+| Hot | SHM | 197 µs | 1.58 ms | |
+
+Every distinct-key write was visible on all 15 peers. Every hot-key run
+converged on the final value and revision on all 16 workers. The replicated
+runs recorded zero ring loss. Replicated miss throughput ranged from 15 M
+to 74 M gets/s. Write p99 also varied across runs.
