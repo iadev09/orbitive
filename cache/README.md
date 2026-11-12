@@ -144,3 +144,31 @@ versus 418 µs for replicated mode, and its all-peer visibility p99 was
 All 15 peers observed every distinct-key write. All 16 workers converged on
 the final value and revision in every hot-key run. The replicated runs
 recorded zero ring loss.
+
+#### Arena first-pass reservation
+
+Run `cargo bench -p orbit-cache --bench fleet_write --features arena-timing -- --rate 128`
+to include lock acquisition and slot scan timings. Before the optimization,
+`flock` accounted for a median 93.6% of put time among the slowest 1% of SHM
+writes. The slot scan took a median 17.7 µs across SHM puts, within a
+median 22.3 µs lock hold.
+
+When a record fits in the unwritten portion of the arena's first pass,
+reservation advances the cursor directly. After wrap, reservation scans for
+overlapping records and protects pinned bytes.
+
+The Linux x86_64 comparison used fresh arenas, distinct keys, 16 workers,
+and 2,048 puts/s. The before and after builds used the same instrumentation.
+Each p99 below is the median of six runs per build.
+
+| Mode | Phase | Before | After |
+| --- | --- | ---: | ---: |
+| SHM | Put p99 | 651 µs | 167 µs |
+| SHM | Flock p99 | 601 µs | 141 µs |
+| SHM | Slot scan p99 | 34.4 µs | 0 µs |
+| Replicated | Put p99 | 434 µs | 201 µs |
+| Replicated | Flock p99 | 353 µs | 136 µs |
+| Replicated | Slot scan p99 | 28.5 µs | 0 µs |
+
+All runs sustained the target rate with zero ring loss. Every write was
+visible on all 15 peers.

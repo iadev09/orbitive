@@ -1047,8 +1047,20 @@ impl Arena {
     ) -> Result<u64> {
         let header = self.inner.header();
         let bytes = ARENA_BYTES as u64;
-        let slots = self.inner.slots();
         let mut cursor = header.cursor.load(Ordering::Relaxed);
+        // The cursor only advances under the writer lock. Before its first
+        // wrap, bytes at and beyond it have no record or reader pin.
+        if cursor < bytes && len <= bytes - cursor {
+            header.cursor.store(cursor + len, Ordering::Relaxed);
+            return Ok(cursor);
+        }
+
+        let advance = |cursor: u64, by: u64| {
+            cursor.checked_add(by).ok_or_else(|| {
+                Error::Io(std::io::Error::other("arena write cursor exhausted"))
+            })
+        };
+        let slots = self.inner.slots();
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -1058,7 +1070,7 @@ impl Arena {
             let mut position = cursor % bytes;
             if position + len > bytes {
                 // No wrap-around records: a body is one slice.
-                cursor += bytes - position;
+                cursor = advance(cursor, bytes - position)?;
                 position = 0;
             }
             let end = position + len;
@@ -1094,10 +1106,10 @@ impl Arena {
                 *slot_scan += scan_started.elapsed();
             }
             if let Some(past) = blocked_until {
-                cursor += past - position;
+                cursor = advance(cursor, past - position)?;
                 continue;
             }
-            header.cursor.store(cursor + len, Ordering::Relaxed);
+            header.cursor.store(advance(cursor, len)?, Ordering::Relaxed);
             return Ok(position);
         }
     }
