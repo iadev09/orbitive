@@ -166,6 +166,44 @@ fn kill_pinned_child(mut child: std::process::Child) {
 
 #[cfg(unix)]
 #[test]
+fn forked_child_cannot_pin_records_or_release_a_parent_pin() {
+    let (_, arena) = shared_arena();
+    let key = Key::new(0);
+    let body = vec![7; ARENA_RECORD_MAX];
+    arena.put(key, Record::body(&body)).unwrap();
+    let address = arena.store(Record::body(&body)).unwrap();
+    for _ in 2..ARENA_BYTES / ARENA_RECORD_MAX {
+        arena.store(Record::body(&body)).unwrap();
+    }
+    let held = arena.get(key).unwrap();
+
+    // SAFETY: the child's expected path checks the PID and exits. Dropping
+    // its Entry leaves the parent's pin and keeps the arena's Arc alive.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork failed");
+    if child == 0 {
+        let rejected =
+            arena.get(key).is_none() && arena.get_address(address).is_none();
+        drop(held);
+        // SAFETY: exit without running inherited process cleanup.
+        unsafe { libc::_exit(i32::from(!rejected)) };
+    }
+
+    let mut status = 0;
+    // SAFETY: child is the PID returned by fork and status is writable.
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+
+    arena.put(Key::new(1), Record::body(b"new")).unwrap();
+    assert_eq!(held.body(), body);
+    assert!(arena.get(key).is_some());
+    drop(held);
+    arena.unlink().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn sigkill_reclaims_only_dead_owners_and_allocation_recovers_without_a_timer() {
     let (name, arena) = shared_arena();
     let count = ARENA_BYTES / ARENA_RECORD_MAX;

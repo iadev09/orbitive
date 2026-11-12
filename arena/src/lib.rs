@@ -699,19 +699,20 @@ impl Arena {
         &self,
         address: Address,
     ) -> Option<Entry> {
+        if self.inner.pid != std::process::id() {
+            return None;
+        }
         self.pin_entry(address.slot as usize, address.generation, None)
     }
 
+    // Both lookup entry points verify process ownership before reaching here.
     fn pin_entry(
         &self,
         index: usize,
         generation: u64,
         key: Option<Key>,
     ) -> Option<Entry> {
-        if self.inner.pid != std::process::id() || index >= ARENA_SLOTS {
-            return None;
-        }
-        let slot = &self.inner.slots()[index];
+        let slot = self.inner.slots().get(index)?;
         let pins = self.inner.pin(self.inner.reader, index);
         pins.try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
             count.checked_add(1)
