@@ -210,6 +210,7 @@ fn waiting_for_capacity_can_be_bounded() {
         .expect("capacity came back");
     assert!(version > since);
     assert!(peer.reserve(id).is_ok());
+    owner.unlink().expect("unlink");
 }
 
 /// What a supervisor reads when it has lost its own record of who was
@@ -236,4 +237,5 @@ fn the_table_says_which_generations_are_in_it() {
     peer.node_dead(NodeId::ZERO, Incarnation::new(10));
     assert!(peer.owners().is_empty());
     assert!(matches!(peer.reserve(id), Err(Error::Stale(_))));
+    owner.unlink().expect("unlink");
 }
