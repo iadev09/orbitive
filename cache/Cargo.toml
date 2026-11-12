@@ -11,6 +11,9 @@ keywords = ["cache", "shm", "fleet", "orbit", "ring"]
 categories = ["caching", "concurrency"]
 exclude.workspace = true
 
+[features]
+arena-timing = ["orbit-arena/bench-timing"]
+
 [dependencies]
 blake3.workspace = true
 bytes.workspace = true

@@ -12,6 +12,9 @@ categories = ["concurrency", "data-structures"]
 documentation = "https://docs.rs/orbit-core"
 exclude.workspace = true
 
+[features]
+bench-timing = []
+
 [dependencies]
 dashmap.workspace = true
 bytes.workspace = true

@@ -584,7 +584,23 @@ impl ShmRegion {
                 "SHM region was opened without a process lock",
             ));
         }
-        lock_fd(self.open_own_lock_file()?, operation)
+        #[cfg(feature = "bench-timing")]
+        let opening = std::time::Instant::now();
+        let fd = self.open_own_lock_file()?;
+        #[cfg(feature = "bench-timing")]
+        let opened = std::time::Instant::now();
+        let guard = lock_fd(fd, operation)?;
+        #[cfg(feature = "bench-timing")]
+        let guard = {
+            let flock = opened.elapsed();
+            let mut guard = guard;
+            guard.timing = Some(LockTiming {
+                open: opened.duration_since(opening),
+                flock,
+            });
+            guard
+        };
+        Ok(guard)
     }
 
     /// A new description of this region's lock file, for one critical
@@ -626,7 +642,7 @@ impl ShmRegion {
             libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
         };
         if rc == 0 {
-            Ok(ShmRegionLock { lock_fd })
+            Ok(ShmRegionLock::new(lock_fd))
         } else {
             Err(io::Error::last_os_error())
         }
@@ -760,6 +776,30 @@ fn validate_minimum_size(
 /// across fleet processes. Dropping the guard releases the kernel lock.
 pub struct ShmRegionLock {
     lock_fd: OwnedFd,
+    #[cfg(feature = "bench-timing")]
+    timing: Option<LockTiming>,
+}
+
+#[cfg(feature = "bench-timing")]
+#[derive(Clone, Copy)]
+pub struct LockTiming {
+    pub open: std::time::Duration,
+    pub flock: std::time::Duration,
+}
+
+impl ShmRegionLock {
+    fn new(lock_fd: OwnedFd) -> Self {
+        Self {
+            lock_fd,
+            #[cfg(feature = "bench-timing")]
+            timing: None,
+        }
+    }
+
+    #[cfg(feature = "bench-timing")]
+    pub fn timing(&self) -> Option<LockTiming> {
+        self.timing
+    }
 }
 
 impl Drop for ShmRegionLock {
@@ -879,7 +919,7 @@ fn lock_fd(
     loop {
         let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), operation) };
         if rc == 0 {
-            return Ok(ShmRegionLock { lock_fd });
+            return Ok(ShmRegionLock::new(lock_fd));
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
@@ -1013,7 +1053,7 @@ pub fn try_lock_fleet_exclusive(
         libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
     };
     if rc == 0 {
-        return Ok(Some(ShmRegionLock { lock_fd }));
+        return Ok(Some(ShmRegionLock::new(lock_fd)));
     }
     let error = io::Error::last_os_error();
     if error.kind() == io::ErrorKind::WouldBlock {

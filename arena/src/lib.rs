@@ -27,6 +27,9 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
+#[cfg(feature = "bench-timing")]
+use std::time::{Duration, Instant};
+
 use orbit_core::Fleet;
 #[cfg(unix)]
 mod reader;
@@ -36,6 +39,27 @@ use orbit_core::shm::{
 };
 #[cfg(unix)]
 pub use reader::{ArenaReader, ReaderEntry};
+
+#[cfg(feature = "bench-timing")]
+#[derive(Clone, Copy)]
+pub struct WriteTiming {
+    pub lock_acquisition: Duration,
+    pub lock_held: Duration,
+    pub lock_file_open: Duration,
+    pub flock: Duration,
+    pub slot_scan: Duration,
+}
+
+#[cfg(feature = "bench-timing")]
+thread_local! {
+    static LAST_WRITE_TIMING: std::cell::Cell<Option<WriteTiming>> = const { std::cell::Cell::new(None) };
+}
+
+/// Take the last successful arena write's timings from the current thread.
+#[cfg(feature = "bench-timing")]
+pub fn take_write_timing() -> Option<WriteTiming> {
+    LAST_WRITE_TIMING.take()
+}
 
 /// Reserved Orbit SHM kind for the arena segment.
 pub const ARENA_KIND: u8 = 193;
@@ -730,7 +754,11 @@ impl Arena {
         if total > ARENA_RECORD_MAX {
             return Err(Error::TooLarge { len: total, max: ARENA_RECORD_MAX });
         }
+        #[cfg(feature = "bench-timing")]
+        let lock_requested = Instant::now();
         let _guard = self.inner.lock()?;
+        #[cfg(feature = "bench-timing")]
+        let lock_acquired = Instant::now();
         let slots = self.inner.slots();
 
         // Whatever this key named before is gone once the new record is
@@ -739,11 +767,21 @@ impl Arena {
             evict(&slots[index]);
         }
 
-        let offset = match self.allocate_locked(total as u64) {
+        #[cfg(feature = "bench-timing")]
+        let mut slot_scan = Duration::ZERO;
+        let offset = match self.allocate_locked(
+            total as u64,
+            #[cfg(feature = "bench-timing")]
+            &mut slot_scan,
+        ) {
             Ok(offset) => offset,
             Err(Error::Pinned) => {
                 self.inner.reclaim_locked()?;
-                self.allocate_locked(total as u64)?
+                self.allocate_locked(
+                    total as u64,
+                    #[cfg(feature = "bench-timing")]
+                    &mut slot_scan,
+                )?
             }
             Err(error) => return Err(error),
         };
@@ -807,6 +845,28 @@ impl Arena {
             if key.is_some() { SLOT_LIVE } else { SLOT_ADDRESSED },
             Ordering::SeqCst,
         );
+        #[cfg(feature = "bench-timing")]
+        {
+            let lock_held = lock_acquired.elapsed();
+            #[cfg(unix)]
+            let (lock_file_open, flock) = _guard
+                ._shared
+                .as_ref()
+                .and_then(ShmRegionLock::timing)
+                .map_or((Duration::ZERO, Duration::ZERO), |timing| {
+                    (timing.open, timing.flock)
+                });
+            #[cfg(not(unix))]
+            let (lock_file_open, flock) = (Duration::ZERO, Duration::ZERO);
+            drop(_guard);
+            LAST_WRITE_TIMING.set(Some(WriteTiming {
+                lock_acquisition: lock_acquired.duration_since(lock_requested),
+                lock_held,
+                lock_file_open,
+                flock,
+                slot_scan,
+            }));
+        }
         Ok(Address { slot: index as u32, generation })
     }
 
@@ -983,6 +1043,7 @@ impl Arena {
     fn allocate_locked(
         &self,
         len: u64,
+        #[cfg(feature = "bench-timing")] slot_scan: &mut Duration,
     ) -> Result<u64> {
         let header = self.inner.header();
         let bytes = ARENA_BYTES as u64;
@@ -1002,6 +1063,8 @@ impl Arena {
             }
             let end = position + len;
             let mut blocked_until = None;
+            #[cfg(feature = "bench-timing")]
+            let scan_started = Instant::now();
             for (index, slot) in slots.iter().enumerate() {
                 if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
                     continue;
@@ -1025,6 +1088,10 @@ impl Arena {
                             .map_or(span_end, |b: u64| b.max(span_end)),
                     );
                 }
+            }
+            #[cfg(feature = "bench-timing")]
+            {
+                *slot_scan += scan_started.elapsed();
             }
             if let Some(past) = blocked_until {
                 cursor += past - position;

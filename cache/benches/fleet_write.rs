@@ -216,7 +216,31 @@ mod platform {
             } else {
                 shared.as_ref().unwrap().put(key, value, None).unwrap();
             }
-            writes.push((started, now_ns()));
+            let finished = now_ns();
+            #[cfg(feature = "arena-timing")]
+            let timing = {
+                let timing = orbit_arena::take_write_timing()
+                    .expect("arena write timing");
+                [
+                    timing.lock_acquisition.as_nanos() as u64,
+                    timing.lock_held.as_nanos() as u64,
+                    timing.lock_file_open.as_nanos() as u64,
+                    timing.flock.as_nanos() as u64,
+                    timing.slot_scan.as_nanos() as u64,
+                ]
+            };
+            #[cfg(not(feature = "arena-timing"))]
+            let timing = [0; 5];
+            let [acquisition, held, open, flock, scan] = timing;
+            writes.push([
+                started,
+                finished,
+                acquisition,
+                held,
+                open,
+                flock,
+                scan,
+            ]);
             if mutation {
                 replicated.as_mut().unwrap().drain(node, hot_key);
             }
@@ -251,8 +275,10 @@ mod platform {
             "{cpu} {probe_cpu} {loss} {malformed} {payload_unavailable}"
         )
         .unwrap();
-        for (started, finished) in writes {
-            writeln!(stdout, "{started} {finished}").unwrap();
+        for [started, finished, acquisition, held, open, flock, scan] in writes
+        {
+            writeln!(stdout, "{started} {finished} {acquisition} {held} {open} {flock} {scan}")
+                .unwrap();
         }
         if hot_key {
             let entry = if let Some(cache) = replicated {
@@ -350,7 +376,7 @@ mod platform {
                 *total += value;
             }
             writes.extend(
-                (0..PUTS_PER_WORKER).map(|_| parse::<2>(&worker.response())),
+                (0..PUTS_PER_WORKER).map(|_| parse::<7>(&worker.response())),
             );
             if hot_key {
                 final_reads.push(parse::<3>(&worker.response()));
@@ -366,7 +392,7 @@ mod platform {
 
         let mut put = writes
             .iter()
-            .map(|&[started, finished]| finished - started)
+            .map(|&[started, finished, ..]| finished - started)
             .collect::<Vec<_>>();
         let mut late = writes
             .iter()
@@ -383,6 +409,8 @@ mod platform {
             - start)
             .max(offered_window);
         let [cpu, probe_cpu, loss, malformed, payload_unavailable] = totals;
+        #[cfg(feature = "arena-timing")]
+        report_arena_timing(run, mode, &writes);
         if hot_key {
             let (expected_revision, expected_id) = if mode == "replicated" {
                 let (writer, report) = final_reads
@@ -429,7 +457,7 @@ mod platform {
         let mut visibility = Vec::with_capacity(PUTS);
         let mut missing = 0;
         let mut incomplete = 0;
-        for (index, &[started, finished]) in writes.iter().enumerate() {
+        for (index, &[started, finished, ..]) in writes.iter().enumerate() {
             let writer = index / PUTS_PER_WORKER;
             let mut latest = 0;
             let mut complete = true;
@@ -466,6 +494,51 @@ mod platform {
         );
     }
 
+    #[cfg(feature = "arena-timing")]
+    fn report_arena_timing(
+        run: usize,
+        mode: &str,
+        writes: &[[u64; 7]],
+    ) {
+        let mut ordered = writes.to_vec();
+        let put_time = |write: &[u64; 7]| write[1] - write[0];
+        ordered.sort_unstable_by_key(put_time);
+        let p99_index = (ordered.len() * 99).div_ceil(100) - 1;
+        let tail = &ordered[p99_index..];
+        for (column, component) in [
+            "lock_acquisition",
+            "lock_held",
+            "lock_file_open",
+            "flock",
+            "slot_scan",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let elapsed = |write: &[u64; 7]| write[column + 2];
+            let mut values = ordered.iter().map(elapsed).collect::<Vec<_>>();
+            let p99 = p99(&mut values);
+            let mut tail_values = tail.iter().map(elapsed).collect::<Vec<_>>();
+            tail_values.sort_unstable();
+            let mut tail_shares = tail
+                .iter()
+                .map(|write| {
+                    elapsed(write) as f64 * 100.0
+                        / put_time(write).max(1) as f64
+                })
+                .collect::<Vec<_>>();
+            tail_shares.sort_unstable_by(f64::total_cmp);
+            eprintln!(
+                "arena_timing,{run},{mode},{component},{},{:.2},{p99:.2},{},{:.2},{:.1}",
+                writes.len(),
+                values[values.len() / 2] as f64 / 1_000.0,
+                tail.len(),
+                tail_values[tail_values.len() / 2] as f64 / 1_000.0,
+                tail_shares[tail_shares.len() / 2],
+            );
+        }
+    }
+
     pub fn main() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         if let [flag, mode, fleet, node, options @ ..] = args.as_slice()
@@ -492,6 +565,10 @@ mod platform {
             Some(option) => panic!("unknown benchmark option: {option}"),
         };
         assert!(args.next().is_none());
+        #[cfg(feature = "arena-timing")]
+        eprintln!(
+            "arena_timing,run,mode,component,puts,p50_us,p99_us,tail_puts,tail_p50_us,tail_share_p50_percent"
+        );
         if hot_key {
             println!(
                 "run,mode,offered_puts_per_second,puts,puts_per_second,cpu_ns_per_put,put_p99_us,dispatch_to_put_p99_us,ring_loss,malformed,payload_unavailable,final_revision,final_writer,converged_workers"
