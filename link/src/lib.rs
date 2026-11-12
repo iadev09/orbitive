@@ -29,6 +29,8 @@ mod body;
 pub mod events;
 mod frame;
 mod inbox;
+#[cfg(unix)]
+mod probe;
 #[cfg(all(unix, feature = "tokio"))]
 mod receiver;
 #[cfg(unix)]
@@ -49,6 +51,8 @@ pub use inbox::{
 };
 #[cfg(unix)]
 pub use orbit_core::shm::GroupAccess;
+#[cfg(all(unix, feature = "probe"))]
+pub use probe::{BellCounts, bell_counts};
 #[cfg(all(unix, feature = "tokio"))]
 pub use receiver::{InboxReceiver, Received};
 #[cfg(unix)]

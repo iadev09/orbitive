@@ -1,23 +1,32 @@
 //! Where a request and its reply spend their time between two processes on one
 //! machine, in nanoseconds, with no HTTP in the way.
 //!
-//! The same exchange over three paths, each process on a current-thread Tokio
+//! The same exchange over five paths, each process on a current-thread Tokio
 //! runtime:
 //!
 //! - `uds`: a connected Unix socket. The address is the connection.
 //! - `stream`: one Orbit stream slot, held like that connection. Transport only.
-//! - `link`: what a named call costs: a frame announcing the exchange, a slot
-//!   reused for it, and a reply head back through the caller's inbox.
+//! - `link`: what a named call with a body costs: a frame announcing the
+//!   exchange, a slot reused for its bytes, and a reply head back through the
+//!   caller's inbox.
+//! - `inline`: a named call whose request and reply each fit a frame, sent as
+//!   such a call is today: a slot is still taken for it and ended at once.
+//! - `frame`: the same two frames and no slot.
 //!
 //! `stream` against `uds` compares the transports. `link` against `stream` is
-//! what naming and dispatch add.
+//! what naming and dispatch add. `inline` against `frame` is what a slot costs
+//! an exchange that puts nothing in it.
+//!
+//! Beside the time, a row says what the exchange cost in wakes: bells rung
+//! and what one send took, bell reads that found nothing, times a runtime
+//! thread went to wait, and voluntary context switches.
 //!
 //! The processes read one clock, so a stamp taken on one side can be compared
 //! with one taken on the other. See `docs/benches/README.md`.
 //!
 //! Run:
-//! `cargo bench -p orbit-link --bench transport --features tokio`
-//! `cargo bench -p orbit-link --bench transport --features tokio -- --sizes 64,4096 --conns 1,8 --seconds 5`
+//! `cargo bench -p orbit-link --bench transport --features tokio,probe`
+//! `cargo bench -p orbit-link --bench transport --features tokio,probe -- --paths uds,inline,frame --sizes 64 --conns 1,8 --seconds 5`
 
 #![cfg(unix)]
 
@@ -25,6 +34,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -71,15 +81,102 @@ fn now() -> u64 {
     time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
 }
 
-/// This process's user and system time.
-fn cpu_ns() -> u64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    // SAFETY: `usage` is a valid rusage for the duration of the call.
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let of = |time: libc::timeval| {
-        time.tv_sec as u64 * 1_000_000_000 + time.tv_usec as u64 * 1_000
-    };
-    of(usage.ru_utime) + of(usage.ru_stime)
+/// The largest request the two frame-only paths carry: a frame holds the
+/// bytes and the head that names the exchange.
+const WHOLE_LIMIT: usize = 3 * 1024;
+
+/// Times this process's runtime thread ran out of work and went to wait.
+static PARKS: AtomicU64 = AtomicU64::new(0);
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .on_thread_park(|| {
+            PARKS.fetch_add(1, Ordering::Relaxed);
+        })
+        .build()
+        .expect("runtime")
+}
+
+/// What a process has spent so far: read before and after the counted time.
+#[derive(Clone, Copy, Default)]
+struct Spent {
+    /// User and system time, in nanoseconds.
+    cpu: u64,
+    /// Bell datagrams sent.
+    rings: u64,
+    /// Nanoseconds inside those sends.
+    ring_nanos: u64,
+    /// Bell reads that found nothing.
+    empty_reads: u64,
+    /// Times the runtime thread went to wait for an event.
+    parks: u64,
+    /// Voluntary context switches. macOS does not count them.
+    switches: u64,
+}
+
+impl Spent {
+    fn now() -> Self {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `usage` is a valid rusage for the duration of the call.
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        let of = |time: libc::timeval| {
+            time.tv_sec as u64 * 1_000_000_000 + time.tv_usec as u64 * 1_000
+        };
+        let bells = orbit_link::bell_counts();
+        Self {
+            cpu: of(usage.ru_utime) + of(usage.ru_stime),
+            rings: bells.rings,
+            ring_nanos: bells.ring_nanos,
+            empty_reads: bells.empty_reads,
+            parks: PARKS.load(Ordering::Relaxed),
+            switches: usage.ru_nvcsw as u64,
+        }
+    }
+
+    /// Both processes' spending between two readings of each.
+    fn between(
+        near: (Self, Self),
+        far: (Self, Self),
+    ) -> Self {
+        let of = |field: fn(&Self) -> u64| {
+            (field(&near.1) - field(&near.0)) + (field(&far.1) - field(&far.0))
+        };
+        Self {
+            cpu: of(|s| s.cpu),
+            rings: of(|s| s.rings),
+            ring_nanos: of(|s| s.ring_nanos),
+            empty_reads: of(|s| s.empty_reads),
+            parks: of(|s| s.parks),
+            switches: of(|s| s.switches),
+        }
+    }
+
+    fn line(self) -> String {
+        format!(
+            "{} {} {} {} {} {}",
+            self.cpu,
+            self.rings,
+            self.ring_nanos,
+            self.empty_reads,
+            self.parks,
+            self.switches
+        )
+    }
+
+    fn parse(line: &str) -> Self {
+        let mut fields =
+            line.split_whitespace().map(|n| n.parse().expect("a number"));
+        let mut next = || fields.next().expect("a count");
+        Self {
+            cpu: next(),
+            rings: next(),
+            ring_nanos: next(),
+            empty_reads: next(),
+            parks: next(),
+            switches: next(),
+        }
+    }
 }
 
 /// One exchange: the caller's stamps and the three the other side reported.
@@ -250,6 +347,75 @@ async fn answer_link(
     let _ = endpoint.shutdown().await;
 }
 
+/// The far side of `inline` and `frame`: the request came in the frame and
+/// the answer goes back in one, each exchange on its own task.
+async fn serve_whole(
+    segment: Arc<LinkSegment>,
+    bodies: Arc<LinkBodies>,
+    lane: usize,
+) {
+    let mut receiver = segment.receiver(lane).expect("receiver");
+    let mut frame = Vec::new();
+    loop {
+        match receiver.next(&mut frame).await.expect("next frame") {
+            Received::Frame => {}
+            _ => continue,
+        }
+        let arrived = now();
+        let (correlation, origin, ticket, request) = decode_whole(&frame);
+        // A slot announced with the call is opened as a body's would be.
+        let endpoint =
+            ticket.map(|ticket| bodies.accept(ticket).expect("accept"));
+        let mut reply = Vec::with_capacity(1 + 8 + STAMPS + request.len());
+        reply.push(REPLY);
+        reply.extend_from_slice(&correlation.to_le_bytes());
+        reply.extend_from_slice(&[0; STAMPS]);
+        reply.extend_from_slice(request);
+        let read = now();
+        let segment = Arc::clone(&segment);
+        tokio::spawn(async move {
+            // Let go first, so the caller finds the slot free when the
+            // answer reaches it.
+            drop(endpoint);
+            let answering = now();
+            reply[9..9 + STAMPS]
+                .copy_from_slice(&encode_stamps(arrived, read, answering));
+            segment.inbox().write(origin, &reply).expect("reply");
+        });
+    }
+}
+
+/// A call that carries its request: the head, a line end, the bytes. `-`
+/// stands where a slot's ticket would be when none was taken.
+fn encode_whole(
+    correlation: u64,
+    origin: usize,
+    ticket: Option<Ticket>,
+    request: &[u8],
+) -> Vec<u8> {
+    let mut frame = match ticket {
+        Some(ticket) => format!("{correlation} {origin} {ticket}\n"),
+        None => format!("{correlation} {origin} -\n"),
+    }
+    .into_bytes();
+    frame.extend_from_slice(request);
+    frame
+}
+
+fn decode_whole(frame: &[u8]) -> (u64, usize, Option<Ticket>, &[u8]) {
+    let end = frame.iter().position(|&byte| byte == b'\n').expect("a head");
+    let head = std::str::from_utf8(&frame[..end]).expect("call head");
+    let mut parts = head.splitn(3, ' ');
+    let mut next = || parts.next().expect("call field");
+    let correlation = next().parse().expect("correlation");
+    let origin = next().parse().expect("origin");
+    let ticket = match next() {
+        "-" => None,
+        text => Some(text.parse().expect("ticket")),
+    };
+    (correlation, origin, ticket, &frame[end + 1..])
+}
+
 fn encode_call(
     correlation: u64,
     origin: usize,
@@ -332,7 +498,6 @@ impl Caller {
         reply: &mut [u8],
         from: u64,
     ) -> Option<Sample> {
-        use std::sync::atomic::Ordering;
         let start = now();
         let (mut endpoint, ticket) =
             self.hot.lock().expect("hot slots").take(&self.bodies);
@@ -360,14 +525,58 @@ impl Caller {
             done,
         })
     }
+
+    /// One exchange whose request and reply each fit a frame. With `slot`, a
+    /// stream is taken for it and ended at once, as today; without, the two
+    /// frames are all there is.
+    async fn call_whole(
+        &self,
+        request: &[u8],
+        slot: bool,
+        from: u64,
+    ) -> Option<Sample> {
+        let start = now();
+        let held = slot.then(|| {
+            let (mut endpoint, ticket) =
+                self.hot.lock().expect("hot slots").take(&self.bodies);
+            let _ = endpoint.finish();
+            (endpoint, ticket)
+        });
+        let correlation = self.correlation.fetch_add(1, Ordering::Relaxed);
+        let (sender, head) = oneshot::channel();
+        self.waiting.lock().expect("waiting").insert(correlation, sender);
+        let ticket = held.as_ref().map(|(_, ticket)| *ticket);
+        self.segment
+            .inbox()
+            .write(
+                self.target,
+                &encode_whole(correlation, self.lane, ticket, request),
+            )
+            .expect("call frame");
+        let sent = now();
+        let (arrived, read, answering, answered) = head.await.expect("reply");
+        let done = now();
+        if let Some(held) = held {
+            self.hot.lock().expect("hot slots").0.push_back(held);
+        }
+        (start >= from).then_some(Sample {
+            start,
+            sent,
+            arrived,
+            read,
+            answering,
+            answered,
+            done,
+        })
+    }
 }
 
-/// Answer `mark` on standard input with this process's CPU time, until the
-/// parent closes it.
+/// Answer `mark` on standard input with what this process has spent, until
+/// the parent closes it.
 async fn control() {
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(_)) = lines.next_line().await {
-        println!("{}", cpu_ns());
+        println!("{}", Spent::now().line());
         let _ = std::io::stdout().flush();
     }
 }
@@ -376,10 +585,7 @@ async fn control() {
 fn server(role: &str) {
     let size: usize =
         std::env::var(SIZE).expect("size").parse().expect("a size");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
+    let runtime = runtime();
     runtime.block_on(async move {
         let ready = || {
             println!("ready");
@@ -418,6 +624,17 @@ fn server(role: &str) {
                     Arc::clone(&bodies),
                     joined.lane,
                     size,
+                ) => {}
+            }
+            return;
+        }
+        if role == "inline" || role == "frame" {
+            tokio::select! {
+                () = control() => {}
+                () = serve_whole(
+                    Arc::clone(&segment),
+                    Arc::clone(&bodies),
+                    joined.lane,
                 ) => {}
             }
             return;
@@ -475,12 +692,12 @@ impl Peer {
         Self { child, input, output }
     }
 
-    fn cpu(&mut self) -> u64 {
+    fn spent(&mut self) -> Spent {
         writeln!(self.input, "mark").expect("mark");
         self.input.flush().expect("mark");
         let mut line = String::new();
-        self.output.read_line(&mut line).expect("its CPU time");
-        line.trim().parse().expect("a number")
+        self.output.read_line(&mut line).expect("its spending");
+        Spent::parse(&line)
     }
 
     fn stop(mut self) {
@@ -497,14 +714,15 @@ fn median(values: &mut [i64]) -> i64 {
     values[values.len() / 2]
 }
 
-/// One row: rate, round trip, CPU and where the time went.
+/// One row: rate, round trip, CPU, where the time went and what it cost in
+/// wakes.
 fn report(
     path: &str,
     size: usize,
     conns: usize,
     seconds: u64,
     samples: &[Sample],
-    cpu: u64,
+    spent: Spent,
 ) {
     let of = |span: fn(&Sample) -> i64| -> i64 {
         let mut values: Vec<i64> = samples.iter().map(span).collect();
@@ -515,15 +733,21 @@ fn report(
     let p50 = median(&mut totals);
     let p99 = totals.get(totals.len() * 99 / 100).copied().unwrap_or(0);
     let count = samples.len().max(1) as u64;
+    let each = |total: u64| total as f64 / count as f64;
     println!(
-        "| {path} | {size} | {conns} | {} | {p50} | {p99} | {} | {} | {} | {} | {} | {} |",
+        "| {path} | {size} | {conns} | {} | {p50} | {p99} | {} | {} | {} | {} | {} | {} | {:.2} | {} | {:.2} | {:.2} | {:.2} |",
         samples.len() as u64 / seconds,
-        cpu / count,
+        spent.cpu / count,
         of(|s| s.sent as i64 - s.start as i64),
         of(|s| s.arrived as i64 - s.sent as i64),
         of(|s| s.read as i64 - s.arrived as i64),
         of(|s| s.answered as i64 - s.answering as i64),
         of(|s| s.done as i64 - s.answered as i64),
+        each(spent.rings),
+        spent.ring_nanos.checked_div(spent.rings).unwrap_or(0),
+        each(spent.empty_reads),
+        each(spent.parks),
+        each(spent.switches),
     );
 }
 
@@ -552,17 +776,15 @@ fn run(
         });
     let mut peer = Peer::start(path, &fleet, &socket, size);
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    let (samples, cpu) = runtime.block_on(async {
+    let named = matches!(path, "link" | "inline" | "frame");
+    let runtime = runtime();
+    let (samples, spent) = runtime.block_on(async {
         let measure = seconds * 1_000_000_000;
         let from = now() + WARM_UP.as_nanos() as u64;
         let end = from + measure;
         let mut tasks = Vec::new();
         let replies = match (&setup, &joined, &bodies) {
-            (Some(segment), Some(joined), Some(_)) if path == "link" => {
+            (Some(segment), Some(joined), Some(_)) if named => {
                 let waiting = Waiting::default();
                 Some((
                     waiting.clone(),
@@ -578,7 +800,7 @@ fn run(
         let target = setup
             .as_ref()
             .map(|segment| segment.inbox().targets(SERVER_NAME)[0].0);
-        if path == "link" {
+        if named {
             let caller = Arc::new(Caller {
                 segment: Arc::clone(setup.as_ref().expect("link")),
                 bodies: Arc::clone(bodies.as_ref().expect("bodies")),
@@ -586,8 +808,10 @@ fn run(
                 target: target.expect("target"),
                 waiting: replies.as_ref().expect("replies").0.clone(),
                 hot: Mutex::default(),
-                correlation: std::sync::atomic::AtomicU64::new(0),
+                correlation: AtomicU64::new(0),
             });
+            let whole = path != "link";
+            let slot = path == "inline";
             for _ in 0..conns {
                 let caller = Arc::clone(&caller);
                 tasks.push(tokio::spawn(async move {
@@ -595,9 +819,12 @@ fn run(
                     let mut reply = vec![0; size];
                     let mut samples = Vec::new();
                     while now() < end {
-                        if let Some(sample) =
+                        let sample = if whole {
+                            caller.call_whole(&request, slot, from).await
+                        } else {
                             caller.call(&request, &mut reply, from).await
-                        {
+                        };
+                        if let Some(sample) = sample {
                             samples.push(sample);
                         }
                     }
@@ -626,12 +853,13 @@ fn run(
             }
         }
 
-        // Warm up, then count both processes' CPU across the counted time.
+        // Warm up, then count both processes' spending across the counted
+        // time.
         tokio::time::sleep(WARM_UP).await;
-        let far = peer.cpu();
-        let near = cpu_ns();
+        let far = peer.spent();
+        let near = Spent::now();
         tokio::time::sleep(Duration::from_secs(seconds)).await;
-        let cpu = (cpu_ns() - near) + (peer.cpu() - far);
+        let spent = Spent::between((near, Spent::now()), (far, peer.spent()));
         let mut samples = Vec::new();
         for task in tasks {
             samples.extend(task.await.expect("a caller"));
@@ -639,11 +867,11 @@ fn run(
         if let Some((_, reader)) = replies {
             reader.abort();
         }
-        (samples, cpu)
+        (samples, spent)
     });
     drop(runtime);
     peer.stop();
-    report(path, size, conns, seconds, &samples, cpu);
+    report(path, size, conns, seconds, &samples, spent);
 
     let _ = std::fs::remove_file(&socket);
     drop(joined);
@@ -683,18 +911,22 @@ fn main() {
         .iter()
         .position(|argument| argument == "--paths")
         .and_then(|at| arguments.get(at + 1))
-        .map_or(vec!["uds", "stream", "link"], |text| {
+        .map_or(vec!["uds", "stream", "link", "inline", "frame"], |text| {
             text.split(',').collect()
         });
     println!(
-        "| path | bytes | conns | ops/s | p50 ns | p99 ns | CPU ns/op | send ns | wake ns | read ns | reply wake ns | reply read ns |"
+        "| path | bytes | conns | ops/s | p50 ns | p99 ns | CPU ns/op | send ns | wake ns | read ns | reply wake ns | reply read ns | bells/op | ns/bell | empty bell reads/op | parks/op | switches/op |"
     );
     println!(
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     );
     for &size in &sizes {
         for &count in &conns {
             for path in &paths {
+                // A frame-only call holds only what a frame holds.
+                if matches!(*path, "inline" | "frame") && size > WHOLE_LIMIT {
+                    continue;
+                }
                 run(path, size, count, seconds);
             }
         }

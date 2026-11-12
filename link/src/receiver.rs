@@ -121,7 +121,13 @@ impl InboxReceiver {
 
             self.socket.readable().await?;
             let mut scratch = [0u8; 64];
-            while self.socket.try_recv(&mut scratch).is_ok() {}
+            loop {
+                let found = self.socket.try_recv(&mut scratch).is_ok();
+                crate::probe::read(found);
+                if !found {
+                    break;
+                }
+            }
         }
     }
 

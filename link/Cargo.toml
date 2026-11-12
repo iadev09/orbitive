@@ -17,6 +17,9 @@ tokio = ["orbit-stream/tokio", "dep:tokio"]
 # Carry fleet events between two fleets meeting in a link segment. Never
 # implied by enabling the link and the event bus separately.
 events = ["tokio", "dep:orbit-events"]
+# Count the kernel calls the inbox bells make, for this crate's benchmarks.
+# Not a stable interface.
+probe = []
 
 [dependencies]
 orbit-core.workspace = true
@@ -34,4 +37,4 @@ libc.workspace = true
 [[bench]]
 name = "transport"
 harness = false
-required-features = ["tokio"]
+required-features = ["tokio", "probe"]

@@ -26,6 +26,7 @@ pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
                 libc::MSG_DONTWAIT,
             )
         };
+        crate::probe::read(read >= 0);
         if read >= 0 {
             continue;
         }
@@ -36,7 +37,9 @@ pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
                 // Let Tokio clear a cached readiness bit with its own IO
                 // attempt. A late bell is harmless; consume it and finish
                 // draining before rearming.
-                match socket.try_recv(&mut scratch) {
+                let late = socket.try_recv(&mut scratch);
+                crate::probe::read(late.is_ok());
+                match late {
                     Ok(_) => continue,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         return Ok(());
@@ -208,7 +211,8 @@ impl Bell {
         door: Doorbell,
     ) -> io::Result<()> {
         let address = self.address(door)?;
-        self.sender.send_to_addr(&[1], &address).map(|_| ())
+        crate::probe::ring(|| self.sender.send_to_addr(&[1], &address))
+            .map(|_| ())
     }
 
     #[cfg(feature = "tokio")]

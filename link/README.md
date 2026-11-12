@@ -199,7 +199,7 @@ before declaring cross-user deployment validated.
 
 ## Benchmark
 
-`cargo bench -p orbit-link --bench transport --features tokio` measures
+`cargo bench -p orbit-link --bench transport --features tokio,probe` measures
 one request and its reply between two processes, with no HTTP: a connected
 Unix socket, a held stream, and a named call through the inbox, stage by
 stage, with the CPU both processes spent. What each row is and how to read
