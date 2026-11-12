@@ -57,8 +57,9 @@ together, over the counted time. The `probe` feature supplies the bell counts.
 A stream's own wake is not a bell and is not counted in the first three; it
 shows in parks and switches.
 
-Results: [November 2026](transport-2026-11.md), taken before the frame-only
-paths and the wake counts existed.
+Results: [12 November 2026](transport-2026-11-12.md), the baseline with the
+frame-only paths and the wake counts, and [November 2026](transport-2026-11.md),
+taken before they existed.
 
 ## Other benchmarks
 
