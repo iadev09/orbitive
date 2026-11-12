@@ -253,15 +253,20 @@ impl<L: CacheLayout> Cache<L> {
             malformed: raw.malformed,
             ..CachePoll::default()
         };
+        // A registered name keeps its local store for the connection's life,
+        // so a run of mutations for one store resolves it once.
+        let mut resolved: Option<(Bytes, LocalCache)> = None;
         for mutation in raw.mutations {
             let store = mutation.store().clone();
-            let local = self
-                .stores
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .get(store.as_ref())
-                .cloned();
-            let Some(local) = local else {
+            if resolved.as_ref().is_none_or(|(name, _)| *name != store) {
+                resolved = self
+                    .stores
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(store.as_ref())
+                    .map(|local| (store.clone(), local.clone()));
+            }
+            let Some((_, local)) = &resolved else {
                 result.ignored += 1;
                 if !result.unknown_stores.contains(&store) {
                     result.unknown_stores.push(store);
