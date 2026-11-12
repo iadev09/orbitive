@@ -8,6 +8,11 @@ use std::task::{Context, Poll, Waker};
 use crate::{InboxGeometry, LinkSpec};
 use orbit_stream::StreamSpec;
 
+/// How long a test waits for a wake before it calls the wake lost. A wake
+/// that works arrives in microseconds; this bound only turns a hang into a
+/// failure, and it is the limit set for any test on 2026-11-13.
+const LOST_WAKE: std::time::Duration = std::time::Duration::from_secs(10);
+
 struct Scratch(Arc<LinkSegment>);
 
 impl Scratch {
@@ -259,6 +264,11 @@ async fn a_replaced_receiver_is_still_rung() {
         });
         waiting.await.unwrap();
         scratch.0.inbox().write(0, &[b'z', turn]).unwrap();
-        assert_eq!(reader.await.unwrap(), [b'z', turn]);
+        // A lost wake fails here rather than holding the run.
+        let frame =
+            tokio::time::timeout(LOST_WAKE, reader).await.unwrap_or_else(
+                |_| panic!("turn {turn}: the replaced receiver was not rung"),
+            );
+        assert_eq!(frame.unwrap(), [b'z', turn]);
     }
 }
