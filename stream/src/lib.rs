@@ -1954,11 +1954,11 @@ impl Drop for CloseWatch<'_> {
     }
 }
 
-impl WriteHalf {
-    pub(crate) fn exchange_write_status(&self) -> Result<()> {
-        let slot = self.handle.slot()?;
-        let direction =
-            Handle::direction(slot, self.handle.side.write_direction());
+impl Handle {
+    /// Whether this side may still write its exchange direction.
+    fn exchange_write_status(&self) -> Result<()> {
+        let slot = self.slot()?;
+        let direction = Handle::direction(slot, self.side.write_direction());
         let flags = direction.flags.load(Ordering::SeqCst);
         if flags & FLAG_READER_GONE != 0 {
             Err(Error::PeerGone)
@@ -1969,6 +1969,29 @@ impl WriteHalf {
         } else {
             Ok(())
         }
+    }
+}
+
+/// A writer's exchange status, readable without the writer: what a credit
+/// driver asks of a parked sender before it decides whether to wake it.
+#[derive(Clone)]
+pub(crate) struct WriteStatus(Arc<Handle>);
+
+impl WriteStatus {
+    /// Ended by a reset, a close, a departed reader or a reused slot: any
+    /// answer that is not "still open" is one the parked writer must see.
+    pub(crate) fn is_ended(&self) -> bool {
+        self.0.exchange_write_status().is_err()
+    }
+}
+
+impl WriteHalf {
+    pub(crate) fn exchange_write_status(&self) -> Result<()> {
+        self.handle.exchange_write_status()
+    }
+
+    pub(crate) fn write_status(&self) -> WriteStatus {
+        WriteStatus(Arc::clone(&self.handle))
     }
 
     pub(crate) fn reset_exchange(

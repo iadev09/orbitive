@@ -256,6 +256,70 @@ impl Drop for AlignedBytes {
 unsafe impl Send for AlignedBytes {}
 unsafe impl Sync for AlignedBytes {}
 
+/// A sender's credit registration: its exchange's raw id and its flow.
+pub(crate) type FlowKey = (u64, u16);
+
+/// What a parked sender is waiting for, as it registers.
+pub(crate) struct FlowWaitSpec<'a> {
+    pub(crate) key: FlowKey,
+    pub(crate) status: &'a crate::WriteStatus,
+    /// Slots the next publication needs.
+    pub(crate) demand: usize,
+    /// The flow's slot allowance.
+    pub(crate) limit: usize,
+    /// The descriptors the flow has published and may still hold.
+    pub(crate) held: &'a [ChunkDescriptor],
+}
+
+struct FlowWait {
+    waker: Waker,
+    status: crate::WriteStatus,
+    demand: usize,
+    limit: usize,
+    held: Vec<ChunkDescriptor>,
+}
+
+struct CreatorWait {
+    waker: Waker,
+    demand: usize,
+}
+
+#[derive(Default)]
+struct CreditWaits {
+    flows: HashMap<FlowKey, FlowWait>,
+    creators: Vec<CreatorWait>,
+}
+
+/// Whether a flow that has published `held` may publish `count` more slots
+/// under `limit`; a descriptor its reader has released no longer counts. The
+/// one test for the sender and for the credit driver, so they cannot differ.
+pub(crate) fn allowance_admits(
+    held: &[ChunkDescriptor],
+    limit: usize,
+    count: usize,
+    retains: impl Fn(ChunkDescriptor) -> bool,
+) -> bool {
+    let published: usize =
+        held.iter().map(|descriptor| descriptor.slot_count() as usize).sum();
+    if published + count <= limit {
+        return true;
+    }
+    let Some(mut remaining) = limit.checked_sub(count) else {
+        return false;
+    };
+    for descriptor in held {
+        if retains(*descriptor) {
+            let Some(left) =
+                remaining.checked_sub(descriptor.slot_count() as usize)
+            else {
+                return false;
+            };
+            remaining = left;
+        }
+    }
+    true
+}
+
 struct Arena {
     _fleet: Arc<Fleet>,
     backing: Backing,
@@ -264,7 +328,7 @@ struct Arena {
     node: u16,
     incarnation: Incarnation,
     allocation: Mutex<usize>,
-    credit_wakers: Mutex<Vec<Waker>>,
+    credit_waits: Mutex<CreditWaits>,
     driver: Mutex<Option<Driver>>,
 }
 
@@ -521,11 +585,33 @@ impl Arena {
         count: usize,
         cx: &mut Context<'_>,
     ) -> Poll<Result<()>> {
-        self.poll_credit(|| Ok(self.has_run(count)), cx)
+        if self.has_run(count) {
+            return Poll::Ready(Ok(()));
+        }
+        {
+            let mut waits = lock_unpoisoned(&self.credit_waits);
+            match waits
+                .creators
+                .iter_mut()
+                .find(|wait| wait.waker.will_wake(cx.waker()))
+            {
+                Some(wait) => wait.demand = count,
+                None => waits.creators.push(CreatorWait {
+                    waker: cx.waker().clone(),
+                    demand: count,
+                }),
+            }
+        }
+        self.ensure_driver()?;
+        if self.has_run(count) { Poll::Ready(Ok(())) } else { Poll::Pending }
     }
 
-    fn poll_credit(
+    /// Register a flow's sender for credit, keyed by its exchange and flow, so
+    /// a driver pass wakes it only when it may proceed. Check, register,
+    /// check again: a return between the two checks is seen by one of them.
+    fn poll_flow(
         self: &Arc<Self>,
+        wait: FlowWaitSpec<'_>,
         ready: impl Fn() -> Result<bool>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<()>> {
@@ -533,13 +619,87 @@ impl Arena {
             return Poll::Ready(Ok(()));
         }
         {
-            let mut wakers = lock_unpoisoned(&self.credit_wakers);
-            if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-                wakers.push(cx.waker().clone());
+            let mut waits = lock_unpoisoned(&self.credit_waits);
+            let record =
+                waits.flows.entry(wait.key).or_insert_with(|| FlowWait {
+                    waker: cx.waker().clone(),
+                    status: wait.status.clone(),
+                    demand: 0,
+                    limit: 0,
+                    held: Vec::new(),
+                });
+            if !record.waker.will_wake(cx.waker()) {
+                record.waker = cx.waker().clone();
             }
+            record.demand = wait.demand;
+            record.limit = wait.limit;
+            record.held.clear();
+            record.held.extend_from_slice(wait.held);
         }
         self.ensure_driver()?;
-        if ready()? { Poll::Ready(Ok(())) } else { Poll::Pending }
+        if ready()? {
+            self.forget_flow(wait.key);
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn forget_flow(
+        &self,
+        key: FlowKey,
+    ) {
+        lock_unpoisoned(&self.credit_waits).flows.remove(&key);
+    }
+
+    /// Whether a parked flow may proceed now, by the sender's own test.
+    /// `longest` is this pass's longest free run, read once when first needed.
+    fn flow_may_proceed(
+        &self,
+        wait: &FlowWait,
+        longest: &mut Option<usize>,
+    ) -> bool {
+        if wait.status.is_ended() {
+            return true;
+        }
+        allowance_admits(&wait.held, wait.limit, wait.demand, |descriptor| {
+            self.holds(descriptor)
+        }) && *longest.get_or_insert_with(|| self.longest_free_run())
+            >= wait.demand
+    }
+
+    /// The longest run of free slots in this node's lane: one pass over it,
+    /// where testing each waiter's demand would scan it once per waiter.
+    fn longest_free_run(&self) -> usize {
+        let lane_start = usize::from(self.node) * self.geometry.slots_per_node;
+        let mut longest = 0;
+        let mut run = 0;
+        for slot in &self.metadata()
+            [lane_start..lane_start + self.geometry.slots_per_node]
+        {
+            if slot.allocation.load(Ordering::Acquire) & STATE_MASK == SLOT_FREE
+            {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        longest
+    }
+
+    /// Whether `descriptor`'s extent is still allocated to that publication.
+    fn holds(
+        &self,
+        descriptor: ChunkDescriptor,
+    ) -> bool {
+        let first = usize::from(descriptor.owner_node())
+            * self.geometry.slots_per_node
+            + descriptor.first_slot() as usize;
+        let allocation =
+            self.metadata()[first].allocation.load(Ordering::Acquire);
+        allocation >> STATE_BITS == descriptor.allocation_generation()
+            && allocation & STATE_MASK != SLOT_FREE
     }
 
     fn ensure_driver(self: &Arc<Self>) -> Result<()> {
@@ -622,9 +782,33 @@ impl Doorstep for Arena {
         }
     }
 
+    /// Wake the parked senders and creators that may proceed; the others
+    /// stay registered for the next credit change. Woken outside the lock.
     fn drain(&self) {
-        let wakers = std::mem::take(&mut *lock_unpoisoned(&self.credit_wakers));
-        for waker in wakers {
+        let mut ready = Vec::new();
+        {
+            let mut waits = lock_unpoisoned(&self.credit_waits);
+            let mut longest = None;
+            ready.extend(
+                waits
+                    .flows
+                    .extract_if(|_, wait| {
+                        self.flow_may_proceed(wait, &mut longest)
+                    })
+                    .map(|(_, wait)| wait.waker),
+            );
+            if !waits.creators.is_empty() {
+                let longest =
+                    *longest.get_or_insert_with(|| self.longest_free_run());
+                ready.extend(
+                    waits
+                        .creators
+                        .extract_if(.., |wait| longest >= wait.demand)
+                        .map(|wait| wait.waker),
+                );
+            }
+        }
+        for waker in ready {
             waker.wake();
         }
     }
@@ -897,13 +1081,7 @@ impl PayloadArena {
         &self,
         descriptor: ChunkDescriptor,
     ) -> bool {
-        let first = usize::from(descriptor.owner_node())
-            * self.slots_per_node()
-            + descriptor.first_slot() as usize;
-        let allocation =
-            self.arena.metadata()[first].allocation.load(Ordering::Acquire);
-        allocation >> STATE_BITS == descriptor.allocation_generation()
-            && allocation & STATE_MASK != SLOT_FREE
+        self.arena.holds(descriptor)
     }
 
     pub(crate) fn notify_peer(
@@ -922,12 +1100,30 @@ impl PayloadArena {
         self.arena.wait_credit(ready)
     }
 
-    pub(crate) fn poll_credit(
+    pub(crate) fn poll_flow(
         &self,
+        wait: FlowWaitSpec<'_>,
         ready: impl Fn() -> Result<bool>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<()>> {
-        self.arena.poll_credit(ready, cx)
+        self.arena.poll_flow(wait, ready, cx)
+    }
+
+    /// Drop a sender's credit registration, as its producer goes away.
+    pub(crate) fn forget_flow(
+        &self,
+        key: FlowKey,
+    ) {
+        self.arena.forget_flow(key);
+    }
+
+    /// Whether a sender's credit registration is still parked.
+    #[cfg(test)]
+    pub(crate) fn is_waiting(
+        &self,
+        key: FlowKey,
+    ) -> bool {
+        lock_unpoisoned(&self.arena.credit_waits).flows.contains_key(&key)
     }
 }
 
@@ -1182,7 +1378,7 @@ fn open(
         node: fleet.node_id().get(),
         incarnation,
         allocation: Mutex::new(0),
-        credit_wakers: Mutex::new(Vec::new()),
+        credit_waits: Mutex::new(CreditWaits::default()),
         driver: Mutex::new(None),
     });
     arenas.insert(key, Arc::downgrade(&arena));

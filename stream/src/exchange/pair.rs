@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use orbit_core::{Fleet, NodeId};
 
-use super::arena::Publication;
+use super::arena::{FlowKey, FlowWaitSpec, Publication, allowance_admits};
 use super::protocol::CONTROL_FRAME_BYTES;
 use super::{
     ChunkDescriptor, ChunkGeometry, ChunkPlan, ControlEvent,
@@ -510,6 +510,8 @@ struct Producer {
     flow: Flow,
     arena: PayloadArena,
     control: WriteHalf,
+    /// The exchange status a credit driver reads while this sender is parked.
+    status: crate::WriteStatus,
     next_chunk: u64,
     state: ProducerState,
     flow_slots: usize,
@@ -528,11 +530,13 @@ impl Producer {
         unopened: Option<Arc<UnopenedPeer>>,
     ) -> Self {
         let flow_slots = flow_slots.unwrap_or_else(|| arena.slots_per_node());
+        let status = control.write_status();
         Self {
             exchange,
             flow,
             arena,
             control,
+            status,
             next_chunk: 1,
             state: ProducerState::New,
             flow_slots,
@@ -635,20 +639,46 @@ impl Producer {
     ) -> Result<bool> {
         self.control.exchange_write_status()?;
         let count = self.required_slots(len)?;
-        if self.published_slots + count > self.flow_slots {
-            let mut remaining = self.flow_slots - count;
-            for descriptor in &self.published {
-                if self.arena.retains(*descriptor) {
-                    let Some(left) =
-                        remaining.checked_sub(descriptor.slot_count() as usize)
-                    else {
-                        return Ok(false);
-                    };
-                    remaining = left;
-                }
-            }
+        if self.published_slots + count > self.flow_slots
+            && !allowance_admits(
+                &self.published,
+                self.flow_slots,
+                count,
+                |descriptor| self.arena.retains(descriptor),
+            )
+        {
+            return Ok(false);
         }
         self.arena.is_available(len)
+    }
+
+    fn credit_key(&self) -> FlowKey {
+        (self.exchange.stream_id().net_id().raw(), u16::from(self.flow.wire()))
+    }
+
+    /// Task readiness for the payload credit of the next `len` bytes. The
+    /// registration carries what this sender waits for, so the credit driver
+    /// wakes it only when that is there.
+    fn poll_credit(
+        &self,
+        len: usize,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+        let demand = match self.required_slots(len) {
+            Ok(demand) => demand,
+            Err(error) => return std::task::Poll::Ready(Err(error)),
+        };
+        self.arena.poll_flow(
+            FlowWaitSpec {
+                key: self.credit_key(),
+                status: &self.status,
+                demand,
+                limit: self.flow_slots,
+                held: &self.published,
+            },
+            || self.credit_ready(len),
+            cx,
+        )
     }
 
     fn publish(
@@ -771,6 +801,8 @@ impl Producer {
 
 impl Drop for Producer {
     fn drop(&mut self) {
+        // A parked registration ends with its sender.
+        self.arena.forget_flow(self.credit_key());
         if self.published.is_empty() {
             return;
         }
@@ -1221,7 +1253,7 @@ impl Sender {
         let payload = if payload_len == 0 {
             std::task::Poll::Ready(Ok(()))
         } else {
-            self.0.arena.poll_credit(|| self.0.credit_ready(payload_len), cx)
+            self.0.poll_credit(payload_len, cx)
         };
         match (control, payload) {
             (std::task::Poll::Ready(Err(error)), _)
@@ -1347,6 +1379,92 @@ mod tests {
         drop(slice);
         a.sender().data(&[8; 65]).unwrap();
         assert_eq!(&take_data(b.receiver())[..], &[8; 65]);
+    }
+
+    /// Counts its wakes and says so on a channel, so a test waits for a wake
+    /// rather than for a time.
+    struct Signal(Mutex<std::sync::mpsc::Sender<()>>);
+
+    impl std::task::Wake for Signal {
+        fn wake(self: Arc<Self>) {
+            let _ = lock_unpoisoned(&self.0).send(());
+        }
+    }
+
+    fn signal() -> (std::task::Waker, std::sync::mpsc::Receiver<()>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        (Arc::new(Signal(Mutex::new(sender))).into(), receiver)
+    }
+
+    /// Park `sender` on payload credit for one more slot.
+    fn park(
+        sender: &Sender,
+        waker: &std::task::Waker,
+    ) {
+        let mut cx = std::task::Context::from_waker(waker);
+        assert!(sender.poll_ready(64, &mut cx).is_pending());
+    }
+
+    // The driver takes a pass's records out under its lock and wakes them
+    // after it: once A's wake arrives, the pass that woke it has decided about
+    // B too, so B's registration still standing means B was not chosen.
+    #[test]
+    fn a_return_wakes_only_the_flow_it_frees() {
+        let exchanges = exchanges().with_flow_slots(1).unwrap();
+        let (mut a, ticket) = exchanges.create().unwrap();
+        let mut a_peer = exchanges.open_peer(ticket).unwrap();
+        let (mut b, ticket) = exchanges.create().unwrap();
+        let mut b_peer = exchanges.open_peer(ticket).unwrap();
+        for (sender, receiver) in [(&mut a, &mut a_peer), (&mut b, &mut b_peer)]
+        {
+            sender.sender().start(None).unwrap();
+            assert!(matches!(
+                receiver.receiver().try_next(),
+                Ok(FlowEvent::Start { .. })
+            ));
+            sender.sender().data(&[1; 64]).unwrap();
+        }
+        let a_held = take_data(a_peer.receiver());
+        let b_held = take_data(b_peer.receiver());
+        let (a_waker, a_woken) = signal();
+        let (b_waker, _b_woken) = signal();
+        park(a.sender(), &a_waker);
+        park(b.sender(), &b_waker);
+
+        drop(a_held);
+        a_woken.recv().unwrap();
+        let a_key = a.sender().0.credit_key();
+        let b_key = b.sender().0.credit_key();
+        let arena = a.sender().0.arena.clone();
+        assert!(!arena.is_waiting(a_key));
+        assert!(arena.is_waiting(b_key));
+        a.sender().data(&[2; 64]).unwrap();
+        assert_eq!(&b_held[..], &[1; 64]);
+    }
+
+    #[test]
+    fn a_cancelled_reader_wakes_its_sender_while_its_chunk_is_held() {
+        let exchanges = exchanges().with_flow_slots(1).unwrap();
+        let (mut a, ticket) = exchanges.create().unwrap();
+        let mut peer = exchanges.open_peer(ticket).unwrap();
+        a.sender().start(None).unwrap();
+        assert!(matches!(
+            peer.receiver().try_next(),
+            Ok(FlowEvent::Start { .. })
+        ));
+        a.sender().data(&[1; 64]).unwrap();
+        let held = take_data(peer.receiver());
+        let (waker, woken) = signal();
+        park(a.sender(), &waker);
+
+        drop(peer);
+        woken.recv().unwrap();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            a.sender().poll_ready(64, &mut cx),
+            std::task::Poll::Ready(Err(Error::PeerGone))
+        ));
+        assert_eq!(&held[..], &[1; 64]);
     }
 
     #[test]
