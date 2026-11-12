@@ -946,6 +946,38 @@ impl Streams {
         self.table.node_dead(node.get(), incarnation.get());
     }
 
+    fn exchange_readers(
+        &self,
+        node: NodeId,
+        incarnation: Incarnation,
+    ) -> impl Iterator<Item = (StreamId, Side)> + '_ {
+        let geometry = self.table.geometry();
+        self.table.slots().iter().enumerate().flat_map(move |(index, slot)| {
+            let generation = slot.generation.load(Ordering::Acquire);
+            [Side::A, Side::B].into_iter().filter_map(move |side| {
+                let index_side = side.index();
+                (slot.claimed[index_side].load(Ordering::SeqCst)
+                    == SIDE_CLAIMED
+                    && slot.node[index_side].load(Ordering::Acquire)
+                        == node.get()
+                    && slot.incarnation[index_side].load(Ordering::Acquire)
+                        == incarnation.get()
+                    && slot.is(generation))
+                .then(|| {
+                    (
+                        StreamId::make(
+                            self.table.kind(),
+                            (index / geometry.lane_capacity) as u16,
+                            (index % geometry.lane_capacity) as u32,
+                            generation,
+                        ),
+                        side,
+                    )
+                })
+            })
+        })
+    }
+
     /// This process took over its node from an earlier life: every side that
     /// any other incarnation of this node held, in any lane, is finished, as
     /// [`Streams::node_dead`] finishes one. The node id is inherited and the
@@ -1040,6 +1072,26 @@ impl Handle {
         } else {
             Err(Error::Stale(self.id))
         }
+    }
+
+    fn peer_is_unclaimed(&self) -> bool {
+        self.slot().is_ok_and(|slot| {
+            slot.claimed[1 - self.side.index()].load(Ordering::SeqCst)
+                == SIDE_FREE
+        })
+    }
+
+    fn close_unclaimed_peer(&self) -> bool {
+        self.slot().is_ok_and(|slot| {
+            slot.claimed[1 - self.side.index()]
+                .compare_exchange(
+                    SIDE_FREE,
+                    SIDE_RELEASED,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+        })
     }
 
     fn direction(
@@ -1242,6 +1294,7 @@ impl Handle {
     fn try_read_exact(
         &self,
         buf: &mut [u8],
+        head_order: Ordering,
     ) -> Result<()> {
         let slot = self.slot()?;
         let direction = Self::direction(slot, self.side.read_direction());
@@ -1259,7 +1312,7 @@ impl Handle {
         if buf.is_empty() {
             return Ok(());
         }
-        let head = direction.head.load(Ordering::Acquire);
+        let head = direction.head.load(head_order);
         let tail = direction.tail.load(Ordering::Relaxed);
         let available = (head - tail) as usize;
         if available < buf.len() {
@@ -1763,7 +1816,28 @@ impl ReadHalf {
         &self,
         buf: &mut [u8],
     ) -> Result<()> {
-        self.handle.try_read_exact(buf)
+        self.handle.try_read_exact(buf, Ordering::Acquire)
+    }
+
+    pub(crate) fn try_drain_exchange_frame(
+        &self,
+        frame: &mut [u8],
+    ) -> Result<()> {
+        // Pairs with the writer's post-publication reader-gone check.
+        self.handle.try_read_exact(frame, Ordering::SeqCst)
+    }
+
+    pub(crate) fn exchange_peer_node(&self) -> Result<u16> {
+        let slot = self.handle.slot()?;
+        Ok(slot.node[1 - self.handle.side.index()].load(Ordering::Acquire))
+    }
+
+    pub(crate) fn exchange_reset_code(&self) -> Result<Option<u32>> {
+        let slot = self.handle.slot()?;
+        let direction =
+            Handle::direction(slot, self.handle.side.read_direction());
+        let encoded = direction.exchange_reset_code.load(Ordering::Acquire);
+        Ok((encoded != 0).then_some(encoded as u32))
     }
 
     /// Park until something can be read, then read it. `Ok(0)` is clean
@@ -1873,6 +1947,36 @@ impl Drop for CloseWatch<'_> {
 }
 
 impl WriteHalf {
+    pub(crate) fn exchange_write_status(&self) -> Result<()> {
+        let slot = self.handle.slot()?;
+        let direction =
+            Handle::direction(slot, self.handle.side.write_direction());
+        let flags = direction.flags.load(Ordering::SeqCst);
+        if flags & FLAG_READER_GONE != 0 {
+            Err(Error::PeerGone)
+        } else if flags & FLAG_RESET != 0 {
+            Err(Error::Reset)
+        } else if flags & FLAG_FIN != 0 {
+            Err(Error::Closed)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn reset_exchange(
+        &mut self,
+        code: u32,
+    ) -> Result<()> {
+        let slot = self.handle.slot()?;
+        let direction =
+            Handle::direction(slot, self.handle.side.write_direction());
+        direction
+            .exchange_reset_code
+            .store((1_u64 << 32) | u64::from(code), Ordering::Release);
+        self.reset();
+        Ok(())
+    }
+
     /// Wait until this direction is reset or its reader stops reading,
     /// releases its half, or is reported dead. A clean FIN is not cancellation.
     ///

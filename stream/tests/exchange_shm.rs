@@ -59,6 +59,7 @@ fn exchange_peer() {
     report("ready");
 
     let mut held_client = None;
+    let mut held_body = None;
     for line in std::io::stdin().lock().lines() {
         match line.expect("peer command").as_str() {
             "exchange" => {
@@ -88,6 +89,32 @@ fn exchange_peer() {
                 assert_eq!(descriptor.slot_count(), 3);
                 held_client = Some(client);
                 report("exchanged");
+            }
+            command @ ("cancel-body" | "hold-body") => {
+                let ticket = exchanges.blocking_take_offer().unwrap();
+                let mut endpoint = exchanges.open_peer(ticket).unwrap();
+                endpoint.receiver().wait_readable().unwrap();
+                assert!(matches!(
+                    endpoint.receiver().try_next(),
+                    Ok(FlowEvent::Start { .. })
+                ));
+                let FlowEvent::Data(chunk) =
+                    endpoint.receiver().try_next().unwrap()
+                else {
+                    panic!("expected held data");
+                };
+                held_body = Some(bytes::Bytes::from_owner(chunk).slice(..64));
+                if command == "cancel-body" {
+                    endpoint.receiver().cancel();
+                    report("body-cancelled");
+                } else {
+                    held_client = Some(endpoint);
+                    report("body-held");
+                }
+            }
+            "release-body" => {
+                assert_eq!(&held_body.take().unwrap()[..], &[7; 64]);
+                report("body-released");
             }
             "release" => {
                 drop(held_client.take());
@@ -297,4 +324,67 @@ fn paired_flows_share_one_payload_segment_across_process_mappings() {
     assert!(matches!(response_in.try_next(), Ok(FlowEvent::Fin)));
 
     owner.unlink().expect("unlink exchange resources");
+}
+
+#[test]
+fn cancellation_reclaims_unread_chunks_across_processes() {
+    let name: &'static str =
+        Box::leak(format!("xc{:x}", std::process::id()).into_boxed_str());
+    let owner = Exchanges::open(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).unwrap()),
+        Incarnation::new(10),
+        spec(),
+    )
+    .unwrap();
+    owner.reset_all();
+    let mut peer = Peer::spawn(name);
+
+    let (mut a, ticket) = owner.create().unwrap();
+    a.sender().start(None).unwrap();
+    a.sender().data(&[7; 256]).unwrap();
+    a.sender().data(&[8; 1792]).unwrap();
+    a.sender().finish().unwrap();
+    owner.offer(ticket, NodeId::new(1)).unwrap();
+    peer.send("cancel-body");
+    peer.expect("body-cancelled");
+
+    assert!(!owner.create_payload_available(2048).unwrap());
+    let (mut replacement, _) = owner.create().unwrap();
+    replacement.sender().start(Some(&[9; 1792])).unwrap();
+    peer.send("release-body");
+    peer.expect("body-released");
+    drop(replacement);
+    assert!(owner.create_payload_available(2048).unwrap());
+    peer.finish();
+    owner.unlink().unwrap();
+}
+
+#[test]
+fn confirmed_reader_death_reclaims_payload_from_a_finished_sender() {
+    let name: &'static str =
+        Box::leak(format!("xr{:x}", std::process::id()).into_boxed_str());
+    let owner = Exchanges::open(
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::ZERO).unwrap()),
+        Incarnation::new(10),
+        spec(),
+    )
+    .unwrap();
+    owner.reset_all();
+    let mut peer = Peer::spawn(name);
+    let (mut a, ticket) = owner.create().unwrap();
+    a.sender().start(None).unwrap();
+    a.sender().data(&[7; 256]).unwrap();
+    a.sender().data(&[8; 1792]).unwrap();
+    a.sender().finish().unwrap();
+    owner.offer(ticket, NodeId::new(1)).unwrap();
+    peer.send("hold-body");
+    peer.expect("body-held");
+    drop(a);
+    drop(peer);
+
+    owner.node_dead(NodeId::new(1), Incarnation::new(12));
+    assert!(!owner.create_payload_available(2048).unwrap());
+    owner.node_dead(NodeId::new(1), Incarnation::new(11));
+    assert!(owner.create_payload_available(2048).unwrap());
+    owner.unlink().unwrap();
 }

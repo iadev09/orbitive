@@ -76,6 +76,11 @@ not every producer sharing the arena.
 Notifications are coalesced: publication does not require an unconditional
 kernel wake per payload slot or per chunk.
 
+`Exchanges::with_flow_slots` bounds how many payload slots one exchange can
+hold per direction. A received chunk keeps its slots until dropped, including
+when wrapped in `Bytes::from_owner`. Cancelling a receiver or resetting a
+sender returns unread chunks while leaving delivered chunks valid.
+
 Both directions enforce `Start -> Data* -> (Fin | Reset)`, but their state
 machines are independent. Either endpoint may start sending first. The
 transport enforces ordering, ownership, credit and terminal rules only; an

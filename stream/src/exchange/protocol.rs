@@ -45,7 +45,7 @@ pub enum Flow {
 }
 
 impl Flow {
-    const fn wire(self) -> u8 {
+    pub(super) const fn wire(self) -> u8 {
         match self {
             Self::AtoB => FLOW_A_TO_B,
             Self::BtoA => FLOW_B_TO_A,

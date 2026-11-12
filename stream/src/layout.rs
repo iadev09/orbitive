@@ -167,7 +167,9 @@ pub(crate) struct Direction {
     /// Async atomic writer's required free space; zero means no exact wait.
     /// Writer-owned, in previously reserved padding; the reader only observes it.
     pub(crate) exact_needed: AtomicU32,
-    _writer_padding: [u8; 48],
+    /// Typed exchanges store a reset code here before setting FLAG_RESET.
+    pub(crate) exchange_reset_code: AtomicU64,
+    _writer_padding: [u8; 40],
 
     // ── the reader's line ──────────────────────────────────────────────
     pub(crate) tail: AtomicU64,
@@ -187,6 +189,7 @@ impl Direction {
         self.tail.store(0, Ordering::Relaxed);
         self.flags.store(0, Ordering::Relaxed);
         self.exact_needed.store(0, Ordering::Relaxed);
+        self.exchange_reset_code.store(0, Ordering::Relaxed);
         self.changes.store(0, Ordering::Relaxed);
         self.waiters.store(0, Ordering::Relaxed);
     }
@@ -204,6 +207,7 @@ mod tests {
     fn exact_wait_uses_padding_without_moving_existing_shared_fields() {
         assert_eq!(size_of::<Direction>(), 192);
         assert_eq!(std::mem::offset_of!(Direction, exact_needed), 12);
+        assert_eq!(std::mem::offset_of!(Direction, exchange_reset_code), 16);
         assert_eq!(std::mem::offset_of!(Direction, tail), 64);
         assert_eq!(std::mem::offset_of!(Direction, changes), 128);
         assert_eq!(std::mem::offset_of!(Direction, waiters), 132);

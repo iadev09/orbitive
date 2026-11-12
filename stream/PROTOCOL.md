@@ -98,7 +98,9 @@ New -> START -> DATA* -> FIN
 - `START` occurs exactly once and may carry optional metadata.
 - `DATA` carries one payload descriptor per application chunk.
 - `FIN` is clean completion for that direction.
-- `RESET(code)` is terminal failure for that direction.
+- `RESET(code)` is terminal failure for that direction. The sender publishes
+  the reset independently of control-ring capacity, including when the ring
+  is full of unread data descriptors.
 
 The two state machines are independent. Either side may send `START` first; one
 direction may produce data or finish while the other remains open. This is what
@@ -129,6 +131,33 @@ reserve SHM extent -> read/encode into it -> commit descriptor
 This makes the configured arena credit the application backpressure boundary.
 Kernel, TLS, and protocol-library buffers still exist and must be included in
 end-to-end buffering claims.
+
+### Flow credit and cancellation
+
+`Exchanges::with_flow_slots` caps outstanding physical payload slots separately
+in each exchange direction. The default is the capacity of its producer lane.
+A reservation must fit both the flow's budget and a contiguous run in its lane.
+Start metadata spends the same credit as data. A reader advancing the control
+ring does not return payload credit. The last owner of a received
+`PayloadChunk` returns it, including when the chunk is shared through
+`Bytes::from_owner`.
+
+Cancelling or dropping a receiver seals its direction and discards unread
+descriptors. A producer racing that close reclaims publications the reader did
+not see. Resetting or dropping an unfinished sender reclaims its unread
+publications. Clean FIN leaves queued data available to the receiver. If the
+peer never opens a finished exchange, the last local half closes the unclaimed
+ticket and returns its unread payload. None of these transitions frees
+already delivered chunks. Generation and state are checked together before an
+extent can be claimed or reclaimed. Payload arena layout version 5 encodes
+both in one atomic word. It requires a new payload kind or a quiescent
+replacement of an older arena. A confirmed reader death also returns unread
+chunks addressed to that reader, including after the sender has finished.
+
+Reader cancellation wakes writers waiting for either control room or payload
+credit. A consumer that retains every chunk while waiting for FIN must copy
+the data out of the arena as it consumes it, or ensure the entire input fits
+in the flow budget.
 
 ## Experimental pool session binding
 

@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use orbit_core::{Fleet, NodeId};
@@ -9,12 +10,13 @@ use orbit_core::{Fleet, NodeId};
 use super::arena::Publication;
 use super::protocol::CONTROL_FRAME_BYTES;
 use super::{
-    ChunkDescriptor, ChunkGeometry, ChunkPlan, ControlEvent, ExchangeId, Flow,
-    PayloadArena, PayloadArenaSpec, PayloadChunk, ResetCode,
+    ChunkDescriptor, ChunkGeometry, ChunkPlan, ControlEvent,
+    DEFAULT_CHUNK_BYTES, ExchangeId, Flow, PayloadArena, PayloadArenaSpec,
+    PayloadChunk, ResetCode,
 };
 use crate::{
     Error, Incarnation, ReadHalf, Result, Side, StreamSpec, Streams, Ticket,
-    WriteHalf,
+    WriteHalf, lock_unpoisoned,
 };
 
 /// How an exchange budgets payload memory for its two directions.
@@ -179,12 +181,15 @@ impl PayloadArenas {
         &self,
         node: NodeId,
         incarnation: Incarnation,
+        dead_flows: &HashSet<(u64, u16)>,
     ) {
         match self {
-            Self::Shared(arena) => arena.node_dead(node, incarnation),
+            Self::Shared(arena) => {
+                arena.node_dead_with_flows(node, incarnation, dead_flows)
+            }
             Self::Directional { a_to_b, b_to_a } => {
-                a_to_b.node_dead(node, incarnation);
-                b_to_a.node_dead(node, incarnation);
+                a_to_b.node_dead_with_flows(node, incarnation, dead_flows);
+                b_to_a.node_dead_with_flows(node, incarnation, dead_flows);
             }
         }
     }
@@ -217,6 +222,7 @@ impl PayloadArenas {
 pub struct Exchanges {
     control: Streams,
     payload: PayloadArenas,
+    flow_slots: Option<usize>,
 }
 
 impl Exchanges {
@@ -243,7 +249,36 @@ impl Exchanges {
                 }
             }
         };
-        Ok(Self { control, payload })
+        Ok(Self { control, payload, flow_slots: None })
+    }
+
+    /// Bound outstanding payload independently in each exchange direction.
+    /// By default a direction may use its producer's entire arena lane.
+    pub fn with_flow_slots(
+        mut self,
+        slots: usize,
+    ) -> Result<Self> {
+        if slots == 0
+            || slots > self.payload.for_flow(Flow::AtoB).slots_per_node()
+            || slots > self.payload.for_flow(Flow::BtoA).slots_per_node()
+        {
+            return Err(Error::Malformed(
+                "exchange flow credit must fit both payload lanes".to_owned(),
+            ));
+        }
+        self.flow_slots = Some(slots);
+        Ok(self)
+    }
+
+    fn creation_arena(
+        &self,
+        len: usize,
+    ) -> Result<PayloadArena> {
+        let arena = self.payload.for_flow(Flow::AtoB);
+        if let Some(slots) = self.flow_slots {
+            flow_slots_for(len, slots, arena.slot_size())?;
+        }
+        Ok(arena)
     }
 
     /// Create side A. Its sender writes A-to-B and its receiver reads B-to-A.
@@ -260,7 +295,7 @@ impl Exchanges {
         &self,
         payload_len: usize,
     ) -> Result<bool> {
-        self.payload.for_flow(Flow::AtoB).is_available(payload_len)
+        self.creation_arena(payload_len)?.is_available(payload_len)
     }
 
     /// Task readiness for side A's first flow payload credit.
@@ -269,7 +304,7 @@ impl Exchanges {
         payload_len: usize,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
-        self.payload.for_flow(Flow::AtoB).poll_available(payload_len, cx)
+        self.creation_arena(payload_len)?.poll_available(payload_len, cx)
     }
 
     /// Open side B. Its sender writes B-to-A and its receiver reads A-to-B.
@@ -292,18 +327,28 @@ impl Exchanges {
             Side::B => (Flow::BtoA, Flow::AtoB),
         };
         let (read, write) = endpoint.split();
+        let unopened = (send_flow == Flow::AtoB).then(|| {
+            Arc::new(UnopenedPeer {
+                control: Arc::clone(&write.handle),
+                arena: self.payload.for_flow(send_flow),
+                unread: Mutex::new(Vec::new()),
+            })
+        });
         ExchangeEndpoint {
             sender: Sender(Producer::new(
                 id,
                 send_flow,
                 self.payload.for_flow(send_flow),
                 write,
+                self.flow_slots,
+                unopened.clone(),
             )),
             receiver: Receiver(Consumer::new(
                 id,
                 receive_flow,
                 self.payload.for_flow(receive_flow),
                 read,
+                unopened,
             )),
         }
     }
@@ -364,8 +409,19 @@ impl Exchanges {
         node: NodeId,
         incarnation: Incarnation,
     ) {
+        let dead_flows = self
+            .control
+            .exchange_readers(node, incarnation)
+            .map(|(id, side)| {
+                let flow = match side {
+                    Side::A => Flow::BtoA,
+                    Side::B => Flow::AtoB,
+                };
+                (id.net_id().raw(), u16::from(flow.wire()))
+            })
+            .collect();
         self.control.node_dead(node, incarnation);
-        self.payload.node_dead(node, incarnation);
+        self.payload.node_dead(node, incarnation, &dead_flows);
     }
 
     /// Quiescent-owner maintenance only. Attaching a replacement process
@@ -416,6 +472,39 @@ enum ProducerState {
     Terminal,
 }
 
+// Both local halves keep the ticket openable. If the writer finishes before
+// the peer opens, the last local half seals an unclaimed ticket and reclaims
+// the unread chunks. A claimed peer owns draining its own direction.
+struct UnopenedPeer {
+    control: Arc<crate::Handle>,
+    arena: PayloadArena,
+    unread: Mutex<Vec<ChunkDescriptor>>,
+}
+
+impl Drop for UnopenedPeer {
+    fn drop(&mut self) {
+        let unread =
+            self.unread.get_mut().unwrap_or_else(|error| error.into_inner());
+        if !unread.is_empty() && self.control.close_unclaimed_peer() {
+            for descriptor in unread.drain(..) {
+                self.arena.discard(descriptor);
+            }
+        }
+    }
+}
+
+fn flow_slots_for(
+    len: usize,
+    slots: usize,
+    slot_size: usize,
+) -> Result<usize> {
+    let capacity = slots * slot_size;
+    if len > capacity {
+        return Err(Error::PayloadTooLarge { len, capacity });
+    }
+    Ok(len.div_ceil(slot_size))
+}
+
 struct Producer {
     exchange: ExchangeId,
     flow: Flow,
@@ -423,6 +512,10 @@ struct Producer {
     control: WriteHalf,
     next_chunk: u64,
     state: ProducerState,
+    flow_slots: usize,
+    published: Vec<ChunkDescriptor>,
+    published_slots: usize,
+    unopened: Option<Arc<UnopenedPeer>>,
 }
 
 impl Producer {
@@ -431,7 +524,10 @@ impl Producer {
         flow: Flow,
         arena: PayloadArena,
         control: WriteHalf,
+        flow_slots: Option<usize>,
+        unopened: Option<Arc<UnopenedPeer>>,
     ) -> Self {
+        let flow_slots = flow_slots.unwrap_or_else(|| arena.slots_per_node());
         Self {
             exchange,
             flow,
@@ -439,6 +535,10 @@ impl Producer {
             control,
             next_chunk: 1,
             state: ProducerState::New,
+            flow_slots,
+            published: Vec::new(),
+            published_slots: 0,
+            unopened,
         }
     }
 
@@ -488,7 +588,7 @@ impl Producer {
                 "flow start was already sent".to_owned(),
             ));
         }
-        let publication = self.arena.reserve(payload_len)?;
+        let publication = self.reserve(payload_len)?;
         Ok(PendingStart { producer: self, publication })
     }
 
@@ -501,8 +601,84 @@ impl Producer {
                 "flow data requires an open flow".to_owned(),
             ));
         }
-        let publication = self.arena.reserve(payload_len)?;
+        let publication = self.reserve(payload_len)?;
         Ok(PendingData { producer: self, publication })
+    }
+
+    fn required_slots(
+        &self,
+        len: usize,
+    ) -> Result<usize> {
+        flow_slots_for(len, self.flow_slots, self.arena.slot_size())
+    }
+
+    fn reserve(
+        &mut self,
+        len: usize,
+    ) -> Result<Publication> {
+        self.control.exchange_write_status()?;
+        let count = self.required_slots(len)?;
+        if self.published_slots + count > self.flow_slots {
+            self.published.retain(|descriptor| self.arena.retains(*descriptor));
+            self.published_slots =
+                self.published.iter().map(|d| d.slot_count() as usize).sum();
+        }
+        if self.published_slots + count > self.flow_slots {
+            return Err(Error::PayloadFull { requested_slots: count });
+        }
+        self.arena.reserve(len)
+    }
+
+    fn credit_ready(
+        &self,
+        len: usize,
+    ) -> Result<bool> {
+        self.control.exchange_write_status()?;
+        let count = self.required_slots(len)?;
+        if self.published_slots + count > self.flow_slots {
+            let mut remaining = self.flow_slots - count;
+            for descriptor in &self.published {
+                if self.arena.retains(*descriptor) {
+                    let Some(left) =
+                        remaining.checked_sub(descriptor.slot_count() as usize)
+                    else {
+                        return Ok(false);
+                    };
+                    remaining = left;
+                }
+            }
+        }
+        self.arena.is_available(len)
+    }
+
+    fn publish(
+        &mut self,
+        publication: Publication,
+        descriptor: ChunkDescriptor,
+        event: ControlEvent,
+    ) -> Result<()> {
+        publication.bind(self.exchange, self.flow);
+        publication.make_live();
+        self.send(event)?;
+        publication.mark_published();
+        self.published_slots += descriptor.slot_count() as usize;
+        self.published.push(descriptor);
+
+        // Either the departing reader saw the committed descriptor while
+        // draining, or this check sees its close and returns the unread extent.
+        if matches!(self.control.exchange_write_status(), Err(Error::PeerGone))
+        {
+            self.discard_unread();
+        }
+        self.next_chunk += 1;
+        Ok(())
+    }
+
+    fn discard_unread(&mut self) {
+        for descriptor in self.published.drain(..) {
+            self.arena.discard(descriptor);
+        }
+        self.published_slots = 0;
     }
 
     fn commit_start(
@@ -510,14 +686,15 @@ impl Producer {
         publication: Publication,
     ) -> Result<ChunkDescriptor> {
         let descriptor = self.descriptor(&publication);
-        publication.make_live();
-        self.send(ControlEvent::Start {
-            exchange: self.exchange,
-            flow: self.flow,
-            metadata: Some(descriptor),
-        })?;
-        publication.mark_published();
-        self.next_chunk += 1;
+        self.publish(
+            publication,
+            descriptor,
+            ControlEvent::Start {
+                exchange: self.exchange,
+                flow: self.flow,
+                metadata: Some(descriptor),
+            },
+        )?;
         self.state = ProducerState::Open;
         Ok(descriptor)
     }
@@ -527,10 +704,7 @@ impl Producer {
         publication: Publication,
     ) -> Result<ChunkDescriptor> {
         let descriptor = self.descriptor(&publication);
-        publication.make_live();
-        self.send(ControlEvent::Data(descriptor))?;
-        publication.mark_published();
-        self.next_chunk += 1;
+        self.publish(publication, descriptor, ControlEvent::Data(descriptor))?;
         Ok(descriptor)
     }
 
@@ -556,12 +730,8 @@ impl Producer {
         if self.state == ProducerState::Terminal {
             return Err(Error::Closed);
         }
-        self.send(ControlEvent::Reset {
-            exchange: self.exchange,
-            flow: self.flow,
-            code,
-        })?;
-        self.control.finish()?;
+        self.control.reset_exchange(code.get())?;
+        self.discard_unread();
         self.state = ProducerState::Terminal;
         Ok(())
     }
@@ -596,6 +766,28 @@ impl Producer {
             arena_kind,
             owner_node,
         )
+    }
+}
+
+impl Drop for Producer {
+    fn drop(&mut self) {
+        if self.published.is_empty() {
+            return;
+        }
+        if self.state != ProducerState::Terminal {
+            self.control.reset();
+            self.discard_unread();
+        } else if matches!(
+            self.control.exchange_write_status(),
+            Err(Error::PeerGone)
+        ) {
+            self.discard_unread();
+        } else if let Some(unopened) = &self.unopened
+            && unopened.control.peer_is_unclaimed()
+        {
+            *lock_unpoisoned(&unopened.unread) =
+                std::mem::take(&mut self.published);
+        }
     }
 }
 
@@ -696,6 +888,7 @@ struct Consumer {
     control: ReadHalf,
     next_chunk: u64,
     state: ConsumerState,
+    _unopened: Option<Arc<UnopenedPeer>>,
 }
 
 impl Consumer {
@@ -704,6 +897,7 @@ impl Consumer {
         flow: Flow,
         arena: PayloadArena,
         control: ReadHalf,
+        unopened: Option<Arc<UnopenedPeer>>,
     ) -> Self {
         Self {
             exchange,
@@ -712,6 +906,7 @@ impl Consumer {
             control,
             next_chunk: 1,
             state: ConsumerState::New,
+            _unopened: unopened,
         }
     }
 
@@ -724,7 +919,9 @@ impl Consumer {
             return Err(Error::Closed);
         }
         let mut frame = [0_u8; CONTROL_FRAME_BYTES];
-        self.control.try_read_exact(&mut frame)?;
+        if let Err(error) = self.control.try_read_exact(&mut frame) {
+            return self.read_error(error);
+        }
         let event = ControlEvent::decode(&frame)
             .map_err(|reason| Error::Malformed(reason.to_owned()))?;
         if event.exchange() != self.exchange || event.flow() != self.flow {
@@ -738,15 +935,21 @@ impl Consumer {
             {
                 let metadata = metadata
                     .map(|descriptor| self.take_chunk(descriptor))
-                    .transpose()?;
+                    .transpose();
+                let metadata = match metadata {
+                    Ok(metadata) => metadata,
+                    Err(error) => return self.read_error(error),
+                };
                 self.state = ConsumerState::Open;
                 Ok(FlowEvent::Start { metadata })
             }
             ControlEvent::Data(descriptor)
                 if self.state == ConsumerState::Open =>
             {
-                let chunk = self.take_chunk(descriptor)?;
-                Ok(FlowEvent::Data(chunk))
+                match self.take_chunk(descriptor) {
+                    Ok(chunk) => Ok(FlowEvent::Data(chunk)),
+                    Err(error) => self.read_error(error),
+                }
             }
             ControlEvent::Fin { .. } if self.state == ConsumerState::Open => {
                 self.state = ConsumerState::Terminal;
@@ -759,6 +962,44 @@ impl Consumer {
             _ => Err(Error::Malformed(
                 "control event violates the flow lifecycle".to_owned(),
             )),
+        }
+    }
+
+    fn read_error(
+        &mut self,
+        error: Error,
+    ) -> Result<FlowEvent> {
+        if let Some(code) = self.control.exchange_reset_code()? {
+            self.state = ConsumerState::Terminal;
+            return Ok(FlowEvent::Reset(ResetCode::new(code)));
+        }
+        Err(error)
+    }
+
+    fn cancel(&mut self) {
+        if self.state == ConsumerState::Terminal {
+            return;
+        }
+        self.state = ConsumerState::Terminal;
+        self.control.stop_reading();
+        if let Ok(node) = self.control.exchange_peer_node() {
+            self.arena.notify_peer(node);
+        }
+        let mut frame = [0; CONTROL_FRAME_BYTES];
+        while self.control.try_drain_exchange_frame(&mut frame).is_ok() {
+            let Ok(event) = ControlEvent::decode(&frame) else { continue };
+            if event.exchange() != self.exchange || event.flow() != self.flow {
+                continue;
+            }
+            match event {
+                ControlEvent::Start { metadata: Some(descriptor), .. }
+                | ControlEvent::Data(descriptor) => {
+                    // Claim with the same generation as a regular read. A
+                    // concurrent writer abort can win, but a held chunk cannot.
+                    drop(self.arena.read(descriptor));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -776,6 +1017,12 @@ impl Consumer {
         let chunk = self.arena.read(descriptor)?;
         self.next_chunk += 1;
         Ok(chunk)
+    }
+}
+
+impl Drop for Consumer {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -844,27 +1091,38 @@ impl Sender {
         self.0.flow
     }
 
-    /// Physical geometry of this sender's actual directional payload arena.
+    /// Effective chunk geometry, including this direction's credit limit.
     pub fn chunk_geometry(&self) -> ChunkGeometry {
-        self.0.arena.chunk_geometry()
+        ChunkGeometry::new(self.0.arena.slot_size(), self.0.flow_slots)
+            .expect("opened exchange has nonzero flow credit")
     }
 
-    /// Plan a known payload for this direction's actual arena geometry.
+    /// Plan a known payload using the default chunk target.
     pub fn plan_chunks(
         &self,
         data_bytes: usize,
     ) -> Result<ChunkPlan> {
-        self.0.arena.plan_chunks(data_bytes)
+        self.chunk_geometry()
+            .plan_for_target(data_bytes, DEFAULT_CHUNK_BYTES)
+            .ok_or_else(|| {
+                Error::Malformed(
+                    "payload chunk plan exceeds flow credit".to_owned(),
+                )
+            })
     }
 
-    /// Plan this direction with a runtime-selected slot count.
+    /// Plan a known payload with a runtime-selected number of slots per chunk.
     pub fn plan_chunks_with(
         &self,
         data_bytes: usize,
         slots_per_chunk: usize,
     ) -> Result<ChunkPlan> {
-        self.0.arena.plan_chunks_with(data_bytes, slots_per_chunk)
+        self.chunk_geometry().plan(data_bytes, slots_per_chunk)
+            .ok_or_else(|| Error::Malformed(format!(
+                "chunk slot count {slots_per_chunk} exceeds exchange flow credit {}", self.0.flow_slots,
+            )))
     }
+
     pub fn start(
         &mut self,
         metadata: Option<&[u8]>,
@@ -908,6 +1166,12 @@ impl Sender {
         self.0.reset(code)
     }
 
+    /// Observe cancellation while waiting on application work instead of a
+    /// control write or a payload reservation. Clean FIN is not cancellation.
+    pub async fn peer_closed(&mut self) -> Result<()> {
+        self.0.control.peer_closed().await
+    }
+
     pub fn wait_writable(&self) -> Result<()> {
         self.0.control.wait_writable_exact(CONTROL_FRAME_BYTES)
     }
@@ -919,32 +1183,32 @@ impl Sender {
         self.0.control.poll_writable_exact(CONTROL_FRAME_BYTES, cx)
     }
 
-    /// Wait for both one control frame and the payload credit needed by the
-    /// next publication. Use zero for FIN, RESET, or a start without metadata.
+    /// Wait for one control frame and any payload credit needed by the next
+    /// publication. Use zero for FIN or a start without metadata.
     pub fn wait_ready(
         &self,
         payload_len: usize,
     ) -> Result<()> {
-        self.0.control.wait_writable_exact(CONTROL_FRAME_BYTES)?;
         if payload_len != 0 {
-            self.0.arena.wait_available(payload_len)?;
+            self.0.arena.wait_credit(|| self.0.credit_ready(payload_len))?;
         }
-        Ok(())
+        self.0.control.wait_writable_exact(CONTROL_FRAME_BYTES)?;
+        self.0.control.exchange_write_status()
     }
 
     /// Task readiness for the same combined control and payload capacity.
-    /// Both sources register before `Pending` is returned.
     pub fn poll_ready(
         &self,
         payload_len: usize,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
+        self.0.control.exchange_write_status()?;
         let control =
             self.0.control.poll_writable_exact(CONTROL_FRAME_BYTES, cx);
         let payload = if payload_len == 0 {
             std::task::Poll::Ready(Ok(()))
         } else {
-            self.0.arena.poll_available(payload_len, cx)
+            self.0.arena.poll_credit(|| self.0.credit_ready(payload_len), cx)
         };
         match (control, payload) {
             (std::task::Poll::Ready(Err(error)), _)
@@ -954,7 +1218,7 @@ impl Sender {
             (
                 std::task::Poll::Ready(Ok(())),
                 std::task::Poll::Ready(Ok(())),
-            ) => std::task::Poll::Ready(Ok(())),
+            ) => std::task::Poll::Ready(self.0.control.exchange_write_status()),
             _ => std::task::Poll::Pending,
         }
     }
@@ -972,6 +1236,12 @@ impl Receiver {
         self.0.flow
     }
 
+    /// Stop this direction and return published chunks that were not taken.
+    /// Previously returned chunks keep their own credit until dropped.
+    pub fn cancel(&mut self) {
+        self.0.cancel();
+    }
+
     pub fn try_next(&mut self) -> Result<FlowEvent> {
         self.0.next()
     }
@@ -984,6 +1254,9 @@ impl Receiver {
     }
 
     pub fn wait_readable(&self) -> Result<()> {
+        if self.0.state == ConsumerState::Terminal {
+            return Err(Error::Closed);
+        }
         self.0.control.wait_readable()
     }
 
@@ -991,6 +1264,9 @@ impl Receiver {
         &self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<()>> {
+        if self.0.state == ConsumerState::Terminal {
+            return std::task::Poll::Ready(Err(Error::Closed));
+        }
         self.0.control.poll_readable(cx)
     }
 }
@@ -1009,6 +1285,241 @@ mod tests {
             ),
         )
         .expect("exchanges")
+    }
+
+    fn take_data(receiver: &mut Receiver) -> bytes::Bytes {
+        let Ok(FlowEvent::Data(chunk)) = receiver.try_next() else {
+            panic!("expected data chunk");
+        };
+        bytes::Bytes::from_owner(chunk)
+    }
+
+    #[test]
+    fn flow_credit_counts_slots_until_the_last_bytes_slice_drops() {
+        let exchanges = exchanges().with_flow_slots(2).unwrap();
+        let (mut a, ticket) = exchanges.create().unwrap();
+        let mut b = exchanges.open_peer(ticket).unwrap();
+        let (mut sibling, _) = exchanges.create().unwrap();
+        a.sender().start(None).unwrap();
+        b.sender().start(None).unwrap();
+        sibling.sender().start(None).unwrap();
+        assert!(matches!(b.receiver().try_next(), Ok(FlowEvent::Start { .. })));
+        a.sender().data(&[7; 65]).unwrap();
+        let body = take_data(b.receiver());
+        let slice = body.slice(1..2);
+        drop(body);
+
+        assert!(matches!(
+            a.sender().data(b"blocked"),
+            Err(Error::PayloadFull { requested_slots: 1 })
+        ));
+        assert!(matches!(
+            a.sender().data(&[0; 129]),
+            Err(Error::PayloadTooLarge { capacity: 128, .. })
+        ));
+        assert!(a.sender().chunk_geometry().chunk_bytes(3).is_none());
+        assert!(matches!(
+            exchanges.create_payload_available(129),
+            Err(Error::PayloadTooLarge { .. })
+        ));
+        sibling.sender().data(b"sibling can send").unwrap();
+        b.sender().data(b"early response").unwrap();
+
+        assert_eq!(&slice[..], &[7]);
+        drop(slice);
+        a.sender().data(&[8; 65]).unwrap();
+        assert_eq!(&take_data(b.receiver())[..], &[8; 65]);
+    }
+
+    #[test]
+    fn reset_bypasses_a_full_ring_and_reclaims_only_unread_chunks() {
+        let exchanges = Exchanges::open(
+            Arc::new(Fleet::join("exchange-reset-full", 2).unwrap()),
+            Incarnation::new(1),
+            ExchangeSpec::new(
+                StreamSpec::new(224, 8, CONTROL_FRAME_BYTES),
+                PayloadArenaSpec::new(225, 2, 64),
+            ),
+        )
+        .unwrap();
+        let (mut a, ticket) = exchanges.create().unwrap();
+        let mut b = exchanges.open_peer(ticket).unwrap();
+        a.sender().start(None).unwrap();
+        assert!(matches!(b.receiver().try_next(), Ok(FlowEvent::Start { .. })));
+        a.sender().data(&[1; 64]).unwrap();
+        let held = take_data(b.receiver());
+        a.sender().data(&[2; 64]).unwrap();
+        assert!(matches!(a.sender().finish(), Err(Error::WouldBlock)));
+        a.sender().reset(ResetCode::new(0)).unwrap();
+        assert!(
+            matches!(b.receiver().try_next(), Ok(FlowEvent::Reset(code)) if code.get() == 0)
+        );
+
+        let (mut next, ticket) = exchanges.create().unwrap();
+        let mut peer = exchanges.open_peer(ticket).unwrap();
+        next.sender().start(Some(&[3; 64])).unwrap();
+        assert!(matches!(
+            peer.receiver().try_next(),
+            Ok(FlowEvent::Start { .. })
+        ));
+        assert_eq!(&held[..], &[1; 64]);
+    }
+
+    #[test]
+    fn receiver_cancel_drains_a_finished_sender_without_invalidating_held_data()
+    {
+        let exchanges = exchanges();
+        let (a, ticket) = exchanges.create().unwrap();
+        let (mut sender, _reverse) = a.split();
+        let mut b = exchanges.open_peer(ticket).unwrap();
+        sender.start(None).unwrap();
+        assert!(matches!(b.receiver().try_next(), Ok(FlowEvent::Start { .. })));
+        sender.data(&[1; 64]).unwrap();
+        let held = take_data(b.receiver());
+        sender.data(&[2; 448]).unwrap();
+        sender.finish().unwrap();
+        drop(sender);
+
+        b.receiver().cancel();
+        assert!(matches!(b.receiver().try_next(), Err(Error::Closed)));
+        let (mut next, _) = exchanges.create().unwrap();
+        next.sender().start(Some(&[3; 448])).unwrap();
+        assert_eq!(&held[..], &[1; 64]);
+    }
+
+    #[test]
+    fn finish_keeps_a_ticket_open_until_the_last_local_half_drops() {
+        let exchanges = exchanges();
+        let (a, ticket) = exchanges.create().unwrap();
+        let (mut sender, reverse) = a.split();
+        sender.start(Some(&[1; 512])).unwrap();
+        sender.finish().unwrap();
+        drop(sender);
+        let mut late_peer = exchanges.open_peer(ticket).unwrap();
+        assert!(
+            matches!(late_peer.receiver().try_next(), Ok(FlowEvent::Start { metadata: Some(data) }) if data.as_slice() == [1; 512])
+        );
+        drop(late_peer);
+        drop(reverse);
+
+        let (mut abandoned, ticket) = exchanges.create().unwrap();
+        abandoned.sender().start(Some(&[2; 512])).unwrap();
+        abandoned.sender().finish().unwrap();
+        drop(abandoned);
+        assert!(matches!(exchanges.open_peer(ticket), Err(Error::Stale(_))));
+        assert!(exchanges.create_payload_available(512).unwrap());
+    }
+
+    #[test]
+    fn cancellation_racing_publication_does_not_lose_credit() {
+        let exchanges = exchanges();
+        for _ in 0..24 {
+            let (a, ticket) = exchanges.create().unwrap();
+            let b = exchanges.open_peer(ticket).unwrap();
+            let (mut sender, _reverse) = a.split();
+            let (_reverse, mut receiver) = b.split();
+            sender.start(None).unwrap();
+
+            let ready = std::sync::Barrier::new(2);
+            let ready_ref = &ready;
+            std::thread::scope(|scope| {
+                let mut pending = sender.reserve_data(512).unwrap();
+                pending.fill(7);
+                let cancelled = scope.spawn(move || {
+                    ready_ref.wait();
+                    receiver.cancel();
+                });
+                ready.wait();
+                assert!(matches!(
+                    pending.commit(),
+                    Ok(_) | Err(Error::PeerGone)
+                ));
+                cancelled.join().unwrap();
+                assert!(exchanges.create_payload_available(512).unwrap());
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn a_credit_wait_wakes_on_the_last_bytes_drop_or_reader_cancel() {
+        use std::future::poll_fn;
+
+        let exchanges = exchanges().with_flow_slots(1).unwrap();
+        let (mut a, ticket) = exchanges.create().unwrap();
+        let mut b = exchanges.open_peer(ticket).unwrap();
+        a.sender().start(None).unwrap();
+        assert!(matches!(b.receiver().try_next(), Ok(FlowEvent::Start { .. })));
+
+        for cancel in [false, true] {
+            a.sender().data(b"held").unwrap();
+            let held = take_data(b.receiver());
+            let (armed, registered) = tokio::sync::oneshot::channel();
+            let mut armed = Some(armed);
+            let sender = a.sender();
+            let ready = async {
+                poll_fn(|cx| {
+                    let result = sender.poll_ready(1, cx);
+                    if let Some(armed) = armed.take() {
+                        assert!(result.is_pending());
+                        armed.send(()).unwrap();
+                    }
+                    result
+                })
+                .await
+            };
+            let release = async {
+                registered.await.unwrap();
+                if cancel {
+                    b.receiver().cancel();
+                    Some(held)
+                } else {
+                    drop(held);
+                    None
+                }
+            };
+            let (result, still_held) =
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(ready, release)
+                })
+                .await
+                .expect("writer must wake");
+            if cancel {
+                assert!(matches!(result, Err(Error::PeerGone)));
+                assert_eq!(&still_held.unwrap()[..], b"held");
+            } else {
+                assert!(matches!(result, Ok(())));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_a_sender_waiting_on_application_work() {
+        let exchanges = exchanges();
+        let (mut a, ticket) = exchanges.create().unwrap();
+        let mut b = exchanges.open_peer(ticket).unwrap();
+        let (armed, registered) = tokio::sync::oneshot::channel();
+        let mut armed = Some(armed);
+        let mut closed = std::pin::pin!(a.sender().peer_closed());
+        let wait = std::future::poll_fn(|cx| {
+            let result = std::future::Future::poll(closed.as_mut(), cx);
+            if let Some(armed) = armed.take() {
+                assert!(result.is_pending());
+                armed.send(()).unwrap();
+            }
+            result
+        });
+        let cancel = async {
+            registered.await.unwrap();
+            b.receiver().cancel();
+            assert!(matches!(b.receiver().wait_readable(), Err(Error::Closed)));
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(wait, cancel)
+            })
+            .await
+            .expect("writer must wake");
+        result.unwrap();
     }
 
     #[test]

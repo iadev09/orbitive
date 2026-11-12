@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -9,18 +9,30 @@ use orbit_core::Fleet;
 #[cfg(unix)]
 use orbit_core::shm::{ShmRegion, ring_segment_name};
 
-use super::{ChunkDescriptor, ChunkGeometry, ChunkPlan, DEFAULT_CHUNK_BYTES};
+use super::{
+    ChunkDescriptor, ChunkGeometry, ChunkPlan, DEFAULT_CHUNK_BYTES, ExchangeId,
+    Flow,
+};
 use crate::wake::{Doorstep, Driver};
 use crate::{Error, Incarnation, Result, lock_unpoisoned};
 
 const MAGIC: u32 = 0x4f_50_41_59; // "OPAY"
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
 
-const SLOT_FREE: u8 = 0;
-const SLOT_RESERVED: u8 = 1;
-const SLOT_LIVE: u8 = 2;
-const SLOT_READING: u8 = 3;
-const SLOT_RECLAIMING: u8 = 4;
+const SLOT_FREE: u64 = 0;
+const SLOT_RESERVED: u64 = 1;
+const SLOT_LIVE: u64 = 2;
+const SLOT_READING: u64 = 3;
+const SLOT_RECLAIMING: u64 = 4;
+const STATE_BITS: u32 = 3;
+const STATE_MASK: u64 = (1 << STATE_BITS) - 1;
+
+fn tagged(
+    generation: u64,
+    state: u64,
+) -> u64 {
+    (generation << STATE_BITS) | state
+}
 
 /// Geometry and SHM identity of one fleet-wide payload arena.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -162,11 +174,11 @@ struct CreditWord {
 
 #[repr(C, align(8))]
 struct SlotMeta {
-    state: AtomicU8,
-    _reserved: AtomicU8,
-    reader_node: std::sync::atomic::AtomicU16,
-    allocation_first: AtomicU64,
-    generation: AtomicU64,
+    flow: AtomicU16,
+    reader_node: AtomicU16,
+    extent_slots: AtomicU32,
+    exchange: AtomicU64,
+    allocation: AtomicU64,
     producer_incarnation: AtomicU64,
     reader_incarnation: AtomicU64,
 }
@@ -327,29 +339,36 @@ impl Arena {
                         [lane_start + local..lane_start + local + count]
                         .iter()
                         .all(|slot| {
-                            slot.state.load(Ordering::Acquire) == SLOT_FREE
+                            slot.allocation.load(Ordering::Acquire) & STATE_MASK
+                                == SLOT_FREE
                         })
             })
             .ok_or(Error::PayloadFull { requested_slots: count })?;
         let first = lane_start + candidate;
-        for slot in &self.metadata()[first..first + count] {
-            slot.state.store(SLOT_RESERVED, Ordering::Relaxed);
-        }
-        let mut generation =
+        let generation =
             self.header().next_generation.fetch_add(1, Ordering::Relaxed);
-        if generation == 0 {
-            generation =
-                self.header().next_generation.fetch_add(1, Ordering::Relaxed);
+        if generation > (u64::MAX >> STATE_BITS) {
+            return Err(Error::Malformed(
+                "payload allocation generations exhausted".to_owned(),
+            ));
         }
-        for slot in &self.metadata()[first..first + count] {
-            slot.allocation_first.store(first as u64, Ordering::Relaxed);
-            slot.generation.store(generation, Ordering::Relaxed);
+        let slots = &self.metadata()[first..first + count];
+        // Publish the extent head first so a dead producer's partial
+        // reservation can be recovered. Only an exact generation can free it.
+        for (index, slot) in slots.iter().enumerate() {
+            slot.extent_slots.store(
+                if index == 0 { count as u32 } else { 0 },
+                Ordering::Relaxed,
+            );
+            slot.exchange.store(0, Ordering::Relaxed);
+            slot.flow.store(0, Ordering::Relaxed);
             slot.producer_incarnation
                 .store(self.incarnation.get(), Ordering::Relaxed);
             slot.reader_node.store(u16::MAX, Ordering::Relaxed);
             slot.reader_incarnation.store(0, Ordering::Relaxed);
+            slot.allocation
+                .store(tagged(generation, SLOT_RESERVED), Ordering::Release);
         }
-        self.metadata()[first].state.store(SLOT_RESERVED, Ordering::Release);
         *hint = (candidate + count) & (self.geometry.slots_per_node - 1);
         Ok(Publication {
             arena: Arc::clone(self),
@@ -366,20 +385,66 @@ impl Arena {
         first: usize,
         count: usize,
         generation: u64,
+        state: u64,
     ) {
+        if self.claim_reclaim(first, generation, state) {
+            self.free(first, count, generation);
+        }
+    }
+
+    fn claim_reclaim(
+        &self,
+        first: usize,
+        generation: u64,
+        state: u64,
+    ) -> bool {
+        self.metadata()[first]
+            .allocation
+            .compare_exchange(
+                tagged(generation, state),
+                tagged(generation, SLOT_RECLAIMING),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn free(
+        &self,
+        first: usize,
+        count: usize,
+        generation: u64,
+    ) {
+        // A recovery pass may finish a release interrupted by process death.
+        // Exact generation/state CASes also make overlapping releases safe.
         let slots = &self.metadata()[first..first + count];
-        if slots
-            .iter()
-            .any(|slot| slot.generation.load(Ordering::Acquire) != generation)
+        for slot in &slots[1..] {
+            let _ = slot.allocation.compare_exchange(
+                tagged(generation, SLOT_RESERVED),
+                tagged(generation, SLOT_FREE),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        if slots[0]
+            .allocation
+            .compare_exchange(
+                tagged(generation, SLOT_RECLAIMING),
+                tagged(generation, SLOT_FREE),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
         {
-            return;
+            self.notify_credit(first / self.geometry.slots_per_node);
         }
-        for slot in slots.iter().skip(1) {
-            slot.state.store(SLOT_FREE, Ordering::Relaxed);
-        }
-        slots[0].state.store(SLOT_FREE, Ordering::Release);
-        let owner = first / self.geometry.slots_per_node;
-        let credit = &self.credits()[owner];
+    }
+
+    fn notify_credit(
+        &self,
+        node: usize,
+    ) {
+        let credit = &self.credits()[node];
         credit.generation.fetch_add(1, Ordering::SeqCst);
         if credit.waiters.load(Ordering::SeqCst) > 0 {
             crate::wake_on(&credit.generation);
@@ -414,7 +479,10 @@ impl Arena {
         (0..=self.geometry.slots_per_node - count).any(|local| {
             self.metadata()[lane_start + local..lane_start + local + count]
                 .iter()
-                .all(|slot| slot.state.load(Ordering::Acquire) == SLOT_FREE)
+                .all(|slot| {
+                    slot.allocation.load(Ordering::Acquire) & STATE_MASK
+                        == SLOT_FREE
+                })
         })
     }
 
@@ -422,18 +490,27 @@ impl Arena {
         &self,
         count: usize,
     ) -> Result<()> {
+        self.wait_credit(|| Ok(self.has_run(count)))
+    }
+
+    fn wait_credit(
+        &self,
+        ready: impl Fn() -> Result<bool>,
+    ) -> Result<()> {
         let credit = self.local_credit();
         loop {
-            if self.has_run(count) {
+            if ready()? {
                 return Ok(());
             }
             credit.waiters.fetch_add(1, Ordering::SeqCst);
             let seen = credit.generation.load(Ordering::SeqCst);
-            let outcome = if self.has_run(count) {
-                Ok(())
-            } else {
-                crate::wait_on(&credit.generation, seen)
-            };
+            let outcome = ready().and_then(|ready| {
+                if ready {
+                    Ok(())
+                } else {
+                    crate::wait_on(&credit.generation, seen)
+                }
+            });
             credit.waiters.fetch_sub(1, Ordering::SeqCst);
             outcome?;
         }
@@ -444,7 +521,15 @@ impl Arena {
         count: usize,
         cx: &mut Context<'_>,
     ) -> Poll<Result<()>> {
-        if self.has_run(count) {
+        self.poll_credit(|| Ok(self.has_run(count)), cx)
+    }
+
+    fn poll_credit(
+        self: &Arc<Self>,
+        ready: impl Fn() -> Result<bool>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
+        if ready()? {
             return Poll::Ready(Ok(()));
         }
         {
@@ -453,10 +538,8 @@ impl Arena {
                 wakers.push(cx.waker().clone());
             }
         }
-        if let Err(error) = self.ensure_driver() {
-            return Poll::Ready(Err(error));
-        }
-        if self.has_run(count) { Poll::Ready(Ok(())) } else { Poll::Pending }
+        self.ensure_driver()?;
+        if ready()? { Poll::Ready(Ok(())) } else { Poll::Pending }
     }
 
     fn ensure_driver(self: &Arc<Self>) -> Result<()> {
@@ -470,62 +553,55 @@ impl Arena {
         Ok(())
     }
 
-    fn extent_count(
-        &self,
-        first: usize,
-        generation: u64,
-    ) -> usize {
-        let lane_end = (first / self.geometry.slots_per_node + 1)
-            * self.geometry.slots_per_node;
-        self.metadata()[first..lane_end]
-            .iter()
-            .take_while(|slot| {
-                slot.allocation_first.load(Ordering::Acquire) as usize == first
-                    && slot.generation.load(Ordering::Acquire) == generation
-            })
-            .count()
-    }
-
     fn node_dead(
         &self,
         node: u16,
         incarnation: Incarnation,
+        dead_flows: &HashSet<(u64, u16)>,
     ) {
         let metadata = self.metadata();
         for (first, slot) in metadata.iter().enumerate() {
-            let state = slot.state.load(Ordering::Acquire);
+            let allocation = slot.allocation.load(Ordering::Acquire);
+            let state = allocation & STATE_MASK;
+            let generation = allocation >> STATE_BITS;
             let producer_node = first / self.geometry.slots_per_node;
-            let allocation_start =
-                slot.allocation_first.load(Ordering::Acquire) as usize == first;
-            let abandoned_publication = allocation_start
-                && matches!(state, SLOT_RESERVED | SLOT_LIVE)
-                && producer_node == usize::from(node)
-                && slot.producer_incarnation.load(Ordering::Acquire)
-                    == incarnation.get();
+            let count = slot.extent_slots.load(Ordering::Acquire) as usize;
+            if count == 0
+                || count
+                    > self.geometry.slots_per_node
+                        - first % self.geometry.slots_per_node
+            {
+                continue;
+            }
+            let abandoned_publication =
+                matches!(state, SLOT_RESERVED | SLOT_LIVE)
+                    && producer_node == usize::from(node)
+                    && slot.producer_incarnation.load(Ordering::Acquire)
+                        == incarnation.get();
             let abandoned_read = state == SLOT_READING
                 && slot.reader_node.load(Ordering::Acquire) == node
                 && slot.reader_incarnation.load(Ordering::Acquire)
                     == incarnation.get();
-            if !abandoned_publication && !abandoned_read {
-                continue;
-            }
-            if slot
-                .state
-                .compare_exchange(
-                    state,
-                    SLOT_RECLAIMING,
-                    Ordering::SeqCst,
-                    Ordering::Acquire,
-                )
-                .is_err()
+            // A descriptor may still be queued, or the reader may have
+            // died between claiming it and recording its exact incarnation.
+            let lost_reader = (state == SLOT_LIVE
+                || (state == SLOT_READING
+                    && slot.reader_node.load(Ordering::Acquire) == u16::MAX))
+                && dead_flows.contains(&(
+                    slot.exchange.load(Ordering::Acquire),
+                    slot.flow.load(Ordering::Acquire),
+                ));
+            if state == SLOT_RECLAIMING
+                || ((abandoned_publication || abandoned_read || lost_reader)
+                    && self.claim_reclaim(first, generation, state))
             {
-                continue;
+                self.free(first, count, generation);
             }
-            let generation = slot.generation.load(Ordering::Acquire);
-            let count = self.extent_count(first, generation);
-            if count != 0 {
-                self.release(first, count, generation);
-            }
+        }
+        // A writer can be parked on credit held by another exchange in its
+        // lane when this peer dies. It must still observe the control close.
+        for node in 0..self.credits().len() {
+            self.notify_credit(node);
         }
     }
 }
@@ -672,7 +748,7 @@ impl PayloadArena {
         let mut hint = lock_unpoisoned(&self.arena.allocation);
         *hint = 0;
         for slot in self.arena.metadata() {
-            slot.state.store(SLOT_FREE, Ordering::Release);
+            slot.allocation.store(SLOT_FREE, Ordering::Release);
         }
         for credit in self.arena.credits() {
             credit.generation.fetch_add(1, Ordering::SeqCst);
@@ -689,7 +765,16 @@ impl PayloadArena {
         node: orbit_core::NodeId,
         incarnation: Incarnation,
     ) {
-        self.arena.node_dead(node.get(), incarnation);
+        self.node_dead_with_flows(node, incarnation, &HashSet::new());
+    }
+
+    pub(crate) fn node_dead_with_flows(
+        &self,
+        node: orbit_core::NodeId,
+        incarnation: Incarnation,
+        dead_flows: &HashSet<(u64, u16)>,
+    ) {
+        self.arena.node_dead(node.get(), incarnation, dead_flows);
     }
 
     /// Remove the arena's SHM name. Existing mappings remain valid.
@@ -726,46 +811,20 @@ impl PayloadArena {
         &self,
         descriptor: ChunkDescriptor,
     ) -> Result<PayloadChunk> {
-        if descriptor.arena_kind() != self.kind() {
-            return Err(Error::Malformed(format!(
-                "chunk names payload arena kind {}, opened kind is {}",
-                descriptor.arena_kind(),
-                self.kind()
-            )));
-        }
-        let owner = usize::from(descriptor.owner_node());
-        let first_local = descriptor.first_slot() as usize;
-        let count = descriptor.slot_count() as usize;
+        let (first, count, generation) = self.extent(descriptor)?;
         let len = descriptor.payload_len() as usize;
-        if owner
-            >= self.arena.geometry.total_slots
-                / self.arena.geometry.slots_per_node
-            || count == 0
-            || first_local + count > self.arena.geometry.slots_per_node
-            || len == 0
-            || len > count * self.arena.geometry.slot_size
-            || (count > 1 && len <= (count - 1) * self.arena.geometry.slot_size)
-        {
-            return Err(Error::Malformed(
-                "chunk descriptor is outside its payload lane".to_owned(),
-            ));
-        }
-        let first = owner * self.arena.geometry.slots_per_node + first_local;
         let slots = &self.arena.metadata()[first..first + count];
-        let generation = descriptor.allocation_generation();
-        if slots
-            .iter()
-            .any(|slot| slot.generation.load(Ordering::Acquire) != generation)
-            || slots
-                .iter()
-                .skip(1)
-                .any(|slot| slot.state.load(Ordering::Acquire) != SLOT_RESERVED)
+        if slots[0].extent_slots.load(Ordering::Acquire) != count as u32
+            || slots[1..].iter().any(|slot| {
+                slot.allocation.load(Ordering::Acquire)
+                    != tagged(generation, SLOT_RESERVED)
+            })
             || slots[0]
-                .state
+                .allocation
                 .compare_exchange(
-                    SLOT_LIVE,
-                    SLOT_READING,
-                    Ordering::Acquire,
+                    tagged(generation, SLOT_LIVE),
+                    tagged(generation, SLOT_READING),
+                    Ordering::AcqRel,
                     Ordering::Acquire,
                 )
                 .is_err()
@@ -786,6 +845,89 @@ impl PayloadArena {
             generation,
             descriptor,
         })
+    }
+
+    fn extent(
+        &self,
+        descriptor: ChunkDescriptor,
+    ) -> Result<(usize, usize, u64)> {
+        if descriptor.arena_kind() != self.kind() {
+            return Err(Error::Malformed(format!(
+                "chunk names payload arena kind {}, opened kind is {}",
+                descriptor.arena_kind(),
+                self.kind()
+            )));
+        }
+        let owner = usize::from(descriptor.owner_node());
+        let first_local = descriptor.first_slot() as usize;
+        let count = descriptor.slot_count() as usize;
+        let len = descriptor.payload_len() as usize;
+        let generation = descriptor.allocation_generation();
+        if owner
+            >= self.arena.geometry.total_slots
+                / self.arena.geometry.slots_per_node
+            || generation == 0
+            || generation > (u64::MAX >> STATE_BITS)
+            || count == 0
+            || first_local + count > self.arena.geometry.slots_per_node
+            || len == 0
+            || len > count * self.arena.geometry.slot_size
+            || (count > 1 && len <= (count - 1) * self.arena.geometry.slot_size)
+        {
+            return Err(Error::Malformed(
+                "chunk descriptor is outside its payload lane".to_owned(),
+            ));
+        }
+        Ok((owner * self.slots_per_node() + first_local, count, generation))
+    }
+
+    pub(crate) fn discard(
+        &self,
+        descriptor: ChunkDescriptor,
+    ) {
+        if let Ok((first, count, generation)) = self.extent(descriptor)
+            && self.arena.metadata()[first].extent_slots.load(Ordering::Acquire)
+                == count as u32
+        {
+            self.arena.release(first, count, generation, SLOT_LIVE);
+        }
+    }
+
+    pub(crate) fn retains(
+        &self,
+        descriptor: ChunkDescriptor,
+    ) -> bool {
+        let first = usize::from(descriptor.owner_node())
+            * self.slots_per_node()
+            + descriptor.first_slot() as usize;
+        let allocation =
+            self.arena.metadata()[first].allocation.load(Ordering::Acquire);
+        allocation >> STATE_BITS == descriptor.allocation_generation()
+            && allocation & STATE_MASK != SLOT_FREE
+    }
+
+    pub(crate) fn notify_peer(
+        &self,
+        node: u16,
+    ) {
+        if usize::from(node) < self.arena.credits().len() {
+            self.arena.notify_credit(usize::from(node));
+        }
+    }
+
+    pub(crate) fn wait_credit(
+        &self,
+        ready: impl Fn() -> Result<bool>,
+    ) -> Result<()> {
+        self.arena.wait_credit(ready)
+    }
+
+    pub(crate) fn poll_credit(
+        &self,
+        ready: impl Fn() -> Result<bool>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
+        self.arena.poll_credit(ready, cx)
     }
 }
 
@@ -848,23 +990,36 @@ impl Publication {
             for slot in &self.arena.metadata()
                 [self.first + count..self.first + self.count]
             {
-                slot.state.store(SLOT_FREE, Ordering::Release);
+                slot.allocation.store(
+                    tagged(self.generation, SLOT_FREE),
+                    Ordering::Release,
+                );
             }
+            self.arena.metadata()[self.first]
+                .extent_slots
+                .store(count as u32, Ordering::Release);
             self.count = count;
-            let credit = self.arena.local_credit();
-            credit.generation.fetch_add(1, Ordering::SeqCst);
-            if credit.waiters.load(Ordering::SeqCst) > 0 {
-                crate::wake_on(&credit.generation);
-            }
+            self.arena.notify_credit(usize::from(self.arena.node));
         }
         self.payload_len = payload_len;
         Ok(())
     }
 
+    pub(crate) fn bind(
+        &self,
+        exchange: ExchangeId,
+        flow: Flow,
+    ) {
+        let slot = &self.arena.metadata()[self.first];
+        slot.exchange
+            .store(exchange.stream_id().net_id().raw(), Ordering::Relaxed);
+        slot.flow.store(u16::from(flow.wire()), Ordering::Relaxed);
+    }
+
     pub(crate) fn make_live(&self) {
         self.arena.metadata()[self.first]
-            .state
-            .store(SLOT_LIVE, Ordering::Release);
+            .allocation
+            .store(tagged(self.generation, SLOT_LIVE), Ordering::Release);
     }
 
     pub(crate) fn mark_published(mut self) {
@@ -875,7 +1030,18 @@ impl Publication {
 impl Drop for Publication {
     fn drop(&mut self) {
         if !self.published {
-            self.arena.release(self.first, self.count, self.generation);
+            // A failed commit may already have marked the extent live.
+            if self.arena.claim_reclaim(
+                self.first,
+                self.generation,
+                SLOT_RESERVED,
+            ) || self.arena.claim_reclaim(
+                self.first,
+                self.generation,
+                SLOT_LIVE,
+            ) {
+                self.arena.free(self.first, self.count, self.generation);
+            }
         }
     }
 }
@@ -905,6 +1071,12 @@ impl PayloadChunk {
     }
 }
 
+impl AsRef<[u8]> for PayloadChunk {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
 impl Deref for PayloadChunk {
     type Target = [u8];
 
@@ -915,7 +1087,12 @@ impl Deref for PayloadChunk {
 
 impl Drop for PayloadChunk {
     fn drop(&mut self) {
-        self.arena.release(self.first, self.count, self.generation);
+        self.arena.release(
+            self.first,
+            self.count,
+            self.generation,
+            SLOT_READING,
+        );
     }
 }
 
