@@ -25,6 +25,9 @@ passed, and all application bytes remain in shared memory. With `tokio`, both
 the inbox and the attached stream use named Unix-datagram bells to wake the
 runtime directly. A bell carries one meaningless byte, never an application
 frame or stream payload; SHM remains authoritative and wakes may coalesce.
+A writer keeps one socket connected to each lane it has rung, so a ring does
+not name the lane again; a process therefore holds one descriptor for each
+lane it wakes.
 
 `LinkSegment::receiver(lane)` binds the one async receiver that owns a lane.
 Its `recv` checks SHM before arming the bell and checks the lane generation
