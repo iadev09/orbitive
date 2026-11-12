@@ -101,74 +101,11 @@ reads the key and reports its value and revision. The coordinator checks the
 highest published revision for replicated mode and the last arena generation
 for SHM mode. The run fails if any worker reads a different value or revision.
 
-### Reference run
-
-macOS arm64, 16 worker processes, three runs per mode. Each row reports the
-median across the runs. The read phases performed 80 million gets each.
-
-| Mode | Hit/s | CPU/hit | Miss/s | CPU/miss |
-| --- | ---: | ---: | ---: | ---: |
-| Replicated | 19.1 M | 767 ns | 28.3 M | 522 ns |
-| SHM | 133.1 M | 105 ns | 202.9 M | 72 ns |
-
-Each write phase completed 2,048 puts at an offered load of 2,048 puts/s.
-
-| Keys | Mode | CPU/put | Put p99 | All-peer visibility p99 |
-| --- | --- | ---: | ---: | ---: |
-| Distinct | Replicated | 479 µs | 2.76 ms | 4.07 ms |
-| Distinct | SHM | 185 µs | 1.86 ms | 1.86 ms |
-| Hot | Replicated | 462 µs | 2.43 ms | |
-| Hot | SHM | 197 µs | 1.58 ms | |
-
-Every distinct-key write was visible on all 15 peers. Every hot-key run
-converged on the final value and revision on all 16 workers. The replicated
-runs recorded zero ring loss. Replicated miss throughput ranged from 15 M
-to 74 M gets/s. Write p99 also varied across runs.
-
-### Linux verification
-
-Linux x86_64, 16 worker processes, three runs per mode. Each row reports the
-median across the runs. Every run completed 2,048 puts at 2,048 puts/s.
-
-| Keys | Mode | CPU/put | Put p99 | All-peer visibility p99 |
-| --- | --- | ---: | ---: | ---: |
-| Distinct | Replicated | 289 µs | 418 µs | 589 µs |
-| Distinct | SHM | 63 µs | 737 µs | 737 µs |
-| Hot | Replicated | 255 µs | 413 µs | |
-| Hot | SHM | 55 µs | 364 µs | |
-
-With distinct keys, SHM used 78% less CPU per put. Its put p99 was 737 µs
-versus 418 µs for replicated mode, and its all-peer visibility p99 was
-737 µs versus 589 µs.
-
-All 15 peers observed every distinct-key write. All 16 workers converged on
-the final value and revision in every hot-key run. The replicated runs
-recorded zero ring loss.
-
-#### Arena first-pass reservation
+### Arena reservation
 
 Run `cargo bench -p orbit-cache --bench fleet_write --features arena-timing -- --rate 128`
-to include lock acquisition and slot scan timings. Before the optimization,
-`flock` accounted for a median 93.6% of put time among the slowest 1% of SHM
-writes. The slot scan took a median 17.7 µs across SHM puts, within a
-median 22.3 µs lock hold.
+to include lock acquisition and slot scan timings.
 
 When a record fits in the unwritten portion of the arena's first pass,
 reservation advances the cursor directly. After wrap, reservation scans for
 overlapping records and protects pinned bytes.
-
-The Linux x86_64 comparison used fresh arenas, distinct keys, 16 workers,
-and 2,048 puts/s. The before and after builds used the same instrumentation.
-Each p99 below is the median of six runs per build.
-
-| Mode | Phase | Before | After |
-| --- | --- | ---: | ---: |
-| SHM | Put p99 | 651 µs | 167 µs |
-| SHM | Flock p99 | 601 µs | 141 µs |
-| SHM | Slot scan p99 | 34.4 µs | 0 µs |
-| Replicated | Put p99 | 434 µs | 201 µs |
-| Replicated | Flock p99 | 353 µs | 136 µs |
-| Replicated | Slot scan p99 | 28.5 µs | 0 µs |
-
-All runs sustained the target rate with zero ring loss. Every write was
-visible on all 15 peers.
