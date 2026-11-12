@@ -302,6 +302,16 @@ impl InvocationBus {
         &self,
         cursor: &mut InvocationCursor,
     ) -> InvocationPoll {
+        self.poll_where(cursor, |_| true)
+    }
+
+    /// Poll, building an invocation only for frames whose operation `keep`
+    /// takes; a skipped frame costs a comparison, not a copy of its payload.
+    fn poll_where(
+        &self,
+        cursor: &mut InvocationCursor,
+        keep: impl Fn(&str) -> bool,
+    ) -> InvocationPoll {
         let poll = self.fleet.poll_lanes::<InvocationRecord>(&mut cursor.inner);
         let mut lagged = poll.loss.total();
         let mut invocations = Vec::with_capacity(poll.frames.len());
@@ -318,6 +328,9 @@ impl InvocationBus {
                 lagged = lagged.saturating_add(1);
                 continue;
             };
+            if !keep(operation) {
+                continue;
+            }
             invocations.push(Invocation {
                 id: InvocationId(frame.id),
                 operation: operation.to_owned(),
@@ -334,9 +347,7 @@ impl InvocationBus {
         cursor: &mut InvocationCursor,
         operation: &str,
     ) -> InvocationPoll {
-        let mut poll = self.poll(cursor);
-        poll.invocations.retain(|invocation| invocation.operation == operation);
-        poll
+        self.poll_where(cursor, |candidate| candidate == operation)
     }
 }
 
