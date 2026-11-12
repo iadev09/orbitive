@@ -12,6 +12,7 @@ mod local;
 #[cfg(unix)]
 pub mod observer;
 mod protocol;
+mod shared;
 mod transport;
 
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub use local::{CacheEntry, CacheRead, LocalCache};
 pub use orbit_core::RingEventFd;
 use orbit_core::{Fleet, RingLoss};
 pub use protocol::{CacheMutation, CacheRevision, PayloadRef};
+pub use shared::{SHARED_CACHE_KIND, SharedCache, SharedStore};
 pub use transport::{CacheMutationCursor, CacheMutationPoll, CacheTransport};
 
 pub const DEFAULT_L1_CAPACITY: usize = 10_000;

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use orbit_cache::{
     Cache, CacheMutation, CacheRead, CacheTransport, DefaultCacheLayout,
+    SharedCache,
 };
 use orbit_core::{Fleet, NodeId};
 
@@ -34,6 +35,12 @@ fn child_cache_writer() {
         Fleet::join_shm_as(Box::leak(name.into_boxed_str()), 2, NodeId::new(1))
             .unwrap(),
     );
+    if mode == "shared" {
+        let cache = SharedCache::new(fleet).unwrap();
+        let store = cache.open_store(b"models").unwrap();
+        store.put(b"same-key", b"child", None).unwrap();
+        return;
+    }
     let cache = Cache::<DefaultCacheLayout>::new(fleet).unwrap();
     let store = cache.open_default_store().unwrap();
     if mode == "large" {
@@ -129,4 +136,53 @@ fn writers_in_different_lanes_converge_by_shared_revision() {
     assert_eq!(entry.value, expected);
     cache.transport().unlink_rings().unwrap();
     cache.transport().arena().unlink().unwrap();
+}
+
+#[test]
+fn shared_cache_reads_across_processes_and_reopen_without_polling() {
+    let name = fresh_name();
+    let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).unwrap());
+    let cache = SharedCache::new(fleet.clone()).unwrap();
+    let models = cache.open_store(b"models").unwrap();
+    let views = cache.open_store(b"views").unwrap();
+    views.put(b"same-key", b"view", None).unwrap();
+    assert_eq!(models.read(b"same-key"), CacheRead::Miss);
+    assert!(writer(name, "shared").wait().unwrap().success());
+
+    let CacheRead::Hit(old) = models.read(b"same-key") else {
+        panic!("peer's write must be visible without polling");
+    };
+    assert_eq!(old.value, b"child"[..]);
+    let revision = old.revision;
+    drop(old);
+    drop(models);
+    drop(views);
+    drop(cache);
+
+    let cache = SharedCache::new(fleet).unwrap();
+    let models = cache.open_store(b"models").unwrap();
+    let views = cache.open_store(b"views").unwrap();
+    let CacheRead::Hit(old) = models.read(b"same-key") else {
+        panic!("retained write must survive reopening");
+    };
+    assert_eq!(old.revision, revision);
+    models.reset().unwrap();
+    assert_eq!(models.read(b"same-key"), CacheRead::Miss);
+    assert!(
+        matches!(views.read(b"same-key"), CacheRead::Hit(entry) if entry.value == b"view"[..])
+    );
+    assert_eq!(old.value, b"child"[..]);
+
+    views
+        .put(b"ttl", b"expiring", Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    let CacheRead::Hit(entry) = views.read_at(b"ttl", 0) else {
+        panic!("stored entry");
+    };
+    let expiry = entry.expires_at_ms.unwrap();
+    assert!(matches!(views.read_at(b"ttl", expiry - 1), CacheRead::Hit(_)));
+    assert_eq!(views.read_at(b"ttl", expiry), CacheRead::Miss);
+    views.delete(b"same-key").unwrap();
+    assert_eq!(views.read(b"same-key"), CacheRead::Miss);
+    cache.unlink().unwrap();
 }

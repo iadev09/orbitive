@@ -2,8 +2,8 @@
 
 `orbit-arena` is a fleet-shared byte store: one index over one ring of bytes
 in Orbit shared memory, read by every process in the fleet without copying.
-`orbit-cache` uses the same arena for values and keeps only L1 metadata per
-process; mutations carry addresses, not body copies. Applications normally use
+Replicated cache stores use the arena to carry mutation payloads. Shared
+cache stores use a dedicated keyed arena with the same geometry. Applications normally use
 it through the [Orbitive](https://github.com/iadev09/orbitive) facade as
 `orbitive::arena`.
 

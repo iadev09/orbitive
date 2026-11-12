@@ -12,6 +12,7 @@ categories = ["caching", "concurrency"]
 exclude.workspace = true
 
 [dependencies]
+blake3.workspace = true
 bytes.workspace = true
 lru.workspace = true
 orbit-core.workspace = true

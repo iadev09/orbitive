@@ -317,6 +317,7 @@ enum Backing {
 
 struct Inner {
     backing: Backing,
+    kind: u8,
     /// Serialises this process's writers; the cross-process lock is taken
     /// inside it, so threads never contend for a file lock they cannot share.
     write: Mutex<()>,
@@ -522,16 +523,24 @@ impl Arena {
     /// first. A fleet without shared memory gets a private in-process arena
     /// of the same geometry.
     pub fn new(fleet: Arc<Fleet>) -> Result<Self> {
+        Self::open_kind(fleet, ARENA_KIND)
+    }
+
+    /// Open a separate arena under a kind reserved by the calling module.
+    pub fn open_kind(
+        fleet: Arc<Fleet>,
+        kind: u8,
+    ) -> Result<Self> {
         #[cfg(unix)]
         let name =
-            fleet.is_shm().then(|| ring_segment_name(fleet.name(), ARENA_KIND));
+            fleet.is_shm().then(|| ring_segment_name(fleet.name(), kind));
         let mut open = OPEN
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(inner) =
             open.iter().filter_map(Weak::upgrade).find(|inner| {
-                if inner.pid != std::process::id() {
+                if inner.pid != std::process::id() || inner.kind != kind {
                     return false;
                 }
                 if !fleet.is_shm() {
@@ -583,6 +592,7 @@ impl Arena {
         };
         let mut inner = Inner {
             backing,
+            kind,
             write: Mutex::new(()),
             reader: 0,
             pid: std::process::id(),
@@ -837,6 +847,23 @@ impl Arena {
         };
         evict(&self.inner.slots()[index]);
         Ok(true)
+    }
+
+    /// Withdraw all keyed records with this namespace tag. Use only in an
+    /// arena whose keyed writers reserve the extra field for namespaces.
+    pub fn forget_namespace(
+        &self,
+        namespace: u64,
+    ) -> Result<()> {
+        let _guard = self.inner.lock()?;
+        for slot in self.inner.slots() {
+            if slot.state.load(Ordering::Relaxed) == SLOT_LIVE
+                && slot.extra.load(Ordering::Relaxed) == namespace
+            {
+                evict(slot);
+            }
+        }
+        Ok(())
     }
 
     /// Empty the index: every lookup misses from here on. Readers holding an

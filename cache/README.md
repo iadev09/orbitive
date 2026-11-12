@@ -1,9 +1,15 @@
 # orbit-cache
 
-`orbit-cache` keeps bounded worker-local values and propagates mutations
-between processes in the same Orbit fleet. Applications normally use
-`orbitive::cache` through the [Orbitive](https://github.com/iadev09/orbitive)
-facade.
+`orbit-cache` provides bounded caches for processes in the same Orbit fleet.
+Applications use `orbitive::cache` through the
+[Orbitive](https://github.com/iadev09/orbitive) facade.
+
+| API | Where hits read | When peers see writes |
+| --- | --- | --- |
+| `Cache` | Each worker's local values | After applying the mutation |
+| `SharedCache` | The fleet's shared index and value slots | As soon as the write completes |
+
+## Replicated cache
 
 Each logical store has its own LRU. The notified mutation ring carries Put,
 Delete and Reset. A Put references an arena payload, which the receiving
@@ -44,6 +50,16 @@ signal. Register it before the first drain, then drain coalesced signals and
 call `Cache::poll`. Direct callers may drive polling explicitly. The cache
 provides fleet-wide last-write-wins revisions, explicit payload-overwrite
 and lag reporting, and store-scoped invalidation.
+
+## Shared cache
+
+Open `SharedCache::new(fleet)`, then `open_store(b"store-name")`. Reads use
+the shared index and return pinned bytes. TTL, deletion, and clearing a named
+store apply to the same records for all workers. The bounded arena can evict
+unpinned values under pressure. Its records survive a worker restart while
+the segment is retained. Shared stores do not need a mutation listener.
+
+## Mutation diagnostics
 
 On Unix, `observer::CacheObserver` maps existing mutation history without
 joining a fleet or opening arena values. Its diagnostic snapshot reports
