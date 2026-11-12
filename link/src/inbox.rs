@@ -157,7 +157,8 @@ pub(crate) struct LaneHeader {
     pub(crate) reactor: AtomicU32,
     pub(crate) epoch: AtomicU64,
     initialized: AtomicU32,
-    _padding: [u8; 4],
+    /// A capable reader stamps its exact inbox epoch here after setup.
+    paired_bodies_epoch: AtomicU32,
 
     // ── second line: identity, written once per claim ──────────────────
     /// Which service this lane serves.
@@ -563,6 +564,38 @@ impl Inbox {
     ) -> Result<u64> {
         self.check_lane(lane)?;
         Ok(self.lane_header(lane).epoch.load(Ordering::Acquire))
+    }
+
+    /// Advertise paired body support after the receiver's tables are ready.
+    /// The caller must own the lane. Older receivers never write this field,
+    /// and the lane's epoch changes even when one of them takes over.
+    pub fn advertise_paired_bodies(
+        &self,
+        lane: usize,
+    ) -> Result<()> {
+        let epoch = u32::try_from(self.lane_epoch(lane)?).map_err(|_| {
+            Error::Malformed("paired body advertisement epoch exhausted")
+        })?;
+        let previous = self
+            .lane_header(lane)
+            .paired_bodies_epoch
+            .swap(epoch, Ordering::AcqRel);
+        if previous != epoch {
+            self.table_header().directory.fetch_add(1, Ordering::AcqRel);
+            self.announce_directory();
+        }
+        Ok(())
+    }
+
+    /// The current epoch in which the receiver advertised paired bodies.
+    pub fn paired_bodies_epoch(
+        &self,
+        lane: usize,
+    ) -> Option<u64> {
+        let epoch = self.lane_epoch(lane).ok()?;
+        let stamp =
+            self.lane_header(lane).paired_bodies_epoch.load(Ordering::Acquire);
+        (stamp != 0 && u64::from(stamp) == epoch).then_some(epoch)
     }
 
     /// Claim a lane after fencing out its previous reader. Discard completed
@@ -1142,7 +1175,18 @@ impl Inbox {
         lane_index: usize,
         parts: &[&[u8]],
     ) -> Result<u64> {
-        self.write_frame(lane_index, parts, None)
+        self.write_frame(lane_index, parts, None, None)
+    }
+
+    /// Send only to the specified receiver epoch, including after reserving
+    /// the producer frame. A replacement never receives this publication.
+    pub fn write_vectored_at_epoch(
+        &self,
+        lane: usize,
+        epoch: u64,
+        parts: &[&[u8]],
+    ) -> Result<u64> {
+        self.write_frame(lane, parts, None, Some(epoch))
     }
 
     pub(crate) fn write_work(
@@ -1151,7 +1195,12 @@ impl Inbox {
         parts: &[&[u8]],
     ) -> Result<u64> {
         self.check_work(ticket)?;
-        self.write_frame(usize::from(ticket.lane), parts, Some(ticket))
+        self.write_frame(
+            usize::from(ticket.lane),
+            parts,
+            Some(ticket),
+            Some(ticket.epoch),
+        )
     }
 
     fn write_frame(
@@ -1159,6 +1208,7 @@ impl Inbox {
         lane_index: usize,
         parts: &[&[u8]],
         work: Option<crate::WorkTicket>,
+        epoch: Option<u64>,
     ) -> Result<u64> {
         self.check_lane(lane_index)?;
         let len = parts
@@ -1169,6 +1219,9 @@ impl Inbox {
             return Err(Error::FrameTooLarge);
         }
         let mut reservation = self.reserve_frame(lane_index)?;
+        if epoch.is_some_and(|epoch| epoch != reservation.epoch) {
+            return Err(Error::NoConsumer);
+        }
         let position = reservation.position;
         let slot = self.slot_header(lane_index, position);
         let mut at = self.payload_ptr(lane_index, position);

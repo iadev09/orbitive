@@ -1159,6 +1159,19 @@ impl Sender {
         self.0.finish()
     }
 
+    /// Close an unused direction. The application already knows from its
+    /// metadata that there is nothing to receive from this direction.
+    pub fn finish_empty(&mut self) -> Result<()> {
+        if self.0.state != ProducerState::New {
+            return Err(Error::Malformed(
+                "empty FIN requires an unused flow".to_owned(),
+            ));
+        }
+        self.0.control.finish_quietly();
+        self.0.state = ProducerState::Terminal;
+        Ok(())
+    }
+
     pub fn reset(
         &mut self,
         code: ResetCode,
@@ -1240,6 +1253,11 @@ impl Receiver {
     /// Previously returned chunks keep their own credit until dropped.
     pub fn cancel(&mut self) {
         self.0.cancel();
+    }
+
+    /// Observe a reset independently of the task reading body descriptors.
+    pub fn reset_signal(&self) -> crate::ResetSignal {
+        self.0.control.reset_signal()
     }
 
     pub fn try_next(&mut self) -> Result<FlowEvent> {

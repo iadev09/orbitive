@@ -95,6 +95,7 @@ pub(super) struct Reservation<'a> {
     inbox: &'a Inbox,
     record: usize,
     pub(super) position: u64,
+    pub(super) epoch: u64,
     lane: usize,
     pub(super) committed: bool,
 }
@@ -405,9 +406,8 @@ impl Inbox {
         checkpoint("intent-odd");
         fence(Ordering::Release);
         record.position.store(position, Ordering::Relaxed);
-        record
-            .incarnation
-            .store(lane.epoch.load(Ordering::Acquire), Ordering::Relaxed);
+        let epoch = lane.epoch.load(Ordering::Acquire);
+        record.incarnation.store(epoch, Ordering::Relaxed);
         record.generation.store(generation, Ordering::Relaxed);
         record.lane.store(lane_index as u32, Ordering::Relaxed);
         record.seq.store(even, Ordering::Release);
@@ -456,6 +456,7 @@ impl Inbox {
             inbox: self,
             record: index,
             position,
+            epoch,
             lane: lane_index,
             committed: false,
         }))

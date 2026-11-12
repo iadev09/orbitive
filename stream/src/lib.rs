@@ -1094,6 +1094,13 @@ impl Handle {
         })
     }
 
+    fn exchange_reset_code(&self) -> Result<Option<u32>> {
+        let slot = self.slot()?;
+        let direction = Self::direction(slot, self.side.read_direction());
+        let encoded = direction.exchange_reset_code.load(Ordering::Acquire);
+        Ok((encoded != 0).then_some(encoded as u32))
+    }
+
     fn direction(
         slot: &Slot,
         direction: usize,
@@ -1772,6 +1779,11 @@ pub struct ResetSignal {
 }
 
 impl ResetSignal {
+    /// The explicit reset code, once the reset has been observed.
+    pub fn exchange_reset_code(&self) -> Result<Option<u32>> {
+        self.handle.exchange_reset_code()
+    }
+
     /// Await only RESET (or an invalidated stream generation). Buffered data
     /// and FIN do not complete this observation. No timer or new driver is used.
     pub fn poll_reset(
@@ -1833,11 +1845,7 @@ impl ReadHalf {
     }
 
     pub(crate) fn exchange_reset_code(&self) -> Result<Option<u32>> {
-        let slot = self.handle.slot()?;
-        let direction =
-            Handle::direction(slot, self.handle.side.read_direction());
-        let encoded = direction.exchange_reset_code.load(Ordering::Acquire);
-        Ok((encoded != 0).then_some(encoded as u32))
+        self.handle.exchange_reset_code()
     }
 
     /// Park until something can be read, then read it. `Ok(0)` is clean

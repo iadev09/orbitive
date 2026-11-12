@@ -387,3 +387,29 @@ fn a_name_served_by_another_role_is_refused() {
     );
     join(&inbox, "orders", "php", 1).expect("another name is another service");
 }
+
+#[test]
+fn a_paired_body_advertisement_and_publication_belong_to_one_lane_epoch() {
+    let (_region, inbox) = table(2, SMALL);
+    inbox.claim_lane(1, "app", "rust", 1).unwrap();
+    assert_eq!(inbox.paired_bodies_epoch(1), None);
+    inbox.advertise_paired_bodies(1).unwrap();
+    let epoch = inbox.paired_bodies_epoch(1).unwrap();
+    inbox.write_vectored_at_epoch(1, epoch, &[b"paired"]).unwrap();
+    let mut frame = Vec::new();
+    assert!(inbox.read(1, &mut frame).unwrap());
+    assert_eq!(frame, b"paired");
+
+    inbox.release_lane(1).unwrap();
+    // A replacement using the older protocol leaves the capability word alone.
+    inbox.claim_lane(1, "app", "rust", 1).unwrap();
+    assert_eq!(inbox.paired_bodies_epoch(1), None);
+    assert!(matches!(
+        inbox.write_vectored_at_epoch(1, epoch, &[b"old ticket"]),
+        Err(Error::NoConsumer)
+    ));
+    assert!(!inbox.read(1, &mut frame).unwrap());
+    inbox.write(1, b"classic").unwrap();
+    assert!(inbox.read(1, &mut frame).unwrap());
+    assert_eq!(frame, b"classic");
+}
