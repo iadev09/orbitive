@@ -124,3 +124,23 @@ Every distinct-key write was visible on all 15 peers. Every hot-key run
 converged on the final value and revision on all 16 workers. The replicated
 runs recorded zero ring loss. Replicated miss throughput ranged from 15 M
 to 74 M gets/s. Write p99 also varied across runs.
+
+### Linux verification
+
+Linux x86_64, 16 worker processes, three runs per mode. Each row reports the
+median across the runs. Every run completed 2,048 puts at 2,048 puts/s.
+
+| Keys | Mode | CPU/put | Put p99 | All-peer visibility p99 |
+| --- | --- | ---: | ---: | ---: |
+| Distinct | Replicated | 289 µs | 418 µs | 589 µs |
+| Distinct | SHM | 63 µs | 737 µs | 737 µs |
+| Hot | Replicated | 255 µs | 413 µs | |
+| Hot | SHM | 55 µs | 364 µs | |
+
+With distinct keys, SHM used 78% less CPU per put. Its put p99 was 737 µs
+versus 418 µs for replicated mode, and its all-peer visibility p99 was
+737 µs versus 589 µs.
+
+All 15 peers observed every distinct-key write. All 16 workers converged on
+the final value and revision in every hot-key run. The replicated runs
+recorded zero ring loss.
