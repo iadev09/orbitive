@@ -108,6 +108,25 @@ pub const LANE_NAME_MAX: usize = 47;
 /// description.
 pub const LANE_ROLE_MAX: usize = 8;
 
+/// Copy a role out of shared memory into a fixed buffer and ask `accept`.
+fn accept_role(
+    role: &[u8; LANE_ROLE_MAX],
+    role_len: &AtomicU8,
+    accept: impl FnOnce(&str) -> bool,
+) -> bool {
+    let len = role_len.load(Ordering::Acquire) as usize;
+    if len == 0 || len > LANE_ROLE_MAX {
+        return false;
+    }
+    let mut copy = [0u8; LANE_ROLE_MAX];
+    // SAFETY: `role` is a mapped field of `LANE_ROLE_MAX` bytes and `len` is
+    // within it; the bytes are copied before they are interpreted.
+    copy[..len].copy_from_slice(unsafe {
+        std::slice::from_raw_parts(role.as_ptr(), len)
+    });
+    std::str::from_utf8(&copy[..len]).is_ok_and(accept)
+}
+
 /// Per-lane state, in two cache lines on purpose.
 ///
 /// The first line is written on every frame — reservation, read position, the
@@ -811,6 +830,36 @@ impl Inbox {
     }
 
     /// What serves this lane's name, if its owner said.
+    /// Whether this lane's role is one `accept` takes. The role is copied
+    /// into a fixed buffer, as [`Inbox::role`] copies it, but never into a
+    /// `String`: callers ask this of every lane for every event they route.
+    pub fn role_accepted(
+        &self,
+        lane_index: usize,
+        accept: impl FnOnce(&str) -> bool,
+    ) -> bool {
+        if self.check_lane(lane_index).is_err() {
+            return false;
+        }
+        let lane = self.lane_header(lane_index);
+        accept_role(&lane.role, &lane.role_len, accept)
+    }
+
+    /// Whether this watcher slot is held and its role is one `accept` takes.
+    /// Allocation-free, as [`Inbox::role_accepted`].
+    pub fn watcher_role_accepted(
+        &self,
+        slot: usize,
+        accept: impl FnOnce(&str) -> bool,
+    ) -> bool {
+        if self.check_lane(slot).is_err() {
+            return false;
+        }
+        let watcher = self.watcher_header(slot);
+        watcher.pid.load(Ordering::Acquire) != 0
+            && accept_role(&watcher.role, &watcher.role_len, accept)
+    }
+
     pub fn role(
         &self,
         lane_index: usize,
@@ -970,6 +1019,22 @@ impl Inbox {
             .collect();
         found.sort_by_key(|(_, depth)| *depth);
         found
+    }
+
+    /// The idlest of these lanes that will take a frame now: the first
+    /// [`Inbox::ready`] would list, read without building the list.
+    pub fn idlest(
+        &self,
+        lanes: &[usize],
+    ) -> Option<(usize, u64)> {
+        lanes
+            .iter()
+            .copied()
+            .filter(|lane| {
+                matches!(self.admits(*lane), Ok(Admission::Accepted))
+            })
+            .filter_map(|lane| self.depth(lane).ok().map(|depth| (lane, depth)))
+            .min_by_key(|(_, depth)| *depth)
     }
 
     /// Give up a lane: its owner is leaving and writers should stop choosing

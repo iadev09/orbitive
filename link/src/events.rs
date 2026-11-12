@@ -24,6 +24,7 @@
 //! the ring's own readiness; the downstream runs it and hands event frames
 //! from its lane reader to [`LinkEvents::accept`].
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -172,22 +173,28 @@ impl<L: EventLayout> LinkEvents<L> {
         }
         let own = self.bus.node_id().get();
         let mut frame = Vec::new();
+        // Which lanes are far and what the far side decodes change only when a
+        // lane or watcher changes hands, so one wake reads them once.
+        let mut far_side: Option<FarSide> = None;
         for event in poll.events {
             if event.id.node() != own || self.came_back(event.id.counter())? {
                 continue;
             }
             let key = match self.routing {
-                Routing::Topic => event.topic.as_bytes().to_vec(),
+                Routing::Topic => Cow::Borrowed(event.topic.as_bytes()),
                 Routing::Key(extract) => match extract(&event) {
-                    Some(key) => key,
+                    Some(key) => Cow::Owned(key),
                     None => continue,
                 },
             };
-            if !self.far_wants(&key) {
+            let side = far_side.get_or_insert_with(|| self.far_side());
+            if !side.wants(&key) {
                 continue;
             }
-            if self.send(&event, &mut frame).is_err() {
+            if self.send(&event, &side.lanes, &mut frame).is_err() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
+                // A refusal may have reclaimed a lane; read the far side again.
+                far_side = None;
             }
         }
         Ok(())
@@ -238,42 +245,37 @@ impl<L: EventLayout> LinkEvents<L> {
             .lock()
             .map_err(|_| Error::Malformed("link event memory is poisoned"))?;
         let ours = republished.contains(&counter);
-        *republished = republished.split_off(&(counter + 1));
+        // Own events come back in order: forget every counter up to this one.
+        while republished.first().is_some_and(|first| *first <= counter) {
+            republished.pop_first();
+        }
         Ok(ours)
     }
 
-    /// Whether some process on the far side said it can decode `key`.
-    fn far_wants(
-        &self,
-        key: &[u8],
-    ) -> bool {
+    /// The lanes held on the far side, and the union of the interest they and
+    /// the far side's watchers declared.
+    fn far_side(&self) -> FarSide {
         let inbox = self.segment.inbox();
         let lanes = inbox.lanes();
-        let mut union = [0u64; INTEREST_WORDS];
+        let far: Vec<usize> =
+            (0..lanes).filter(|lane| self.is_far_lane(*lane)).collect();
+        let mut interest = [0u64; INTEREST_WORDS];
         let mut merge = |entry: usize| {
-            for (word, bits) in union.iter_mut().zip(inbox.read_interest(entry))
+            for (word, bits) in
+                interest.iter_mut().zip(inbox.read_interest(entry))
             {
                 *word |= bits;
             }
         };
-        for lane in 0..lanes {
-            if self.is_far_lane(lane) {
-                merge(lane);
-            }
+        for &lane in &far {
+            merge(lane);
         }
         for slot in 0..lanes {
-            if inbox
-                .watcher_role(slot)
-                .ok()
-                .flatten()
-                .is_some_and(|role| (self.far)(&role))
-            {
+            if inbox.watcher_role_accepted(slot, self.far) {
                 merge(lanes + slot);
             }
         }
-        positions(INTEREST_TAG, key)
-            .iter()
-            .all(|bit| union[bit / 64] & (1 << (bit % 64)) != 0)
+        FarSide { lanes: far, interest }
     }
 
     fn is_far_lane(
@@ -282,26 +284,21 @@ impl<L: EventLayout> LinkEvents<L> {
     ) -> bool {
         let inbox = self.segment.inbox();
         inbox.consumers(lane).is_ok_and(|consumers| consumers != 0)
-            && inbox
-                .role(lane)
-                .ok()
-                .flatten()
-                .is_some_and(|role| (self.far)(&role))
+            && inbox.role_accepted(lane, self.far)
     }
 
     /// Write one event to the idlest far lane that will take it.
     fn send(
         &self,
         event: &FleetEvent,
+        far: &[usize],
         frame: &mut Vec<u8>,
     ) -> Result<()> {
         let inbox = self.segment.inbox();
-        let far: Vec<usize> =
-            (0..inbox.lanes()).filter(|lane| self.is_far_lane(*lane)).collect();
-        let Some((lane, _)) = inbox.ready(&far).into_iter().next() else {
+        let Some((lane, _)) = inbox.idlest(far) else {
             // Every far lane refused. One a killed process left keeps
             // refusing until it is taken back.
-            for lane in far {
+            for &lane in far {
                 self.segment.reclaim_if_gone(lane)?;
             }
             return Err(Error::NoLane);
@@ -316,6 +313,24 @@ impl<L: EventLayout> Drop for LinkEvents<L> {
     /// Interest belongs to a live bridge: take it back when the bridge goes.
     fn drop(&mut self) {
         self.segment.inbox().write_interest(self.entry, &[0; INTEREST_WORDS]);
+    }
+}
+
+/// The far side as one wake saw it.
+struct FarSide {
+    lanes: Vec<usize>,
+    interest: [u64; INTEREST_WORDS],
+}
+
+impl FarSide {
+    /// Whether some process on the far side said it can decode `key`.
+    fn wants(
+        &self,
+        key: &[u8],
+    ) -> bool {
+        positions(INTEREST_TAG, key)
+            .iter()
+            .all(|bit| self.interest[bit / 64] & (1 << (bit % 64)) != 0)
     }
 }
 
