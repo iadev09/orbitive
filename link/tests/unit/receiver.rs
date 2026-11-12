@@ -192,3 +192,40 @@ async fn live_growth_resumes_a_parked_receiver_without_a_frame() {
     ));
     scratch.0.inbox().cancel_work(ticket);
 }
+
+/// A woken receiver reads the one bell sent for its arm and drops Tokio's
+/// note of it without asking the socket again. The next wait must still be
+/// woken by the next bell: a lost wake hangs here.
+#[tokio::test(flavor = "current_thread")]
+async fn a_receiver_that_read_its_bell_exactly_is_woken_again() {
+    let scratch = Scratch::new();
+    let mut receiver = scratch.0.receiver(0).unwrap();
+    let (parked, mut waiting) = tokio::sync::mpsc::unbounded_channel();
+    let reader = tokio::spawn(async move {
+        let mut frame = Vec::new();
+        for turn in 0..64u8 {
+            let mut next = Box::pin(receiver.recv(&mut frame));
+            let mut told = false;
+            std::future::poll_fn(|cx| {
+                let result = next.as_mut().poll(cx);
+                if result.is_pending() && !told {
+                    told = true;
+                    parked.send(()).unwrap();
+                }
+                result
+            })
+            .await
+            .unwrap();
+            drop(next);
+            assert_eq!(frame, [b'y', turn]);
+        }
+        receiver
+    });
+    for turn in 0..64u8 {
+        waiting.recv().await.unwrap();
+        scratch.0.inbox().write(0, &[b'y', turn]).unwrap();
+    }
+    let receiver = reader.await.unwrap();
+    // The last wake's bell is the only one still unread.
+    assert_eq!(peek(&receiver.socket).unwrap(), 1);
+}

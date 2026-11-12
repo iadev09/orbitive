@@ -1500,6 +1500,18 @@ impl Inbox {
         Ok(())
     }
 
+    /// Lower the lane's arm and say whether it was still raised. One that
+    /// was not has been taken by a writer, which sends exactly one bell for it.
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(crate) fn take_receiver_arm(
+        &self,
+        lane_index: usize,
+    ) -> bool {
+        lane_index < self.lanes
+            && self.lane_header(lane_index).reactor.swap(0, Ordering::SeqCst)
+                != 0
+    }
+
     #[cfg(all(unix, feature = "tokio"))]
     pub(crate) fn disarm_receiver(
         &self,

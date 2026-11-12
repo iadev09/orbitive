@@ -30,6 +30,10 @@ pub enum Received {
 /// checks the shared-memory lane before arming and checks the lane generation
 /// again before awaiting the descriptor, so a coalesced or stale datagram
 /// cannot lose a frame.
+///
+/// A writer rings only after taking the lane's arm, so every arm this
+/// receiver finds taken is exactly one bell sent. It reads those and no more:
+/// the socket is not asked whether it is empty.
 pub struct InboxReceiver {
     segment: Arc<LinkSegment>,
     lane: usize,
@@ -37,6 +41,10 @@ pub struct InboxReceiver {
     /// The directory generation this receiver last reported.
     directory: u64,
     capacity: u64,
+    /// Whether this receiver raised the lane's arm and has not taken it back.
+    armed: bool,
+    /// Bells sent for arms a writer took, and not read yet.
+    owed: u32,
 }
 
 impl InboxReceiver {
@@ -47,7 +55,15 @@ impl InboxReceiver {
         let socket = segment.inbox().bind_receiver(lane)?;
         let directory = segment.inbox().directory();
         let capacity = segment.inbox().capacity_generation(lane)?;
-        Ok(Self { segment, lane, socket, directory, capacity })
+        Ok(Self {
+            segment,
+            lane,
+            socket,
+            directory,
+            capacity,
+            armed: false,
+            owed: 0,
+        })
     }
 
     /// Wait for and copy the next frame from this lane, of either kind.
@@ -83,8 +99,10 @@ impl InboxReceiver {
         &mut self,
         out: &mut Vec<u8>,
     ) -> Result<Received> {
-        let inbox = self.segment.inbox();
+        // A wait that was cancelled left its arm raised.
+        self.lower();
         loop {
+            let inbox = self.segment.inbox();
             let directory = inbox.directory();
             if directory != self.directory {
                 self.directory = directory;
@@ -106,29 +124,51 @@ impl InboxReceiver {
                 });
             }
 
-            // Only the empty-to-wait transition touches the socket. A wake
-            // sent during an earlier arm/recheck race must be acknowledged
-            // before another arm can enqueue a second obsolete datagram.
-            inbox.disarm_receiver(self.lane);
-            crate::bell::drain(&self.socket)?;
+            // Only the empty-to-wait transition touches the socket, and
+            // only for bells known to have been sent: one from an earlier
+            // arm must be read before another arm can bring a second.
+            self.settle()?;
+            let inbox = self.segment.inbox();
             inbox.arm_receiver(self.lane)?;
+            self.armed = true;
             if inbox.receiver_generation(self.lane)? != seen
                 || inbox.directory() != self.directory
             {
-                inbox.disarm_receiver(self.lane);
+                self.lower();
                 continue;
             }
 
             self.socket.readable().await?;
-            let mut scratch = [0u8; 64];
-            loop {
-                let found = self.socket.try_recv(&mut scratch).is_ok();
-                crate::probe::read(found);
-                if !found {
-                    break;
-                }
+            self.lower();
+            if self.owed == 0 {
+                // Woken with the arm still raised: a bell this receiver did
+                // not account for. Read until the socket says it is empty.
+                crate::bell::drain(&self.socket)?;
             }
         }
+    }
+
+    /// Take the arm back if it is raised. One a writer took first is one
+    /// bell sent.
+    fn lower(&mut self) {
+        if std::mem::take(&mut self.armed)
+            && !self.segment.inbox().take_receiver_arm(self.lane)
+        {
+            self.owed += 1;
+        }
+    }
+
+    /// Read the bells known to have been sent, and no more. One that is not
+    /// there yet is on its way and stays owed.
+    fn settle(&mut self) -> std::io::Result<()> {
+        if self.owed == 0 {
+            return Ok(());
+        }
+        while self.owed > 0 && crate::bell::take_one(&self.socket)? {
+            self.owed -= 1;
+        }
+        crate::bell::forget_readiness(&self.socket);
+        Ok(())
     }
 
     pub fn lane(&self) -> usize {

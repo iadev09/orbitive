@@ -54,6 +54,46 @@ pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
     }
 }
 
+/// Read one bell if one is there. The call goes to the socket itself: Tokio
+/// may not have seen the bell arrive yet, and would answer for it.
+#[cfg(feature = "tokio")]
+pub(crate) fn take_one(socket: &tokio::net::UnixDatagram) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+
+    let mut scratch = [0u8; 64];
+    loop {
+        // SAFETY: the socket owns this fd and scratch is writable for len bytes.
+        let read = unsafe {
+            libc::recv(
+                socket.as_raw_fd(),
+                scratch.as_mut_ptr().cast(),
+                scratch.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        crate::probe::read(read >= 0);
+        if read >= 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => return Ok(false),
+            _ => return Err(error),
+        }
+    }
+}
+
+/// Drop Tokio's note that the socket is readable, without a call. For a
+/// caller that has read every bell it knows was sent: the note is about bells
+/// that are gone, and the next bell makes a new one.
+#[cfg(feature = "tokio")]
+pub(crate) fn forget_readiness(socket: &tokio::net::UnixDatagram) {
+    let _ = socket.try_io(tokio::io::Interest::READABLE, || {
+        Err::<(), io::Error>(io::ErrorKind::WouldBlock.into())
+    });
+}
+
 /// Who a datagram wakes. Lanes and watchers have separate addresses because a
 /// named socket has exactly one binder.
 #[derive(Clone, Copy)]
