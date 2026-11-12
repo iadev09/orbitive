@@ -896,12 +896,17 @@ fn open_inner(
         driver: Mutex::new(None),
         #[cfg(unix)]
         bell: match &key {
-            Key::Shm(name, _) => {
-                Some(crate::bell::Bell::new(name).map_err(Error::Io)?)
-            }
-            Key::Group(name, _, access) => Some(
-                crate::bell::Bell::with_group(name, access.clone())
+            Key::Shm(name, _) => Some(
+                crate::bell::Bell::new(name, geometry.fleet_capacity)
                     .map_err(Error::Io)?,
+            ),
+            Key::Group(name, _, access) => Some(
+                crate::bell::Bell::with_group(
+                    name,
+                    access.clone(),
+                    geometry.fleet_capacity,
+                )
+                .map_err(Error::Io)?,
             ),
             Key::Memory(..) => None,
         },

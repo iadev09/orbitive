@@ -32,7 +32,7 @@ use std::os::unix::net::{SocketAddr, UnixDatagram};
 #[cfg(feature = "tokio")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "tokio")]
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 #[cfg(feature = "tokio")]
 use crate::layout::Doorbell;
@@ -50,10 +50,17 @@ pub(crate) struct Bell {
     prefix: String,
     sender: UnixDatagram,
     group: Option<orbit_core::shm::GroupAccess>,
+    /// Each node's address, built on its first ring: a node's name is fixed
+    /// for the table's life, so a ring is one send, not a name to format.
+    /// `None` is a name the platform refuses; ringing it does nothing.
+    addresses: Box<[OnceLock<Option<SocketAddr>>]>,
 }
 
 impl Bell {
-    pub(crate) fn new(segment: &str) -> io::Result<Self> {
+    pub(crate) fn new(
+        segment: &str,
+        nodes: usize,
+    ) -> io::Result<Self> {
         let sender = UnixDatagram::unbound()?;
         sender.set_nonblocking(true)?;
         // SAFETY: a plain syscall with no arguments.
@@ -63,16 +70,27 @@ impl Bell {
             prefix: format!("orbit-bell-{uid}/{segment}"),
             sender,
             group: None,
+            addresses: Self::unbuilt(nodes),
         })
     }
 
     pub(crate) fn with_group(
         segment: &str,
         access: orbit_core::shm::GroupAccess,
+        nodes: usize,
     ) -> io::Result<Self> {
         let sender = UnixDatagram::unbound()?;
         sender.set_nonblocking(true)?;
-        Ok(Self { prefix: segment.to_owned(), sender, group: Some(access) })
+        Ok(Self {
+            prefix: segment.to_owned(),
+            sender,
+            group: Some(access),
+            addresses: Self::unbuilt(nodes),
+        })
+    }
+
+    fn unbuilt(nodes: usize) -> Box<[OnceLock<Option<SocketAddr>>]> {
+        (0..nodes).map(|_| OnceLock::new()).collect()
     }
 
     pub(crate) fn validate_group_address(
@@ -133,8 +151,14 @@ impl Bell {
         &self,
         node: usize,
     ) {
-        if let Ok(address) = self.address(node) {
-            let _ = self.sender.send_to_addr(&[1], &address);
+        let address = match self.addresses.get(node) {
+            Some(built) => {
+                built.get_or_init(|| self.address(node).ok()).as_ref()
+            }
+            None => return,
+        };
+        if let Some(address) = address {
+            let _ = self.sender.send_to_addr(&[1], address);
         }
     }
 
