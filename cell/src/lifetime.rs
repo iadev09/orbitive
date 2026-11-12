@@ -4,9 +4,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(unix)]
+use orbit_core::process::ProcessOwner;
+#[cfg(unix)]
 use orbit_core::shm::{LaneHold, ShmRegion, try_hold_lane};
 #[cfg(unix)]
+use std::collections::HashMap;
+#[cfg(unix)]
 use std::mem::ManuallyDrop;
+#[cfg(unix)]
+use std::sync::atomic::AtomicPtr;
+#[cfg(unix)]
+use std::sync::{Mutex, MutexGuard, Weak};
 
 use crate::{Error, Result};
 
@@ -22,12 +30,11 @@ impl Owners {
         Self::Memory((0..capacity).map(|_| AtomicU32::new(0)).collect())
     }
 
-    /// Called under the table's structural lock, before publishing a handle.
+    /// Called under the table's structural lock after checking ownership.
     pub(crate) fn lease(
         &self,
         index: usize,
     ) -> Result<Arc<Lease>> {
-        self.check_process()?;
         self.counter(index)
             .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_add(1)
@@ -53,7 +60,7 @@ impl Owners {
     pub(crate) fn check_process(&self) -> Result<()> {
         #[cfg(unix)]
         if let Self::Shared(shared) = self
-            && shared.pid != std::process::id()
+            && !shared.process.is_current()
         {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -135,7 +142,7 @@ pub(crate) struct Shared {
     capacity: usize,
     offset: usize,
     owner: usize,
-    pid: u32,
+    process: ProcessOwner,
     hold: ManuallyDrop<LaneHold>,
 }
 
@@ -168,6 +175,7 @@ impl Shared {
         offset: usize,
         recover: impl FnOnce(usize, &ShmRegion) -> Result<()>,
     ) -> Result<Arc<Self>> {
+        let process = ProcessOwner::current()?;
         for owner in 0..owners {
             if let Some(hold) = try_hold_lane(name, owner)? {
                 recover(owner, &region)?;
@@ -178,7 +186,7 @@ impl Shared {
                     capacity,
                     offset,
                     owner,
-                    pid: std::process::id(),
+                    process,
                     hold: ManuallyDrop::new(hold),
                 };
                 for count in shared.counts(owner) {
@@ -193,11 +201,8 @@ impl Shared {
         )))
     }
 
-    pub(crate) fn is_current(
-        &self,
-        owners: usize,
-    ) -> bool {
-        self.pid == std::process::id() && self.owners == owners
+    pub(crate) fn owner_capacity(&self) -> usize {
+        self.owners
     }
 
     pub(crate) fn owner(&self) -> usize {
@@ -225,11 +230,68 @@ impl Shared {
 #[cfg(unix)]
 impl Drop for Shared {
     fn drop(&mut self) {
-        if self.pid == std::process::id() {
+        if self.process.is_current() {
             // Leases keep this mapping and kernel hold alive. At this point
             // all of this owner's pins are zero. A fork child never unlocks
             // its parent's inherited file description.
             unsafe { ManuallyDrop::drop(&mut self.hold) };
+        }
+    }
+}
+
+#[cfg(unix)]
+type TableMap<T> = HashMap<String, Weak<T>>;
+
+#[cfg(unix)]
+struct Registry<T> {
+    process: ProcessOwner,
+    tables: Mutex<TableMap<T>>,
+}
+
+#[cfg(unix)]
+pub(crate) struct ShmTables<T>(AtomicPtr<Registry<T>>);
+
+#[cfg(unix)]
+impl<T: Send + Sync + 'static> ShmTables<T> {
+    pub(crate) const fn new() -> Self {
+        Self(AtomicPtr::new(std::ptr::null_mut()))
+    }
+
+    pub(crate) fn lock(
+        &'static self
+    ) -> Result<MutexGuard<'static, TableMap<T>>> {
+        let process = ProcessOwner::current()?;
+        loop {
+            let previous = self.0.load(Ordering::Acquire);
+            // SAFETY: published registries stay allocated until process exit.
+            if let Some(registry) = unsafe { previous.as_ref() }
+                && registry.process.is_current()
+            {
+                return Ok(crate::lock_unpoisoned(&registry.tables));
+            }
+
+            // A fork child cannot lock a mutex inherited from its parent.
+            let registry = Box::into_raw(Box::new(Registry {
+                process,
+                tables: Mutex::default(),
+            }));
+            if self
+                .0
+                .compare_exchange(
+                    previous,
+                    registry,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                // SAFETY: this initialized registry is now published and retained.
+                return Ok(crate::lock_unpoisoned(unsafe {
+                    &(*registry).tables
+                }));
+            }
+            // SAFETY: this candidate was never published.
+            drop(unsafe { Box::from_raw(registry) });
         }
     }
 }

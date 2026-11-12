@@ -632,12 +632,12 @@ fn shm_table(
     name: &str,
     owners: usize,
 ) -> Result<Arc<ShmTextTable>> {
-    static TABLES: LazyLock<Mutex<HashMap<String, Weak<ShmTextTable>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
-    let mut tables = lock_unpoisoned(&TABLES);
+    static TABLES: lifetime::ShmTables<ShmTextTable> =
+        lifetime::ShmTables::new();
+    let mut tables = TABLES.lock()?;
     tables.retain(|_, table| table.strong_count() != 0);
     if let Some(table) = tables.get(name).and_then(Weak::upgrade)
-        && table.shared.is_current(owners)
+        && table.shared.owner_capacity() == owners
     {
         return Ok(table);
     }
