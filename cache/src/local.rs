@@ -145,13 +145,21 @@ impl LocalCache {
         &self,
         key: &[u8],
     ) -> CacheRead {
-        self.read_at(key, now_ms())
+        self.read_with_clock(key, now_ms)
     }
 
     pub fn read_at(
         &self,
         key: &[u8],
         now_ms: u64,
+    ) -> CacheRead {
+        self.read_with_clock(key, || now_ms)
+    }
+
+    fn read_with_clock(
+        &self,
+        key: &[u8],
+        now_ms: impl FnOnce() -> u64,
     ) -> CacheRead {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -163,7 +171,7 @@ impl LocalCache {
         };
         match slot {
             LocalSlot::Present { value, revision, expires_at_ms } => {
-                if !expires_at_ms.is_some_and(|deadline| deadline <= now_ms) {
+                if !expires_at_ms.is_some_and(|deadline| deadline <= now_ms()) {
                     return CacheRead::Hit(CacheEntry {
                         value: value.bytes.clone(),
                         revision: *revision,
@@ -456,4 +464,34 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_checks_the_clock_only_for_a_value_with_expiry() {
+        let cache = LocalCache::with_connection(
+            NonZeroUsize::new(2).unwrap(),
+            Arc::new(LocalBudget::new(16)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        let revision = CacheRevision {
+            sequence: 1,
+            mutation_id: orbit_core::NetId64::ZERO,
+        };
+        cache.install_local(b"plain", b"value", revision, None, || false);
+        cache.install_local(b"ttl", b"value", revision, Some(10), || false);
+
+        let no_clock = || panic!("unexpected clock read");
+        assert!(matches!(
+            cache.read_with_clock(b"plain", no_clock),
+            CacheRead::Hit(_)
+        ));
+        assert_eq!(cache.read_with_clock(b"absent", no_clock), CacheRead::Miss);
+        assert!(matches!(cache.read_at(b"ttl", 9), CacheRead::Hit(_)));
+        assert_eq!(cache.read_with_clock(b"ttl", || 10), CacheRead::Miss);
+        assert_eq!(cache.read_with_clock(b"ttl", no_clock), CacheRead::Miss);
+    }
 }
