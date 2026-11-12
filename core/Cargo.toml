@@ -31,3 +31,7 @@ tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
 [[bench]]
 name = "wake"
 harness = false
+
+[[bench]]
+name = "notify"
+harness = false
