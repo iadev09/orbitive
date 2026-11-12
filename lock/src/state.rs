@@ -621,23 +621,24 @@ impl LockStateSlot {
 #[cfg(unix)]
 struct ShmStateStore {
     name: String,
-    opened: Mutex<Option<Arc<ShmLockTable>>>,
+    /// Fixed once opened: every operation after the first borrows it, with
+    /// no lock and no reference-count update.
+    opened: std::sync::OnceLock<ShmLockTable>,
 }
 
 #[cfg(unix)]
 impl ShmStateStore {
     fn new(name: &str) -> Self {
-        Self { name: name.to_owned(), opened: Mutex::new(None) }
+        Self { name: name.to_owned(), opened: std::sync::OnceLock::new() }
     }
 
-    fn open(&self) -> Result<Arc<ShmLockTable>> {
-        let mut opened = lock_unpoisoned(&self.opened);
-        if let Some(table) = opened.as_ref() {
-            return Ok(table.clone());
+    fn open(&self) -> Result<&ShmLockTable> {
+        if let Some(table) = self.opened.get() {
+            return Ok(table);
         }
-        let table = Arc::new(ShmLockTable::open_or_create(&self.name)?);
-        *opened = Some(table.clone());
-        Ok(table)
+        // Two first callers may both map it; one mapping stays.
+        let table = ShmLockTable::open_or_create(&self.name)?;
+        Ok(self.opened.get_or_init(|| table))
     }
 }
 
