@@ -127,7 +127,7 @@ orbit-quota = { version = "0.1.0", path = "quota", default-features = false }
 orbit-cell = { version = "0.6.1", path = "cell", default-features = false }
 orbit-arena = { version = "0.5.4", path = "arena", default-features = false }
 orbit-invoke = { version = "0.5.4", path = "invoke", default-features = false }
-orbit-link = { version = "0.6.6", path = "link", default-features = false }
+orbit-link = { version = "0.6.7", path = "link", default-features = false }
 orbit-metrics = { version = "0.5.4", path = "metrics", default-features = false }
 orbit-pool = { version = "0.5.4", path = "pool", default-features = false }
 orbit-client-pool = { version = "0.5.5", path = "client-pool", default-features = false }
