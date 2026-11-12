@@ -350,6 +350,41 @@ fn initialization_recovers_only_tagged_unpublished_state() {
 }
 
 #[test]
+fn forked_quota_owner_stays_invalid_after_reopen() {
+    let fixture = Fixture::new();
+    let clock = Arc::new(TestClock::default());
+    let quota = fixture.open(Arc::clone(&clock), 3, 2, 2);
+    assert_eq!(quota.try_consume(key(), count(1)).unwrap(), Decision::Allowed);
+    let pin = quota.inner.pin(0, None, &mut budget()).unwrap().unwrap();
+    let parent_counter = quota.inner.counter(quota.inner.owner, 0);
+
+    // SAFETY: the child tests inherited handles, opens its own quota,
+    // and exits without running the parent's cleanup.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork failed");
+    if child == 0 {
+        let rejected = || quota.try_consume(key(), count(1)).is_err();
+        let rejected_before_open = rejected();
+        let fresh = fixture.open(clock, 3, 2, 2);
+        let works =
+            matches!(fresh.try_consume(key(), count(1)), Ok(Decision::Allowed));
+        let valid = rejected_before_open && works && rejected();
+        drop(fresh);
+        drop(pin);
+        // SAFETY: terminate only the fork child.
+        unsafe { libc::_exit(i32::from(!valid)) };
+    }
+    let mut status = 0;
+    // SAFETY: child is the PID returned by fork and status is writable.
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 0);
+    assert_eq!(parent_counter.load(Ordering::SeqCst), 1);
+    drop(pin);
+    assert_eq!(parent_counter.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn live_pins_prevent_reuse_and_stale_generation_cannot_charge_replacement() {
     let fixture = Fixture::new();
     let clock = Arc::new(TestClock::default());

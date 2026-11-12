@@ -24,13 +24,14 @@ use std::fmt;
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 #[cfg(feature = "bench-timing")]
 use std::time::{Duration, Instant};
 
 use orbit_core::Fleet;
+use orbit_core::process::ProcessOwner;
 mod ranges;
 use ranges::Ranges;
 #[cfg(unix)]
@@ -355,7 +356,7 @@ struct Inner {
     /// inside it, so threads never contend for a file lock they cannot share.
     write: Mutex<()>,
     reader: usize,
-    pid: u32,
+    owner: ProcessOwner,
     claimed: bool,
     _fleet: Arc<Fleet>,
     #[cfg(unix)]
@@ -421,7 +422,7 @@ impl Inner {
     }
 
     fn lock(&self) -> Result<WriteGuard<'_>> {
-        if self.pid != std::process::id() {
+        if !self.owner.is_current() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "an inherited arena handle cannot be used after fork",
@@ -525,7 +526,7 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         // Entries own Inner too: the last handle cannot leave live pins.
-        if self.claimed && self.pid == std::process::id() {
+        if self.claimed && self.owner.is_current() {
             self.reader_active(self.reader).store(0, Ordering::Release);
             #[cfg(unix)]
             if let Some(hold) = &mut self._hold {
@@ -543,7 +544,43 @@ impl Drop for Inner {
 // Share one mapping and reader claim between all consumers in a process.
 // Inherited handles are not usable in a fork child. Private fleets are
 // distinguished by their shared inner state, not the caller's Arc wrapper.
-static OPEN: OnceLock<Mutex<Vec<Weak<Inner>>>> = OnceLock::new();
+struct OpenArenas {
+    owner: ProcessOwner,
+    handles: Mutex<Vec<Weak<Inner>>>,
+}
+
+static OPEN: AtomicPtr<OpenArenas> = AtomicPtr::new(std::ptr::null_mut());
+
+fn open_arenas(owner: ProcessOwner) -> &'static OpenArenas {
+    loop {
+        let previous = OPEN.load(Ordering::Acquire);
+        // SAFETY: published registries live until process exit. A child
+        // must never lock or drop a registry inherited from its parent.
+        if let Some(registry) = unsafe { previous.as_ref() }
+            && registry.owner.is_current()
+        {
+            return registry;
+        }
+        let registry = Box::into_raw(Box::new(OpenArenas {
+            owner,
+            handles: Mutex::default(),
+        }));
+        if OPEN
+            .compare_exchange(
+                previous,
+                registry,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            // SAFETY: the initialized registry is now published for this process.
+            return unsafe { &*registry };
+        }
+        // SAFETY: this registry was never published.
+        drop(unsafe { Box::from_raw(registry) });
+    }
+}
 
 /// The fleet's arena. Cheap to clone.
 #[derive(Clone)]
@@ -567,13 +604,14 @@ impl Arena {
         #[cfg(unix)]
         let name =
             fleet.is_shm().then(|| ring_segment_name(fleet.name(), kind));
-        let mut open = OPEN
-            .get_or_init(Mutex::default)
+        let owner = ProcessOwner::current()?;
+        let mut open = open_arenas(owner)
+            .handles
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(inner) =
             open.iter().filter_map(Weak::upgrade).find(|inner| {
-                if inner.pid != std::process::id() || inner.kind != kind {
+                if inner.kind != kind {
                     return false;
                 }
                 if !fleet.is_shm() {
@@ -628,7 +666,7 @@ impl Arena {
             kind,
             write: Mutex::new(()),
             reader: 0,
-            pid: std::process::id(),
+            owner,
             claimed: false,
             _fleet: fleet,
             #[cfg(unix)]
@@ -670,7 +708,7 @@ impl Arena {
         &self,
         key: Key,
     ) -> Option<Entry> {
-        if self.inner.pid != std::process::id() {
+        if !self.inner.owner.is_current() {
             return None;
         }
         let slots = self.inner.slots();
@@ -699,7 +737,7 @@ impl Arena {
         &self,
         address: Address,
     ) -> Option<Entry> {
-        if self.inner.pid != std::process::id() {
+        if !self.inner.owner.is_current() {
             return None;
         }
         self.pin_entry(address.slot as usize, address.generation, None)
@@ -1223,9 +1261,8 @@ impl Entry {
     }
 
     pub fn body(&self) -> &[u8] {
-        assert_eq!(
-            self.inner.pid,
-            std::process::id(),
+        assert!(
+            self.inner.owner.is_current(),
             "arena entries cannot be inherited across fork"
         );
         self.inner.bytes(self.body.0, self.body.1)
@@ -1233,9 +1270,8 @@ impl Entry {
 
     /// The encoded body and its tag, when one was stored.
     pub fn encoded(&self) -> Option<(&[u8], u8)> {
-        assert_eq!(
-            self.inner.pid,
-            std::process::id(),
+        assert!(
+            self.inner.owner.is_current(),
             "arena entries cannot be inherited across fork"
         );
         self.encoded
@@ -1274,7 +1310,7 @@ impl Entry {
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        if self.inner.pid == std::process::id() {
+        if self.inner.owner.is_current() {
             self.inner
                 .pin(self.inner.reader, self.slot)
                 .fetch_sub(1, Ordering::SeqCst);

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use orbit_core::FleetObserver;
+use orbit_core::process::ProcessOwner;
 use orbit_core::shm::{
     FleetMembership, LaneHold, ShmAccessPolicy, ShmRegion, hold_existing_fleet,
     ring_segment_name_for_uid, try_hold_lane,
@@ -33,7 +34,7 @@ struct ReaderInner {
     ring_offset: usize,
     bytes: usize,
     reader: usize,
-    pid: u32,
+    owner: ProcessOwner,
     claimed: bool,
     hold: Option<ManuallyDrop<LaneHold>>,
     membership: ManuallyDrop<FleetMembership>,
@@ -90,7 +91,7 @@ impl ReaderInner {
 
 impl Drop for ReaderInner {
     fn drop(&mut self) {
-        if self.pid == std::process::id() {
+        if self.owner.is_current() {
             // Entries retain this owner until all their pins have been dropped.
             if self.claimed {
                 self.active(self.reader).store(0, Ordering::Release);
@@ -109,6 +110,7 @@ impl Drop for ReaderInner {
 
 impl ArenaReader {
     pub fn attach_existing(observer: &FleetObserver) -> Result<Self> {
+        let owner = ProcessOwner::current()?;
         if observer.uid()
             != FleetObserver::attach_existing(observer.name())?.uid()
         {
@@ -174,7 +176,7 @@ impl ArenaReader {
             ring_offset,
             bytes,
             reader: 0,
-            pid: std::process::id(),
+            owner,
             claimed: false,
             hold: None,
             membership: ManuallyDrop::new(membership),
@@ -201,7 +203,7 @@ impl ArenaReader {
         &self,
         address: Address,
     ) -> Result<Option<ReaderEntry>> {
-        if self.inner.pid != std::process::id() {
+        if !self.inner.owner.is_current() {
             return Err(invalid("arena reader belongs to another process"));
         }
         let slot = address.slot as usize;
@@ -248,9 +250,8 @@ pub struct ReaderEntry {
 
 impl ReaderEntry {
     pub fn body(&self) -> &[u8] {
-        assert_eq!(
-            self.inner.pid,
-            std::process::id(),
+        assert!(
+            self.inner.owner.is_current(),
             "arena entry belongs to another process"
         );
         // SAFETY: the validated span is immutable while this entry's pin lives.
@@ -268,7 +269,7 @@ impl ReaderEntry {
 
 impl Drop for ReaderEntry {
     fn drop(&mut self) {
-        if self.inner.pid == std::process::id() {
+        if self.inner.owner.is_current() {
             self.inner.pin(self.slot).fetch_sub(1, Ordering::SeqCst);
         }
     }

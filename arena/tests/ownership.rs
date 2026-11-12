@@ -167,7 +167,7 @@ fn kill_pinned_child(mut child: std::process::Child) {
 #[cfg(unix)]
 #[test]
 fn forked_child_cannot_pin_records_or_release_a_parent_pin() {
-    let (_, arena) = shared_arena();
+    let (name, arena) = shared_arena();
     let key = Key::new(0);
     let body = vec![7; ARENA_RECORD_MAX];
     arena.put(key, Record::body(&body)).unwrap();
@@ -177,16 +177,24 @@ fn forked_child_cannot_pin_records_or_release_a_parent_pin() {
     }
     let held = arena.get(key).unwrap();
 
-    // SAFETY: the child's expected path checks the PID and exits. Dropping
-    // its Entry leaves the parent's pin and keeps the arena's Arc alive.
+    // SAFETY: the child opens its own arena and exits without running
+    // inherited process cleanup.
     let child = unsafe { libc::fork() };
     assert!(child >= 0, "fork failed");
     if child == 0 {
         let rejected =
-            arena.get(key).is_none() && arena.get_address(address).is_none();
+            || arena.get(key).is_none() && arena.get_address(address).is_none();
+        let rejected_before_join = rejected();
+        let fresh = Fleet::join_shm_as(&name, 2, orbit_core::NodeId::new(1))
+            .ok()
+            .and_then(|fleet| Arena::new(Arc::new(fleet)).ok());
+        let fresh_works = fresh.is_some_and(|arena| {
+            arena.get(key).is_some() && arena.get_address(address).is_some()
+        });
+        let valid = rejected_before_join && fresh_works && rejected();
         drop(held);
         // SAFETY: exit without running inherited process cleanup.
-        unsafe { libc::_exit(i32::from(!rejected)) };
+        unsafe { libc::_exit(i32::from(!valid)) };
     }
 
     let mut status = 0;

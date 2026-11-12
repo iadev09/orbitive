@@ -44,6 +44,8 @@ use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::process::ProcessOwner;
+
 mod group;
 pub use group::GroupAccess;
 
@@ -1079,7 +1081,7 @@ pub struct LaneHold {
 pub struct PreparedLaneLock {
     fd: OwnedFd,
     busy: AtomicBool,
-    pid: u32,
+    owner: ProcessOwner,
 }
 
 impl PreparedLaneLock {
@@ -1091,13 +1093,13 @@ impl PreparedLaneLock {
         Ok(Self {
             fd: open_lock_file(&lock_file_path(&name))?,
             busy: AtomicBool::new(false),
-            pid: std::process::id(),
+            owner: ProcessOwner::current()?,
         })
     }
 
     /// One local CAS and at most one LOCK_NB syscall. No owner wait or retry.
     pub fn try_lock(&self) -> io::Result<Option<PreparedLaneGuard<'_>>> {
-        if self.pid != std::process::id() {
+        if !self.owner.is_current() {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
         if self
@@ -1130,7 +1132,7 @@ pub struct PreparedLaneGuard<'a> {
 
 impl Drop for PreparedLaneGuard<'_> {
     fn drop(&mut self) {
-        if self.lock.pid == std::process::id() {
+        if self.lock.owner.is_current() {
             // SAFETY: this guard owns this file description's exclusive hold.
             unsafe {
                 libc::flock(self.lock.fd.as_raw_fd(), libc::LOCK_UN);
@@ -1408,6 +1410,38 @@ mod lock_identity_tests;
 #[cfg(test)]
 mod fleet_lock_tests {
     use super::{join_fleet_membership, try_lock_fleet_exclusive};
+
+    #[test]
+    fn forked_prepared_guard_does_not_unlock_the_parent() {
+        let name = format!("fork-lock-{}", std::process::id());
+        let lock = super::PreparedLaneLock::open(&name, 0).unwrap();
+        let guard = lock.try_lock().unwrap().unwrap();
+        // SAFETY: the child checks ownership and uses a separately opened
+        // descriptor before exiting without inherited process cleanup.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            drop(guard);
+            let rejected = lock.try_lock().is_err();
+            let still_held = super::PreparedLaneLock::open(&name, 0)
+                .and_then(|fresh| {
+                    fresh.try_lock().map(|result| result.is_none())
+                })
+                .unwrap_or(false);
+            let valid = rejected && still_held && lock.try_lock().is_err();
+            // SAFETY: terminate only the fork child.
+            unsafe { libc::_exit(i32::from(!valid)) };
+        }
+        let mut status = 0;
+        // SAFETY: child is the PID returned by fork and status is writable.
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+        drop(guard);
+        drop(lock);
+        std::fs::remove_file(super::lock_file_path(&format!("{name}.lane0")))
+            .unwrap();
+    }
 
     #[test]
     fn prepared_lane_excludes_threads_and_distinct_file_descriptions() {

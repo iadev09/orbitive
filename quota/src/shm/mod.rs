@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use orbit_core::FleetName;
+use orbit_core::process::ProcessOwner;
 use orbit_core::shm::{
     FleetMembership, LaneHold, PreparedLaneGuard, PreparedLaneLock, ShmRegion,
     join_fleet_membership, ring_segment_name, try_hold_lane,
@@ -122,7 +123,7 @@ struct Inner {
     algorithm: Gcra,
     seed: [u8; 32],
     clock: Box<dyn Clock>,
-    pid: u32,
+    process: ProcessOwner,
     owner: usize,
     owner_generation: u64,
     owner_hold: ManuallyDrop<LaneHold>,
@@ -151,7 +152,7 @@ impl Budget {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if self.pid == std::process::id() {
+        if self.process.is_current() {
             // All pins borrow Inner. A fork child must not unlock the parent's
             // file description. Reopen after fork; inherited holds last until
             // that child's exec/exit rather than permitting false death proof.
@@ -278,7 +279,7 @@ impl Inner {
         (shard, start)
     }
     fn check_process(&self) -> Result<(), Error> {
-        if self.pid != std::process::id() {
+        if !self.process.is_current() {
             return Err(Error::IncompatibleState);
         }
         if self.owner(self.owner).generation.load(Ordering::Acquire)
@@ -542,7 +543,7 @@ impl Pin<'_> {
 
 impl Drop for Pin<'_> {
     fn drop(&mut self) {
-        if self.inner.pid == std::process::id() {
+        if self.inner.process.is_current() {
             // Mandatory, unconditional cleanup; not an admission retry.
             self.inner
                 .counter(self.inner.owner, self.index)
@@ -631,7 +632,7 @@ impl Frozen<'_> {
 
 impl Drop for Frozen<'_> {
     fn drop(&mut self) {
-        if !self.published && self.inner.pid == std::process::id() {
+        if !self.published && self.inner.process.is_current() {
             // Even a panic during the inactive copy preserves the active bank.
             self.inner
                 .slot(self.index)
@@ -782,6 +783,7 @@ impl ShmQuota {
             _ => return Err(Error::IncompatibleState),
         }
         let seed = unsafe { (*header).seed };
+        let process = ProcessOwner::current().map_err(Error::Io)?;
         let mut owner_locks = Vec::new();
         owner_locks
             .try_reserve_exact(options.owners.get())
@@ -848,7 +850,7 @@ impl ShmQuota {
                 algorithm,
                 seed,
                 clock,
-                pid: std::process::id(),
+                process,
                 owner,
                 owner_generation,
                 owner_hold: ManuallyDrop::new(owner_hold),
