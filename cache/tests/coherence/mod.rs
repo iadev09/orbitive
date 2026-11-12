@@ -66,8 +66,15 @@ fn delete_reset_and_l1_eviction_fence_delayed_puts_without_retaining_bodies() {
     store.local().apply(cache.transport(), reset, || false);
     store.local().apply(cache.transport(), put, || false);
     assert_eq!(store.read(b"key"), CacheRead::Miss);
+    let stale = cache
+        .transport()
+        .publish_put(b"values", b"new", b"stale", None)
+        .unwrap();
     store.put(b"new", b"new", None).unwrap();
     store.put(b"other", b"other", None).unwrap();
+    // `other` evicted `new`; the floor that eviction set fences an older Put.
+    store.local().apply(cache.transport(), stale, || false);
+    assert_eq!(store.read(b"new"), CacheRead::Miss);
     cache.transport().arena().reset().unwrap();
     assert!(matches!(store.read(b"other"), CacheRead::Hit(_)));
     assert_eq!(held.value, b"old"[..]);

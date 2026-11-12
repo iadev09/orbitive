@@ -279,8 +279,7 @@ impl LocalCache {
                 }
             }
             CacheMutation::Delete { store: _, key, revision } => {
-                if state.put_slot(key.to_vec(), LocalSlot::Missing { revision })
-                {
+                if state.put_slot(&key, LocalSlot::Missing { revision }) {
                     ApplyOutcome::Applied
                 } else {
                     ApplyOutcome::Ignored
@@ -333,8 +332,7 @@ impl LocalCache {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if self.is_coherent() && state.accepts(revision) {
-            let _ =
-                state.put_slot(key.to_vec(), LocalSlot::Missing { revision });
+            let _ = state.put_slot(key, LocalSlot::Missing { revision });
         }
     }
 
@@ -358,21 +356,34 @@ impl LocalState {
         !self.revision_floor.is_some_and(|floor| revision.sequence <= floor)
     }
 
+    /// Install `slot` under `key`. An existing key is replaced in place and
+    /// keeps its allocation; only a new key is copied.
     fn put_slot(
+        &mut self,
+        key: &[u8],
+        slot: LocalSlot,
+    ) -> bool {
+        if !self.accepts_key(key, slot.revision()) {
+            return false;
+        }
+        if let Some(current) = self.slots.get_mut(key) {
+            *current = slot;
+            return true;
+        }
+        self.insert_slot(key.to_vec(), slot);
+        true
+    }
+
+    /// Insert under a key known to be absent. Anything `push` returns is
+    /// therefore an eviction, whose revision the floor must cover.
+    fn insert_slot(
         &mut self,
         key: Vec<u8>,
         slot: LocalSlot,
-    ) -> bool {
-        if !self.accepts_key(&key, slot.revision()) {
-            return false;
+    ) {
+        if let Some((_, evicted)) = self.slots.push(key, slot) {
+            self.advance_floor(evicted.revision().sequence);
         }
-        let inserted_key = key.clone();
-        if let Some((removed_key, removed)) = self.slots.push(key, slot)
-            && removed_key != inserted_key
-        {
-            self.advance_floor(removed.revision().sequence);
-        }
-        self.slots.peek(&inserted_key).is_some()
     }
 
     fn accepts_key(
@@ -392,9 +403,9 @@ impl LocalState {
         expires_at_ms: Option<u64>,
         mut reclaim: impl FnMut() -> bool,
     ) -> bool {
-        // Drop the old slot before charging its replacement. If the payload
-        // cannot be kept, record its revision as a miss.
-        self.slots.pop(key);
+        // Drop the old slot before charging its replacement, keeping its key
+        // buffer. If the payload cannot be kept, record its revision as a miss.
+        let key_buffer = self.slots.pop_entry(key).map(|(key, _)| key);
         let mut slot = LocalSlot::Missing { revision };
         if let Some(value) = value.filter(|value| value.len() <= budget.limit) {
             loop {
@@ -417,7 +428,8 @@ impl LocalState {
                 }
             }
         }
-        self.put_slot(key.to_vec(), slot)
+        self.insert_slot(key_buffer.unwrap_or_else(|| key.to_vec()), slot);
+        true
     }
 
     fn evict_value(&mut self) -> bool {
