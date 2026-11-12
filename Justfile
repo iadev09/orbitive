@@ -35,8 +35,9 @@ smoke-freebsd:
 # `halt_on_error=1` because a TSan warning does not fail a test by itself, and
 # a report nobody's exit code notices is not a check.
 race:
+    test "$(uname -s)" = "Linux"
     TSAN_OPTIONS=halt_on_error=1 \
     RUSTFLAGS=-Zsanitizer=thread \
     cargo +nightly test -p orbit-core -p orbit-lock -p orbit-stream \
-        --target "$(rustc -vV | awk '/^host:/{print $2}')" \
+        --target "$(rustc +nightly -vV | awk '/^host:/{print $2}')" \
         -Zbuild-std --lib --tests -- --test-threads=1
