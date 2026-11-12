@@ -43,7 +43,6 @@ Results: [November 2026](transport-2026-11.md).
 
 ## Other benchmarks
 
-`link/benches/dispatch.rs` measures the synchronous protocol core with no wake.
 [`BENCHMARKS.md`](../../BENCHMARKS.md) records downstream HTTP measurements. Those
 compare Link with pooled HTTP/2 over a Unix socket through a full server, so they
 are not a transport comparison.

@@ -199,24 +199,16 @@ before declaring cross-user deployment validated.
 
 ## Benchmark
 
-`cargo bench -p orbit-link --bench dispatch` compares a complete small
-request/reply dispatch with `UnixStream::pair`: lane lookup, ticket encoding,
-inbox publication, ticket parsing, stream opening and the duplex bytes are in
-the Orbit measurement. The UDS case has no separate routing envelope because
-the connected pair is already its address. Both fresh-slot and retained-slot
-paths are reported, so allocation and rearming are not conflated.
+`cargo bench -p orbit-link --bench transport --features tokio` measures
+one request and its reply between two processes, with no HTTP: a connected
+Unix socket, a held stream, and a named call through the inbox, stage by
+stage, with the CPU both processes spent. What each row is and how to read
+the columns is in [docs/benches](docs/benches/README.md).
 
-The benchmark uses representative production geometry: 128 inbox frames of
-17 KiB, 128 duplex slots per node and a 64 KiB window in each direction. It is
-still a same-process, sequential protocol-cost benchmark. Its reader calls
-`Inbox::read` directly, so it does not measure a Tokio reactor wake, process
-scheduling, an application protocol or worker routing.
-
-`orbit-stream`'s `transport` benchmark answers a different question. It
+`orbit-stream`'s own `transport` benchmark answers a different question. It
 compares the exchange payload arena with sockets across body size, application
 chunk size and concurrency. `orbit-link` uses `StreamSpec` duplex byte rings,
-not that exchange arena. Those results inform stream and chunk geometry; they
-are not a substitute for a downstream named-link integration test.
+not that exchange arena.
 
-Recorded results, environments and measurement limits are in
-[BENCHMARKS.md](BENCHMARKS.md).
+Downstream measurements through a full server, with their environments and
+limits, are in [BENCHMARKS.md](BENCHMARKS.md).
