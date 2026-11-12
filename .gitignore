@@ -60,6 +60,7 @@ tmp/
 *.p12
 *.local
 /*.local
+*.local.sh
 
 # Keep public certs explicitly if you want them tracked.
 !etc/ssl/ca.crt
