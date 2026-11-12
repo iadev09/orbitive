@@ -158,16 +158,11 @@ mod unix {
 
         drop(shared);
         drop(separate);
+        // Unlink by name, on every platform: segments outlive the process.
+        cache.transport().unlink_rings().unwrap();
+        cache.transport().arena().unlink().unwrap();
         drop(cache);
         drop(fleet);
-        let prefix = format!("orbit-{name}-");
-        for entry in
-            std::fs::read_dir("/dev/shm").into_iter().flatten().flatten()
-        {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
     }
 }
 
