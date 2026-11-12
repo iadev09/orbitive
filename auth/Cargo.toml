@@ -27,7 +27,6 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-libc.workspace = true
 criterion.workspace = true
 
 [[bench]]

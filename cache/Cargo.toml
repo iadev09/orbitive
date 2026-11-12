@@ -26,7 +26,6 @@ criterion.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 libc.workspace = true
-nix.workspace = true
 
 [[bench]]
 name = "replicated_write"

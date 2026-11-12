@@ -15,7 +15,6 @@ exclude.workspace = true
 
 [features]
 fleet = [
-    "dep:orbit-core",
     "dep:orbit-pool",
     "dep:orbit-stream",
     "orbit-pool/pool-stream",
@@ -24,7 +23,6 @@ fleet = [
 
 [dependencies]
 async-trait.workspace = true
-orbit-core = { workspace = true, optional = true }
 orbit-pool = { workspace = true, optional = true }
 orbit-stream = { workspace = true, optional = true }
 thiserror.workspace = true
@@ -32,6 +30,7 @@ tokio = { workspace = true, features = ["macros"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+orbit-core.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [[bench]]
