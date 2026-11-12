@@ -109,20 +109,18 @@ impl<L: CacheLayout> CacheTransport<L> {
         let payload = PayloadRef { address, value_len: value.len() as u64 };
         let encoded =
             protocol::encode_put::<L>(store, key, expires_at_ms, payload)?;
-        let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
-        let mutation_id =
-            match self.publish_mutation(FRAME_KIND_PUT, sequence, encoded) {
-                Ok(id) => id,
-                Err(error) => {
-                    let _ = self.arena.forget_address(address);
-                    return Err(error);
-                }
-            };
+        let revision = match self.publish_mutation(FRAME_KIND_PUT, encoded) {
+            Ok(revision) => revision,
+            Err(error) => {
+                let _ = self.arena.forget_address(address);
+                return Err(error);
+            }
+        };
 
         Ok(CacheMutation::Put {
             store: Bytes::copy_from_slice(store),
             key: Bytes::copy_from_slice(key),
-            revision: CacheRevision { sequence, mutation_id },
+            revision,
             expires_at_ms,
             payload,
         })
@@ -135,13 +133,11 @@ impl<L: CacheLayout> CacheTransport<L> {
     ) -> Result<CacheMutation> {
         self.validate_key(store, key)?;
         let encoded = protocol::encode_delete::<L>(store, key)?;
-        let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
-        let mutation_id =
-            self.publish_mutation(FRAME_KIND_DELETE, sequence, encoded)?;
+        let revision = self.publish_mutation(FRAME_KIND_DELETE, encoded)?;
         Ok(CacheMutation::Delete {
             store: Bytes::copy_from_slice(store),
             key: Bytes::copy_from_slice(key),
-            revision: CacheRevision { sequence, mutation_id },
+            revision,
         })
     }
 
@@ -150,15 +146,13 @@ impl<L: CacheLayout> CacheTransport<L> {
         store: &[u8],
     ) -> Result<CacheMutation> {
         self.validate_store(store)?;
-        let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
-        let mutation_id = self.publish_mutation(
+        let revision = self.publish_mutation(
             FRAME_KIND_RESET,
-            sequence,
             protocol::encode_reset::<L>(store)?,
         )?;
         Ok(CacheMutation::Reset {
             store: Bytes::copy_from_slice(store),
-            revision: CacheRevision { sequence, mutation_id },
+            revision,
         })
     }
 
@@ -254,6 +248,15 @@ impl<L: CacheLayout> CacheTransport<L> {
         self.fleet.current_ring_version::<MutationRecord<L>>()
     }
 
+    pub(crate) fn with_recovery_cut(
+        &self,
+        recover: impl FnOnce(CacheMutationCursor, u64),
+    ) -> Result<()> {
+        Ok(self.fleet.with_ring_publication_barrier::<MutationRecord<L>, _>(
+            || recover(self.cursor_at_head(), self.current_revision_sequence()),
+        )?)
+    }
+
     /// Reset mutation history during a caller-owned quiescent boot. The
     /// arena may also hold non-cache bodies and is deliberately not reset.
     pub fn reset_rings(&self) -> Result<()> {
@@ -282,6 +285,18 @@ impl<L: CacheLayout> CacheTransport<L> {
     }
 
     fn publish_mutation(
+        &self,
+        kind: u8,
+        payload: Bytes,
+    ) -> Result<CacheRevision> {
+        self.fleet.with_ring_publication::<MutationRecord<L>, _>(|| {
+            let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
+            let mutation_id = self.publish_frame(kind, sequence, payload)?;
+            Ok(CacheRevision { sequence, mutation_id })
+        })?
+    }
+
+    fn publish_frame(
         &self,
         kind: u8,
         version: u64,

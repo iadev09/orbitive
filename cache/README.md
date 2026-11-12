@@ -1,26 +1,17 @@
 # orbit-cache
 
-`orbit-cache` keeps a bounded L1 metadata cache in each process and propagates
-mutations between processes in the same Orbit fleet. Applications normally use
-it through the [Orbitive](https://github.com/iadev09/orbitive) facade as
-`orbitive::cache`; direct package access remains available.
+`orbit-cache` keeps bounded worker-local values and propagates mutations
+between processes in the same Orbit fleet. Applications normally use
+`orbitive::cache` through the [Orbitive](https://github.com/iadev09/orbitive)
+facade.
 
-Each logical store has its own process-local metadata L1. One mutation ring
-carries `Put`, `Delete`, and `Reset` between peers. Encoded values live once in
-the fleet's existing arena; a hit pins that exact body without copying it.
+Each logical store has its own LRU. The notified mutation ring carries Put,
+Delete and Reset. A Put references an arena payload, which the receiving
+worker copies into L1. Hits read local bytes and check TTL. Each process
+starts empty at the current ring heads, and a driver applies later mutations.
 
-```text
-worker 0: models L1 + responses L1 --\
-worker 1: models L1 + responses L1 ---- mutation ring -> shared arena
-worker 2: models L1 + responses L1 --/
-```
-
-The mutation ring is bounded coherence transport; the arena is a bounded byte
-heap, not an authoritative source.
-A process starts with an empty L1 and must poll the connection to apply remote
-mutations. A normal miss may fall through to another store. Detected mutation
-loss places the L1 in `ResyncRequired` until the caller performs explicit
-recovery.
+A normal miss may fall through to a backing store. Detected mutation loss
+places the connection in `ResyncRequired` until explicit recovery.
 
 ```rust
 use std::sync::Arc;
@@ -43,20 +34,16 @@ match store.read(b"user:42") {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The cache provides named stores, bounded LRU state, TTL expiry, pinned arena
-values, fleet-wide last-write-wins ordering, and explicit payload-overwrite and
-lag reporting. On Linux, FreeBSD, and macOS 14.4 or later, `Cache::event_fd`
-supplies a readiness
-signal; consumers drain it and then call `Cache::poll`.
+Each store has an entry limit. All stores on one connection share a resident
+payload byte limit (64 MiB with the default arena geometry). Direct users can
+set it with `Cache::with_byte_capacity`. A value returned to a caller remains
+valid across eviction or invalidation.
 
-It does not provide persistence, serialization, an async runtime, concrete
-backing-store drivers, increment/decrement, or lock semantics.
-
-Value and record capacity come from the existing arena geometry (16 MiB per
-record with its 64 MiB default). Idle L1 metadata does not hold pins. A returned
-`entry.value` owns its pin until the last `Bytes` clone drops; it remains valid
-across invalidation. Kernel-held reader ownership allows SIGKILL recovery
-without timers or clearing another live process' pins.
+On Linux, FreeBSD and macOS 14.4 or later, `Cache::event_fd` supplies a readiness
+signal. Register it before the first drain, then drain coalesced signals and
+call `Cache::poll`. Direct callers may drive polling explicitly. The cache
+provides fleet-wide last-write-wins revisions, explicit payload-overwrite
+and lag reporting, and store-scoped invalidation.
 
 On Unix, `observer::CacheObserver` maps existing mutation history without
 joining a fleet or opening arena values. Its diagnostic snapshot reports

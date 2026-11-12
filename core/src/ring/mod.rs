@@ -177,6 +177,7 @@ pub struct Ring {
     topology: RingTopology,
     /// Ring-wide semantic version allocator shared by every writer lane.
     version_counter: AtomicU64,
+    pub(crate) publication: RwLock<()>,
     lanes: Vec<RingLane>,
 }
 
@@ -208,6 +209,7 @@ impl Ring {
             payload_capacity: spec.payload_capacity,
             topology: spec.topology,
             version_counter: AtomicU64::new(0),
+            publication: RwLock::new(()),
             lanes,
         }
     }

@@ -1,10 +1,10 @@
-//! Fleet-coherent cache with one shared arena body and local metadata.
+//! Fleet-coherent cache with worker-local values.
 //!
 //! One [`Cache`] is the process-local handle for one physical Orbit cache
 //! connection: the fleet arena, a mutation ring, and one mutation cursor.
 //! Logical [`Store`] handles share that connection while keeping independent,
-//! bounded process-local L1 metadata. Hits pin immutable arena bytes; no
-//! value is copied into L1. Neither ring nor arena is a durable source.
+//! bounded process-local L1 values. The arena carries payloads to listeners.
+//! Hits clone the local value handle. Neither ring nor arena is a durable source.
 
 mod error;
 mod layout;
@@ -20,6 +20,7 @@ mod coherence;
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -42,6 +43,7 @@ pub use protocol::{CacheMutation, CacheRevision, PayloadRef};
 pub use transport::{CacheMutationCursor, CacheMutationPoll, CacheTransport};
 
 pub const DEFAULT_L1_CAPACITY: usize = 10_000;
+pub const DEFAULT_L1_BYTE_CAPACITY: usize = orbit_arena::ARENA_BYTES;
 
 /// A logical cache entry address inside the shared transport.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +81,8 @@ pub struct Cache<L: CacheLayout = DefaultCacheLayout> {
     transport: CacheTransport<L>,
     stores: Arc<RwLock<HashMap<Vec<u8>, LocalCache>>>,
     cursor: Arc<Mutex<CacheMutationCursor>>,
+    budget: Arc<local::LocalBudget>,
+    coherent: Arc<AtomicBool>,
 }
 
 /// One named logical cache store with its own bounded process-local L1.
@@ -94,6 +98,8 @@ impl<L: CacheLayout> Clone for Cache<L> {
             transport: self.transport.clone(),
             stores: self.stores.clone(),
             cursor: self.cursor.clone(),
+            budget: self.budget.clone(),
+            coherent: self.coherent.clone(),
         }
     }
 }
@@ -111,20 +117,30 @@ impl<L: CacheLayout> Clone for Store<L> {
 impl<L: CacheLayout> Cache<L> {
     /// Subscribe to future mutations on one physical cache connection.
     pub fn new(fleet: Arc<Fleet>) -> Result<Self> {
+        Self::with_byte_capacity(fleet, DEFAULT_L1_BYTE_CAPACITY)
+    }
+
+    /// Subscribe at the current heads with a shared value-byte budget for
+    /// this connection's stores. A zero budget admits only empty values.
+    pub fn with_byte_capacity(
+        fleet: Arc<Fleet>,
+        value_bytes: usize,
+    ) -> Result<Self> {
         let transport = CacheTransport::<L>::new(fleet)?;
         let cursor = transport.cursor_at_head();
         Ok(Self {
             transport,
             stores: Arc::new(RwLock::new(HashMap::new())),
             cursor: Arc::new(Mutex::new(cursor)),
+            budget: Arc::new(local::LocalBudget::new(value_bytes)),
+            coherent: Arc::new(AtomicBool::new(true)),
         })
     }
 
     /// Replay mutation history still retained by the ring.
     ///
     /// This is useful for tests and diagnostics. Production cold starts
-    /// normally hydrate registered stores from their backing stores and then
-    /// follow future mutations.
+    /// open empty and follow future mutations.
     pub fn replay_retained(fleet: Arc<Fleet>) -> Result<Self> {
         let transport = CacheTransport::<L>::new(fleet)?;
         let cursor = transport.cursor_from_start();
@@ -132,6 +148,8 @@ impl<L: CacheLayout> Cache<L> {
             transport,
             stores: Arc::new(RwLock::new(HashMap::new())),
             cursor: Arc::new(Mutex::new(cursor)),
+            budget: Arc::new(local::LocalBudget::new(DEFAULT_L1_BYTE_CAPACITY)),
+            coherent: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -147,6 +165,9 @@ impl<L: CacheLayout> Cache<L> {
     ) -> Result<Store<L>> {
         let name = name.as_ref();
         self.transport.validate_store(name)?;
+        // Recovery must set the revision floor on every registered store.
+        let _cursor =
+            self.cursor.lock().unwrap_or_else(|error| error.into_inner());
 
         let local = {
             let stores =
@@ -159,7 +180,11 @@ impl<L: CacheLayout> Cache<L> {
             stores
                 .entry(name.to_vec())
                 .or_insert_with(|| {
-                    LocalCache::new(capacity, self.transport.arena().clone())
+                    LocalCache::with_connection(
+                        capacity,
+                        self.budget.clone(),
+                        self.coherent.clone(),
+                    )
                 })
                 .clone()
         });
@@ -187,21 +212,23 @@ impl<L: CacheLayout> Cache<L> {
         self.transport.reset_rings()?;
         *cursor = self.transport.cursor_at_head();
         self.for_each_local(LocalCache::reset_after_transport_reset);
+        self.coherent.store(true, Ordering::Release);
         Ok(())
     }
 
     /// Drain every committed mutation currently visible and dispatch it to
     /// the addressed logical store.
     pub fn poll(&self) -> CachePoll {
-        let raw = {
-            let mut cursor =
-                self.cursor.lock().unwrap_or_else(|error| error.into_inner());
-            self.transport.poll(&mut cursor)
-        };
+        // Keep the cursor through application. Another drain or recovery
+        // must not overtake an already-consumed batch.
+        let mut cursor =
+            self.cursor.lock().unwrap_or_else(|error| error.into_inner());
+        let raw = self.transport.poll(&mut cursor);
         let observed = raw.mutations.len();
         if raw.requires_full_resync() {
             // Loss belongs to the shared connection. The missing mutation's
             // store is unknowable, so every registered store becomes unsafe.
+            self.coherent.store(false, Ordering::Release);
             self.for_each_local(LocalCache::require_resync);
         }
 
@@ -227,7 +254,9 @@ impl<L: CacheLayout> Cache<L> {
                 continue;
             };
 
-            match local.apply(&self.transport, mutation) {
+            match local
+                .apply(&self.transport, mutation, || self.reclaim_value(&store))
+            {
                 local::ApplyOutcome::Applied => result.applied += 1,
                 local::ApplyOutcome::Ignored => result.ignored += 1,
                 local::ApplyOutcome::PayloadUnavailable { key } => {
@@ -237,7 +266,7 @@ impl<L: CacheLayout> Cache<L> {
                 }
             }
         }
-        result.resync_required = self.any_local(|local| !local.is_coherent());
+        result.resync_required = !self.coherent.load(Ordering::Acquire);
         result
     }
 
@@ -247,12 +276,17 @@ impl<L: CacheLayout> Cache<L> {
     /// Call this only when the embedding layer can satisfy ordinary misses
     /// from authoritative backing stores. Because the cursor is shared, loss
     /// and recovery apply to every registered logical store together.
-    pub fn recover_from_backing(&self) {
+    pub fn recover_from_backing(&self) -> Result<()> {
         let mut cursor =
             self.cursor.lock().unwrap_or_else(|error| error.into_inner());
-        *cursor = self.transport.cursor_at_head();
-        let revision_floor = self.transport.current_revision_sequence();
-        self.for_each_local(|local| local.recover_from_backing(revision_floor));
+        self.transport.with_recovery_cut(|head, revision_floor| {
+            self.coherent.store(false, Ordering::Release);
+            *cursor = head;
+            self.for_each_local(|local| {
+                local.recover_from_backing(revision_floor)
+            });
+            self.coherent.store(true, Ordering::Release);
+        })
     }
 
     pub fn transport(&self) -> &CacheTransport<L> {
@@ -284,15 +318,19 @@ impl<L: CacheLayout> Cache<L> {
         }
     }
 
-    fn any_local(
+    // Callers hold the connection cursor, so at most one update may lock
+    // more than one local store to reclaim the shared byte budget.
+    fn reclaim_value(
         &self,
-        mut predicate: impl FnMut(&LocalCache) -> bool,
+        except: &[u8],
     ) -> bool {
         self.stores
             .read()
             .unwrap_or_else(|error| error.into_inner())
-            .values()
-            .any(&mut predicate)
+            .iter()
+            .any(|(name, local)| {
+                name.as_slice() != except && local.evict_value()
+            })
     }
 }
 
@@ -323,6 +361,11 @@ impl<L: CacheLayout> Store<L> {
         key: &[u8],
         value: &[u8],
     ) -> Result<()> {
+        let max =
+            self.cache.budget.limit.min(self.cache.transport.max_value_len());
+        if value.len() > max {
+            return Err(Error::ValueTooLarge { value_len: value.len(), max });
+        }
         self.cache.transport.validate_put(&self.name, key, value)
     }
 
@@ -339,14 +382,20 @@ impl<L: CacheLayout> Store<L> {
         value: &[u8],
         ttl: Option<Duration>,
     ) -> Result<CacheRevision> {
+        self.validate_put(key, value)?;
+        // The local listener must not apply our own descriptor before the
+        // writer can install the original bytes.
+        let _cursor =
+            self.cache.cursor.lock().unwrap_or_else(|error| error.into_inner());
         let mutation =
             self.cache.transport.publish_put(&self.name, key, value, ttl)?;
-        let CacheMutation::Put { revision, expires_at_ms, payload, .. } =
-            mutation
+        let CacheMutation::Put { revision, expires_at_ms, .. } = mutation
         else {
             unreachable!("publish_put returned a non-put mutation")
         };
-        self.local.install_local(key, payload, revision, expires_at_ms);
+        self.local.install_local(key, value, revision, expires_at_ms, || {
+            self.cache.reclaim_value(&self.name)
+        });
         Ok(revision)
     }
 

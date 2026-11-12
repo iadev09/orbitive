@@ -1,4 +1,4 @@
-//! Independent processes sharing arena bytes and mutation metadata.
+//! Independent processes delivering arena payloads to worker-local values.
 #![cfg(unix)]
 
 use std::io::{Read, Write};
@@ -60,7 +60,7 @@ fn writer(
 }
 
 #[test]
-fn child_put_wakes_and_populates_parent_metadata() {
+fn child_put_wakes_and_populates_parent_local_value() {
     let name = fresh_name();
     let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).unwrap());
     let cache = Cache::<DefaultCacheLayout>::new(fleet).unwrap();
@@ -96,7 +96,8 @@ fn child_put_wakes_and_populates_parent_metadata() {
             payload
         })
         .unwrap();
-    assert_eq!(same.as_ptr(), entry.value.as_ptr());
+    assert_ne!(same.as_ptr(), entry.value.as_ptr());
+    assert_eq!(same, entry.value);
     cache.transport().unlink_rings().unwrap();
     cache.transport().arena().unlink().unwrap();
 }

@@ -674,6 +674,58 @@ impl Fleet {
         }
     }
 
+    /// Run a per-node ring publication that participates in a publication
+    /// barrier. Allocate its semantic version and commit the frame within
+    /// the closure. Other participating publishers can run concurrently.
+    pub fn with_ring_publication<T: OrbitTyped, R>(
+        &self,
+        publish: impl FnOnce() -> R,
+    ) -> std::io::Result<R> {
+        self.with_publication_lock::<T, R>(false, publish)
+    }
+
+    /// Exclude cooperating publishers while reading a consistent set of
+    /// committed lane heads and the semantic version. Every writer for the
+    /// kind must use [`Self::with_ring_publication`].
+    pub fn with_ring_publication_barrier<T: OrbitTyped, R>(
+        &self,
+        snapshot: impl FnOnce() -> R,
+    ) -> std::io::Result<R> {
+        self.with_publication_lock::<T, R>(true, snapshot)
+    }
+
+    fn with_publication_lock<T: OrbitTyped, R>(
+        &self,
+        exclusive: bool,
+        operation: impl FnOnce() -> R,
+    ) -> std::io::Result<R> {
+        self.assert_per_node::<T>();
+        match &self.inner.backing {
+            RingBacking::InMemory(rings) => {
+                let ring = rings.get_or_create::<T>();
+                if exclusive {
+                    let _guard = ring
+                        .publication
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner());
+                    Ok(operation())
+                } else {
+                    let _guard = ring
+                        .publication
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner());
+                    Ok(operation())
+                }
+            }
+            #[cfg(unix)]
+            RingBacking::Shm(rings) => {
+                let ring = rings.get_or_create_for::<T>()?;
+                let _guard = ring.publication_lock(exclusive)?;
+                Ok(operation())
+            }
+        }
+    }
+
     /// Clear every lane for `T` and reset all heads to zero.
     ///
     /// This is an owner-side boot cleanup primitive. It is safe for

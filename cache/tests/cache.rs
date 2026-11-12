@@ -26,7 +26,7 @@ fn open(cache: &Cache<TinyLayout>) -> Store<TinyLayout> {
 }
 
 #[test]
-fn put_uses_the_same_arena_body_in_publisher_and_peer() {
+fn put_installs_independently_owned_values() {
     let fleet = Arc::new(Fleet::join("cache_chunks", 1).expect("fleet"));
     let publisher_cache =
         Cache::<TinyLayout>::new(fleet.clone()).expect("publisher");
@@ -35,6 +35,7 @@ fn put_uses_the_same_arena_body_in_publisher_and_peer() {
     let peer = open(&peer_cache);
 
     publisher.put(b"greeting", b"hello-world", None).expect("put");
+    assert_eq!(peer.read(b"greeting"), CacheRead::Miss);
     let poll = peer_cache.poll();
 
     assert_eq!(poll.observed, 1);
@@ -47,10 +48,10 @@ fn put_uses_the_same_arena_body_in_publisher_and_peer() {
     let CacheRead::Hit(published) = publisher.read(b"greeting") else {
         panic!("publisher hit");
     };
-    assert_eq!(entry.value.as_ptr(), published.value.as_ptr());
+    assert_ne!(entry.value.as_ptr(), published.value.as_ptr());
     let shared = publisher_cache.transport().arena();
     shared.reset().unwrap();
-    assert_eq!(peer.read(b"greeting"), CacheRead::Miss);
+    assert_eq!(peer.read(b"greeting"), CacheRead::Hit(entry.clone()));
     assert_eq!(&entry.value[..], b"hello-world");
 }
 
@@ -91,11 +92,15 @@ fn delete_and_reset_propagate_through_the_mutation_ring() {
     assert!(matches!(peer.read(b"b"), CacheRead::Hit(_)));
 
     publisher.delete(b"a").expect("delete a");
+    assert_eq!(publisher.read(b"a"), CacheRead::Miss);
+    assert!(matches!(peer.read(b"a"), CacheRead::Hit(_)));
     peer_cache.poll();
     assert_eq!(peer.read(b"a"), CacheRead::Miss);
     assert!(matches!(peer.read(b"b"), CacheRead::Hit(_)));
 
     publisher.reset().expect("reset");
+    assert_eq!(publisher.read(b"b"), CacheRead::Miss);
+    assert!(matches!(peer.read(b"b"), CacheRead::Hit(_)));
     peer_cache.poll();
     assert_eq!(peer.read(b"a"), CacheRead::Miss);
     assert_eq!(peer.read(b"b"), CacheRead::Miss);
@@ -110,6 +115,8 @@ fn overwritten_payload_is_reported_and_never_misread() {
     let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
     let peer = open(&peer_cache);
 
+    publisher.put(b"old", b"previous", None).unwrap();
+    assert_eq!(peer_cache.poll().applied, 1);
     let CacheMutation::Put { payload, .. } = publisher_cache
         .transport()
         .publish_put(STORE, b"old", b"abcdefgh", None)
@@ -156,6 +163,8 @@ fn mutation_lag_disables_local_hits_until_resync() {
     assert_eq!(poll.loss.overwritten, 1);
     assert!(poll.resync_required);
     assert_eq!(peer.read(b"anything"), CacheRead::ResyncRequired);
+    let new_store = peer_cache.open_store(b"new", capacity(8)).unwrap();
+    assert_eq!(new_store.read(b"anything"), CacheRead::ResyncRequired);
 }
 
 #[test]
@@ -172,7 +181,7 @@ fn backing_recovery_resubscribes_with_an_empty_coherent_l1() {
     }
     assert!(peer_cache.poll().resync_required);
 
-    peer_cache.recover_from_backing();
+    peer_cache.recover_from_backing().unwrap();
 
     assert_eq!(peer.read(b"backing-key"), CacheRead::Miss);
     publisher.put(b"future", b"visible", None).expect("future put");
@@ -192,23 +201,39 @@ fn ttl_expiry_becomes_a_local_miss() {
 }
 
 #[test]
-fn resident_l1_metadata_does_not_pin_values_under_arena_pressure() {
+fn local_value_bytes_are_bounded_across_stores() {
     let fleet = Arc::new(Fleet::join("example", 1).expect("fleet"));
-    let cache = Cache::<TinyLayout>::new(fleet).expect("cache");
+    let cache = Cache::<TinyLayout>::with_byte_capacity(fleet, 8).unwrap();
     let store = open(&cache);
-    let value = vec![0x5a; orbit_arena::ARENA_RECORD_MAX];
-    let count = orbit_arena::ARENA_BYTES / value.len();
-    for index in 0..=count {
-        // An idle L1 must not make the fifth full-size publication fail
-        // because the first four values retained its whole byte budget.
-        store.put(format!("key-{index}").as_bytes(), &value, None).unwrap();
-    }
-    assert_eq!(store.read(b"key-0"), CacheRead::Miss);
-    let CacheRead::Hit(latest) = store.read(format!("key-{count}").as_bytes())
-    else {
-        panic!("latest arena body");
-    };
-    assert_eq!(latest.value.as_ref(), value);
+    let other = cache.open_store(b"other", capacity(8)).unwrap();
+    store.put(b"first", b"12345678", None).unwrap();
+    let CacheRead::Hit(held) = store.read(b"first") else { panic!("hit") };
+    other.put(b"key", b"12", None).unwrap();
+    assert_eq!(store.read(b"first"), CacheRead::Miss);
+    assert!(matches!(other.read(b"key"), CacheRead::Hit(_)));
+    store.put(b"second", b"1234", None).unwrap();
+    assert!(matches!(other.read(b"key"), CacheRead::Hit(_)));
+    assert!(other.put(b"key", b"123456789", None).is_err());
+    let transport = cache.transport();
+    transport.publish_put(b"other", b"key", b"123456789", None).unwrap();
+    cache.poll();
+    assert_eq!(other.read(b"key"), CacheRead::Miss);
+    assert_eq!(held.value, b"12345678"[..]);
+}
+
+#[test]
+fn cold_start_ignores_retained_mutations_and_delivers_future_ones() {
+    let fleet = Arc::new(Fleet::join("cache_cold_start", 1).unwrap());
+    let writer = Cache::<TinyLayout>::new(fleet.clone()).unwrap();
+    let publisher = open(&writer);
+    publisher.put(b"old", b"retained", None).unwrap();
+    let reader = Cache::<TinyLayout>::new(fleet).unwrap();
+    let peer = open(&reader);
+    assert!(reader.poll().is_empty());
+    assert_eq!(peer.read(b"old"), CacheRead::Miss);
+    publisher.put(b"new", b"future", None).unwrap();
+    assert_eq!(reader.poll().applied, 1);
+    assert!(matches!(peer.read(b"new"), CacheRead::Hit(_)));
 }
 
 #[test]

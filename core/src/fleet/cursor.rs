@@ -223,7 +223,7 @@ impl Fleet {
         combined
     }
 
-    fn assert_per_node<T: OrbitTyped>(&self) {
+    pub(super) fn assert_per_node<T: OrbitTyped>(&self) {
         assert_eq!(
             T::RING_SPEC.topology,
             RingTopology::PerNode,

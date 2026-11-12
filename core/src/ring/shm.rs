@@ -491,6 +491,17 @@ impl ShmRing {
         }
     }
 
+    pub(crate) fn publication_lock(
+        &self,
+        exclusive: bool,
+    ) -> std::io::Result<shm::ShmRegionLock> {
+        if exclusive {
+            self.region.lock_exclusive()
+        } else {
+            self.region.lock_shared()
+        }
+    }
+
     fn lane_header(
         &self,
         lane: usize,

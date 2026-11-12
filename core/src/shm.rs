@@ -567,13 +567,24 @@ impl ShmRegion {
     /// `flock` ownership is held by the kernel and is released when a process
     /// exits or the descriptor closes, including abnormal termination.
     pub fn lock_exclusive(&self) -> io::Result<ShmRegionLock> {
+        self.lock(libc::LOCK_EX)
+    }
+
+    pub(crate) fn lock_shared(&self) -> io::Result<ShmRegionLock> {
+        self.lock(libc::LOCK_SH)
+    }
+
+    fn lock(
+        &self,
+        operation: libc::c_int,
+    ) -> io::Result<ShmRegionLock> {
         if !self.process_lock {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SHM region was opened without a process lock",
             ));
         }
-        lock_fd_exclusive(self.open_own_lock_file()?)
+        lock_fd(self.open_own_lock_file()?, operation)
     }
 
     /// A new description of this region's lock file, for one critical
@@ -743,7 +754,7 @@ fn validate_minimum_size(
     Ok(())
 }
 
-/// RAII guard for a [`ShmRegion`]'s process-recoverable exclusive lock.
+/// RAII guard for a [`ShmRegion`]'s process-recoverable lock.
 ///
 /// Semantic crates use this when a current-state transition must be atomic
 /// across fleet processes. Dropping the guard releases the kernel lock.
@@ -858,8 +869,15 @@ fn open_lock_file_in(
 }
 
 fn lock_fd_exclusive(lock_fd: OwnedFd) -> io::Result<ShmRegionLock> {
+    self::lock_fd(lock_fd, libc::LOCK_EX)
+}
+
+fn lock_fd(
+    lock_fd: OwnedFd,
+    operation: libc::c_int,
+) -> io::Result<ShmRegionLock> {
     loop {
-        let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_EX) };
+        let rc = unsafe { libc::flock(lock_fd.as_raw_fd(), operation) };
         if rc == 0 {
             return Ok(ShmRegionLock { lock_fd });
         }
