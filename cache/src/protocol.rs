@@ -4,7 +4,6 @@ use bytes::{BufMut, Bytes, BytesMut};
 use orbit_core::{Frame, NetId64};
 
 use crate::layout::CacheLayout;
-use crate::{Error, Result};
 
 const PROTOCOL_VERSION: u8 = 3;
 pub(crate) const FRAME_KIND_PUT: u8 = 1;
@@ -110,9 +109,11 @@ pub(crate) fn encode_put<L: CacheLayout>(
     key: &[u8],
     expires_at_ms: Option<u64>,
     payload: PayloadRef,
-) -> Result<Bytes> {
-    validate_store::<L>(store)?;
-    validate_key::<L>(store.len(), key)?;
+) -> Bytes {
+    debug_assert!(!store.is_empty() && store.len() <= max_store_len::<L>());
+    debug_assert!(
+        !key.is_empty() && key.len() <= max_key_len::<L>(store.len())
+    );
     let mut out = BytesMut::with_capacity(
         MIN_MUTATION_HEADER_LEN + store.len() + key.len(),
     );
@@ -125,15 +126,17 @@ pub(crate) fn encode_put<L: CacheLayout>(
     out.put_u64_le(payload.value_len);
     out.put_slice(store);
     out.put_slice(key);
-    Ok(out.freeze())
+    out.freeze()
 }
 
 pub(crate) fn encode_delete<L: CacheLayout>(
     store: &[u8],
     key: &[u8],
-) -> Result<Bytes> {
-    validate_store::<L>(store)?;
-    validate_key::<L>(store.len(), key)?;
+) -> Bytes {
+    debug_assert!(!store.is_empty() && store.len() <= max_store_len::<L>());
+    debug_assert!(
+        !key.is_empty() && key.len() <= max_key_len::<L>(store.len())
+    );
     let mut out = BytesMut::with_capacity(
         MIN_MUTATION_HEADER_LEN + store.len() + key.len(),
     );
@@ -146,11 +149,11 @@ pub(crate) fn encode_delete<L: CacheLayout>(
     out.put_u64_le(0);
     out.put_slice(store);
     out.put_slice(key);
-    Ok(out.freeze())
+    out.freeze()
 }
 
-pub(crate) fn encode_reset<L: CacheLayout>(store: &[u8]) -> Result<Bytes> {
-    validate_store::<L>(store)?;
+pub(crate) fn encode_reset<L: CacheLayout>(store: &[u8]) -> Bytes {
+    debug_assert!(!store.is_empty() && store.len() <= max_store_len::<L>());
     let mut out =
         BytesMut::with_capacity(MIN_MUTATION_HEADER_LEN + store.len());
     out.put_u8(PROTOCOL_VERSION);
@@ -161,7 +164,7 @@ pub(crate) fn encode_reset<L: CacheLayout>(store: &[u8]) -> Result<Bytes> {
     out.put_u64_le(0);
     out.put_u64_le(0);
     out.put_slice(store);
-    Ok(out.freeze())
+    out.freeze()
 }
 
 pub(crate) fn decode(frame: &Frame) -> Option<CacheMutation> {
@@ -243,29 +246,4 @@ fn decode_with_slot_limit<const SLOTS: usize>(
         }
         _ => None,
     }
-}
-
-fn validate_store<L: CacheLayout>(store: &[u8]) -> Result<()> {
-    if store.is_empty() {
-        return Err(Error::StoreEmpty);
-    }
-    let max = max_store_len::<L>();
-    if store.len() > max {
-        return Err(Error::StoreTooLarge { store_len: store.len(), max });
-    }
-    Ok(())
-}
-
-fn validate_key<L: CacheLayout>(
-    store_len: usize,
-    key: &[u8],
-) -> Result<()> {
-    if key.is_empty() {
-        return Err(Error::KeyEmpty);
-    }
-    let max = max_key_len::<L>(store_len);
-    if key.len() > max {
-        return Err(Error::KeyTooLarge { key_len: key.len(), max });
-    }
-    Ok(())
 }

@@ -104,8 +104,7 @@ fn recovery_serializes_with_a_reserved_publication_and_another_drain() {
                     sequence,
                     protocol::encode_delete::<DefaultCacheLayout>(
                         b"default", b"old",
-                    )
-                    .unwrap(),
+                    ),
                 );
                 sequence
             })

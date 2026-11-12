@@ -100,23 +100,8 @@ impl<L: CacheLayout> CacheTransport<L> {
         ttl: Option<Duration>,
     ) -> Result<CacheMutation> {
         self.validate_put(store, key, value)?;
-
-        let expires_at_ms =
-            ttl.map(|ttl| now_ms().saturating_add(duration_ms(ttl)));
-        let address = self
-            .arena
-            .store(Record::body(value).stamp(expires_at_ms.unwrap_or(0)))?;
-        let payload = PayloadRef { address, value_len: value.len() as u64 };
-        let encoded =
-            protocol::encode_put::<L>(store, key, expires_at_ms, payload)?;
-        let revision = match self.publish_mutation(FRAME_KIND_PUT, encoded) {
-            Ok(revision) => revision,
-            Err(error) => {
-                let _ = self.arena.forget_address(address);
-                return Err(error);
-            }
-        };
-
+        let (revision, expires_at_ms, payload) =
+            self.publish_validated_put(store, key, value, ttl)?;
         Ok(CacheMutation::Put {
             store: Bytes::copy_from_slice(store),
             key: Bytes::copy_from_slice(key),
@@ -126,14 +111,39 @@ impl<L: CacheLayout> CacheTransport<L> {
         })
     }
 
+    /// Publish a Put whose store, key and value the caller has validated
+    /// against this layout, returning only what the caller lacks.
+    pub(crate) fn publish_validated_put(
+        &self,
+        store: &[u8],
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(CacheRevision, Option<u64>, PayloadRef)> {
+        let expires_at_ms =
+            ttl.map(|ttl| now_ms().saturating_add(duration_ms(ttl)));
+        let address = self
+            .arena
+            .store(Record::body(value).stamp(expires_at_ms.unwrap_or(0)))?;
+        let payload = PayloadRef { address, value_len: value.len() as u64 };
+        let encoded =
+            protocol::encode_put::<L>(store, key, expires_at_ms, payload);
+        match self.publish_mutation(FRAME_KIND_PUT, encoded) {
+            Ok(revision) => Ok((revision, expires_at_ms, payload)),
+            Err(error) => {
+                let _ = self.arena.forget_address(address);
+                Err(error)
+            }
+        }
+    }
+
     pub fn publish_delete(
         &self,
         store: &[u8],
         key: &[u8],
     ) -> Result<CacheMutation> {
         self.validate_key(store, key)?;
-        let encoded = protocol::encode_delete::<L>(store, key)?;
-        let revision = self.publish_mutation(FRAME_KIND_DELETE, encoded)?;
+        let revision = self.publish_validated_delete(store, key)?;
         Ok(CacheMutation::Delete {
             store: Bytes::copy_from_slice(store),
             key: Bytes::copy_from_slice(key),
@@ -146,14 +156,34 @@ impl<L: CacheLayout> CacheTransport<L> {
         store: &[u8],
     ) -> Result<CacheMutation> {
         self.validate_store(store)?;
-        let revision = self.publish_mutation(
-            FRAME_KIND_RESET,
-            protocol::encode_reset::<L>(store)?,
-        )?;
+        let revision = self.publish_validated_reset(store)?;
         Ok(CacheMutation::Reset {
             store: Bytes::copy_from_slice(store),
             revision,
         })
+    }
+
+    /// Publish a Delete whose store and key the caller has validated.
+    pub(crate) fn publish_validated_delete(
+        &self,
+        store: &[u8],
+        key: &[u8],
+    ) -> Result<CacheRevision> {
+        self.publish_mutation(
+            FRAME_KIND_DELETE,
+            protocol::encode_delete::<L>(store, key),
+        )
+    }
+
+    /// Publish a Reset whose store name the caller has validated.
+    pub(crate) fn publish_validated_reset(
+        &self,
+        store: &[u8],
+    ) -> Result<CacheRevision> {
+        self.publish_mutation(
+            FRAME_KIND_RESET,
+            protocol::encode_reset::<L>(store),
+        )
     }
 
     pub fn poll(

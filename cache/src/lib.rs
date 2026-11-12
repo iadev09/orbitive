@@ -92,6 +92,10 @@ pub struct Store<L: CacheLayout = DefaultCacheLayout> {
     cache: Cache<L>,
     name: Bytes,
     local: LocalCache,
+    /// Longest key this store's name leaves room for in a mutation frame.
+    max_key_len: usize,
+    /// Largest value both the arena and this connection's budget admit.
+    max_value_len: usize,
 }
 
 impl<L: CacheLayout> Clone for Cache<L> {
@@ -112,6 +116,8 @@ impl<L: CacheLayout> Clone for Store<L> {
             cache: self.cache.clone(),
             name: self.name.clone(),
             local: self.local.clone(),
+            max_key_len: self.max_key_len,
+            max_value_len: self.max_value_len,
         }
     }
 }
@@ -191,10 +197,17 @@ impl<L: CacheLayout> Cache<L> {
                 .clone()
         });
 
+        // The name is validated above and fixed for the handle's life, so its
+        // limits are settled here rather than on every operation.
         Ok(Store {
             cache: self.clone(),
             name: Bytes::copy_from_slice(name),
             local,
+            max_key_len: self.transport.max_key_len(name),
+            max_value_len: self
+                .budget
+                .limit
+                .min(self.transport.max_value_len()),
         })
     }
 
@@ -363,19 +376,25 @@ impl<L: CacheLayout> Store<L> {
         key: &[u8],
         value: &[u8],
     ) -> Result<()> {
-        let max =
-            self.cache.budget.limit.min(self.cache.transport.max_value_len());
+        let max = self.max_value_len;
         if value.len() > max {
             return Err(Error::ValueTooLarge { value_len: value.len(), max });
         }
-        self.cache.transport.validate_put(&self.name, key, value)
+        self.validate_key(key)
     }
 
     pub fn validate_key(
         &self,
         key: &[u8],
     ) -> Result<()> {
-        self.cache.transport.validate_key(&self.name, key)
+        if key.is_empty() {
+            return Err(Error::KeyEmpty);
+        }
+        let max = self.max_key_len;
+        if key.len() > max {
+            return Err(Error::KeyTooLarge { key_len: key.len(), max });
+        }
+        Ok(())
     }
 
     pub fn put(
@@ -389,12 +408,10 @@ impl<L: CacheLayout> Store<L> {
         // writer can install the original bytes.
         let _cursor =
             self.cache.cursor.lock().unwrap_or_else(|error| error.into_inner());
-        let mutation =
-            self.cache.transport.publish_put(&self.name, key, value, ttl)?;
-        let CacheMutation::Put { revision, expires_at_ms, .. } = mutation
-        else {
-            unreachable!("publish_put returned a non-put mutation")
-        };
+        let (revision, expires_at_ms, _) = self
+            .cache
+            .transport
+            .publish_validated_put(&self.name, key, value, ttl)?;
         self.local.install_local(key, value, revision, expires_at_ms, || {
             self.cache.reclaim_value(&self.name)
         });
@@ -405,20 +422,17 @@ impl<L: CacheLayout> Store<L> {
         &self,
         key: &[u8],
     ) -> Result<CacheRevision> {
-        let mutation = self.cache.transport.publish_delete(&self.name, key)?;
-        let CacheMutation::Delete { revision, .. } = mutation else {
-            unreachable!("publish_delete returned a non-delete mutation")
-        };
+        self.validate_key(key)?;
+        let revision =
+            self.cache.transport.publish_validated_delete(&self.name, key)?;
         self.local.install_missing(key, revision);
         Ok(revision)
     }
 
     /// Clear only this logical store.
     pub fn reset(&self) -> Result<CacheRevision> {
-        let mutation = self.cache.transport.publish_reset(&self.name)?;
-        let CacheMutation::Reset { revision, .. } = mutation else {
-            unreachable!("publish_reset returned a non-reset mutation")
-        };
+        let revision =
+            self.cache.transport.publish_validated_reset(&self.name)?;
         self.local.reset_local(revision);
         Ok(revision)
     }
