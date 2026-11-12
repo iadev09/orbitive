@@ -31,6 +31,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use orbit_core::Fleet;
+mod ranges;
+use ranges::Ranges;
 #[cfg(unix)]
 mod reader;
 #[cfg(unix)]
@@ -235,7 +237,10 @@ struct Header {
     readers: u32,
     /// Non-repeating record generation, also ordering index eviction.
     record_generation: AtomicU64,
-    _reserved: [u8; 16],
+    // Occupy reserved bytes without changing the v2 shared layout.
+    range_generation: AtomicU64,
+    range_root: AtomicU32,
+    range_state: AtomicU32,
 }
 
 impl Header {
@@ -251,7 +256,9 @@ impl Header {
             generation: AtomicU32::new(1),
             readers: u32::from(readers),
             record_generation: AtomicU64::new(0),
-            _reserved: [0; 16],
+            range_generation: AtomicU64::new(0),
+            range_root: AtomicU32::new(0),
+            range_state: AtomicU32::new(0),
         }
     }
 
@@ -286,7 +293,8 @@ struct Slot {
     encoded_len: AtomicU64,
     stamp: AtomicU64,
     extra: AtomicU64,
-    _padding: [u8; 48],
+    range: ranges::Node,
+    _padding: [u8; 24],
 }
 
 impl Slot {
@@ -309,6 +317,7 @@ impl Slot {
     }
 }
 
+const _: () = assert!(size_of::<Header>() == 64);
 const _: () = assert!(size_of::<Slot>() == 128);
 const _: () = assert!(ARENA_SLOTS.is_power_of_two());
 const _: () = assert!(ARENA_SLOTS <= u32::MAX as usize);
@@ -760,6 +769,14 @@ impl Arena {
         #[cfg(feature = "bench-timing")]
         let lock_acquired = Instant::now();
         let slots = self.inner.slots();
+        let header = self.inner.header();
+        let cursor = header.cursor.load(Ordering::Relaxed);
+        let bytes = ARENA_BYTES as u64;
+        let ranges = if cursor >= bytes || total as u64 > bytes - cursor {
+            Some(Ranges::begin(&self.inner)?)
+        } else {
+            None
+        };
 
         // Whatever this key named before is gone once the new record is
         // published; retiring it first keeps a lookup from finding two.
@@ -771,6 +788,7 @@ impl Arena {
         let mut slot_scan = Duration::ZERO;
         let offset = match self.allocate_locked(
             total as u64,
+            ranges.as_ref(),
             #[cfg(feature = "bench-timing")]
             &mut slot_scan,
         ) {
@@ -779,6 +797,7 @@ impl Arena {
                 self.inner.reclaim_locked()?;
                 self.allocate_locked(
                     total as u64,
+                    ranges.as_ref(),
                     #[cfg(feature = "bench-timing")]
                     &mut slot_scan,
                 )?
@@ -796,9 +815,10 @@ impl Arena {
             Err(error) => return Err(error),
         };
         let slot = &slots[index];
-        let generation = self
-            .inner
-            .header()
+        if let Some(ranges) = &ranges {
+            ranges.remove(index);
+        }
+        let generation = header
             .record_generation
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
@@ -845,6 +865,10 @@ impl Arena {
             if key.is_some() { SLOT_LIVE } else { SLOT_ADDRESSED },
             Ordering::SeqCst,
         );
+        if let Some(ranges) = ranges {
+            ranges.insert(index);
+            ranges.finish(generation);
+        }
         #[cfg(feature = "bench-timing")]
         {
             let lock_held = lock_acquired.elapsed();
@@ -1043,6 +1067,7 @@ impl Arena {
     fn allocate_locked(
         &self,
         len: u64,
+        ranges: Option<&Ranges<'_>>,
         #[cfg(feature = "bench-timing")] slot_scan: &mut Duration,
     ) -> Result<u64> {
         let header = self.inner.header();
@@ -1061,6 +1086,7 @@ impl Arena {
             })
         };
         let slots = self.inner.slots();
+        let ranges = ranges.expect("wrapped arena has a range index");
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -1077,14 +1103,11 @@ impl Arena {
             let mut blocked_until = None;
             #[cfg(feature = "bench-timing")]
             let scan_started = Instant::now();
-            for (index, slot) in slots.iter().enumerate() {
-                if slot.state.load(Ordering::Acquire) == SLOT_EMPTY {
-                    continue;
-                }
+            let mut after = None;
+            while let Some(index) = ranges.overlap(position, end, after) {
+                let slot = &slots[index];
                 let (span_start, span_end) = slot.span();
-                if span_end <= position || span_start >= end {
-                    continue;
-                }
+                after = Some((span_start, index));
                 if self.inner.pinned(index) {
                     blocked_until = Some(
                         blocked_until
@@ -1099,6 +1122,8 @@ impl Arena {
                         blocked_until
                             .map_or(span_end, |b: u64| b.max(span_end)),
                     );
+                } else {
+                    ranges.remove(index);
                 }
             }
             #[cfg(feature = "bench-timing")]

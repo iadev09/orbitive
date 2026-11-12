@@ -107,5 +107,5 @@ Run `cargo bench -p orbit-cache --bench fleet_write --features arena-timing -- -
 to include lock acquisition and slot scan timings.
 
 When a record fits in the unwritten portion of the arena's first pass,
-reservation advances the cursor directly. After wrap, reservation scans for
-overlapping records and protects pinned bytes.
+reservation advances the cursor directly. After wrap, a byte-range index
+finds overlapping records and reservation skips pinned bytes.
