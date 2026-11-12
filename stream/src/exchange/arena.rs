@@ -771,15 +771,8 @@ impl Doorstep for Arena {
         &self.local_credit().generation
     }
 
-    fn listening(
-        &self,
-        delta: i32,
-    ) {
-        if delta > 0 {
-            self.local_credit().waiters.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.local_credit().waiters.fetch_sub(1, Ordering::SeqCst);
-        }
+    fn driver_waiters(&self) -> &AtomicU32 {
+        &self.local_credit().waiters
     }
 
     /// Wake the parked senders and creators that may proceed; the others

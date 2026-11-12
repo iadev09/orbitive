@@ -625,17 +625,10 @@ impl Doorstep for Table {
         &self.doorbell(usize::from(self.node)).generation
     }
 
-    fn listening(
-        &self,
-        delta: i32,
-    ) {
-        let doorbell = self.doorbell(usize::from(self.node));
-        if delta > 0 {
-            doorbell.incarnation.store(self.incarnation, Ordering::SeqCst);
-            doorbell.listening.fetch_add(1, Ordering::SeqCst);
-        } else {
-            doorbell.listening.fetch_sub(1, Ordering::SeqCst);
-        }
+    fn driver_waiters(&self) -> &AtomicU32 {
+        let doorbell = self.own_doorbell();
+        doorbell.incarnation.store(self.incarnation, Ordering::SeqCst);
+        &doorbell.listening
     }
 
     fn drain(&self) {

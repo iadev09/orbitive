@@ -234,7 +234,11 @@ socket.
     (segment, node) on the shared generation word. The writer wakes that
     thread, which drains the pending bitmap and wakes the registered task:
     two wakes per crossing (writer -> thread, thread -> task) and one
-    standing thread. This is the fallback when no async runtime is current.
+    standing thread. The driver counts itself only around the final generation
+    check and address wait. A publication during drain changes the generation,
+    so the driver drains again without depending on a syscall. The payload
+    Arena uses the same park loop for credit notifications. This is the table
+    fallback when no async runtime is current.
   - **Bell** (`bell.rs`, with the `tokio` feature) binds one Unix datagram
     socket whose name is derived from the SHM segment, node and uid. A task
     on the runtime waits on it as on any other socket. Before parking it sets

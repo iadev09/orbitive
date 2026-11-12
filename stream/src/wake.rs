@@ -123,11 +123,8 @@ impl Registry {
 pub(crate) trait Doorstep: Send + Sync + 'static {
     /// The generation word of this process's node.
     fn generation(&self) -> &AtomicU32;
-    /// Called once when the driver starts and once when it stops.
-    fn listening(
-        &self,
-        delta: i32,
-    );
+    /// Bind the driver to this node's waiter count once at startup.
+    fn driver_waiters(&self) -> &AtomicU32;
     /// Swap out every pending bit for this node and wake the local tasks;
     /// wake the offer waiter if an offer is pending.
     fn drain(&self);
@@ -159,7 +156,7 @@ impl Driver {
                 // SAFETY: `Table::drop` sets `stop`, rings its own doorbell and
                 // joins this thread before the mapping goes away.
                 let table = unsafe { &*target.0 };
-                run(table, &thread_stop);
+                run(table, &thread_stop, crate::wait_on);
             })?;
         Ok(Self { stop, thread: Some(thread), owner })
     }
@@ -171,12 +168,7 @@ impl Driver {
         if !self.owner.is_current() {
             return;
         }
-        self.stop.store(true, Ordering::Release);
-        // Change the word before waking, as the ring bridge does: a driver
-        // between its stop check and its park then fails the compare and
-        // never parks after our wake.
-        generation.fetch_add(1, Ordering::SeqCst);
-        crate::wake_on(generation);
+        signal_stop(&self.stop, generation);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -188,27 +180,46 @@ struct SendPtr<T>(*const T);
 // SAFETY: the pointee is `Sync` and outlives the thread (see `Driver::start`).
 unsafe impl<T: Sync> Send for SendPtr<T> {}
 
+fn signal_stop(
+    stop: &AtomicBool,
+    generation: &AtomicU32,
+) {
+    stop.store(true, Ordering::Release);
+    // A driver between its stop check and park fails the generation compare.
+    generation.fetch_add(1, Ordering::SeqCst);
+    crate::wake_on(generation);
+}
+
 fn run<T: Doorstep>(
     table: &T,
     stop: &AtomicBool,
+    wait: impl Fn(&AtomicU32, u32) -> crate::Result<()>,
 ) {
     let generation = table.generation();
-    table.listening(1);
-    let mut seen = generation.load(Ordering::SeqCst);
+    let waiters = table.driver_waiters();
     while !stop.load(Ordering::Acquire) {
+        let seen = generation.load(Ordering::SeqCst);
         table.drain();
-        // A bit set after the drain comes with a bump after this load, so
-        // either we see it here or the park returns at once: never neither.
+        // Writers publish, bump the generation, then read the count. Arm
+        // before rechecking so either we observe the bump or they wake us.
+        waiters.fetch_add(1, Ordering::SeqCst);
         let now = generation.load(Ordering::SeqCst);
-        if now != seen {
-            seen = now;
-            continue;
-        }
-        // The table refused to open where the platform cannot wait, so a
-        // failure here is the table going away, not a system to poll around.
-        if crate::wait_on(generation, seen).is_err() {
+        let result = if now == seen && !stop.load(Ordering::Acquire) {
+            wait(generation, seen)
+        } else {
+            Ok(())
+        };
+        waiters.fetch_sub(1, Ordering::SeqCst);
+        // The table refuses to open where the platform cannot wait.
+        if result.is_err() {
             break;
         }
     }
-    table.listening(-1);
 }
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "freebsd", target_os = "macos")
+))]
+#[path = "../tests/unit/wake.rs"]
+mod tests;
