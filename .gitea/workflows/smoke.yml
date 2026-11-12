@@ -8,6 +8,9 @@ jobs:
   linux:
     name: Linux
     runs-on: linux
+    container:
+      # Parallel arena tests can populate several default 64 MiB segments.
+      options: --shm-size=1g
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +34,7 @@ jobs:
 
   freebsd:
     name: FreeBSD
-    runs-on: freebsd
+    runs-on: FreeBSD
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
