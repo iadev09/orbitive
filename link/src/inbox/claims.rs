@@ -1,7 +1,7 @@
 //! Producer-owned claims. Kernel holds are acquired only by segment lifecycle
 //! code. Admission and helping use bounded atomic operations on this table.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 
 use super::{Error, Inbox, Result};
 
@@ -61,6 +61,10 @@ pub(super) const fn registry_bytes(
 pub(super) struct Producer {
     index: usize,
     generation: u64,
+    /// Process-local: the record after the one this producer took last.
+    /// Records free in roughly FIFO order, so the scan starts here rather
+    /// than passing every busy record from the start of the range.
+    next: AtomicUsize,
     // Dropped with the Inbox, after all borrowed write operations have ended.
     #[cfg(unix)]
     _hold: orbit_core::shm::LaneHold,
@@ -214,7 +218,12 @@ impl Inbox {
             // A previous holder may have died waiting.
             owner.waiting.store(0, Ordering::Relaxed);
             owner.active.store(1, Ordering::Release);
-            self.producer = Some(Producer { index, generation, _hold: held });
+            self.producer = Some(Producer {
+                index,
+                generation,
+                next: AtomicUsize::new(0),
+                _hold: held,
+            });
             return Ok(());
         }
         Err(Error::InboxFull)
@@ -387,13 +396,23 @@ impl Inbox {
             .map(|p| (p.index, p.generation))
             .unwrap_or((0, 0));
         let start = owner_index * self.geometry.capacity;
-        let Some(index) = (start..start + self.geometry.capacity)
+        let records = self.geometry.capacity;
+        let hint = self
+            .producer
+            .as_ref()
+            .map_or(0, |p| p.next.load(Ordering::Relaxed) % records);
+        let Some(index) = (hint..records)
+            .chain(0..hint)
+            .map(|offset| start + offset)
             .find(|index| self.take_record(*index))
         else {
             // The lane has room; this producer's frames elsewhere have not
             // been read yet. A reader that frees one can wake it.
             return Err(Error::ProducerBusy);
         };
+        if let Some(producer) = &self.producer {
+            producer.next.store(index - start + 1, Ordering::Relaxed);
+        }
         let record = self.record(index);
         let before = record.seq.load(Ordering::Relaxed);
         let odd = before | 1;
