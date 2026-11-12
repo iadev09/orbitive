@@ -396,8 +396,11 @@ impl InvocationSubscription {
             ))]
             if let Some(event_fd) = &self.event_fd {
                 let mut ready = event_fd.readable().await.map_err(Error::Io)?;
-                event_fd.get_ref().drain().map_err(Error::Io)?;
+                // Clear before draining: a signal that lands after the
+                // drain is the only one until the next drain, and
+                // clearing after would erase it.
                 ready.clear_ready();
+                event_fd.get_ref().drain().map_err(Error::Io)?;
                 continue;
             }
 

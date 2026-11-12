@@ -218,8 +218,11 @@ impl<L: EventLayout> LinkEvents<L> {
         loop {
             self.pump()?;
             let mut guard = ready.readable().await.map_err(Error::Io)?;
-            ready.get_ref().drain().map_err(Error::Io)?;
+            // Clear before draining: a signal that lands after the
+            // drain is the only one until the next drain, and
+            // clearing after would erase it.
             guard.clear_ready();
+            ready.get_ref().drain().map_err(Error::Io)?;
         }
     }
 
