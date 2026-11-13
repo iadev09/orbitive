@@ -37,7 +37,7 @@ pub enum Received {
 pub struct InboxReceiver {
     segment: Arc<LinkSegment>,
     lane: usize,
-    socket: tokio::net::UnixDatagram,
+    socket: Option<tokio::net::UnixDatagram>,
     /// The directory generation this receiver last reported.
     directory: u64,
     capacity: u64,
@@ -58,7 +58,7 @@ impl InboxReceiver {
         Ok(Self {
             segment,
             lane,
-            socket,
+            socket: Some(socket),
             directory,
             capacity,
             armed: false,
@@ -138,12 +138,12 @@ impl InboxReceiver {
                 continue;
             }
 
-            self.socket.readable().await?;
+            self.socket().readable().await?;
             self.lower();
             if self.owed == 0 {
                 // Woken with the arm still raised: a bell this receiver did
                 // not account for. Read until the socket says it is empty.
-                crate::bell::drain(&self.socket)?;
+                crate::bell::drain(self.socket())?;
             }
         }
     }
@@ -164,11 +164,29 @@ impl InboxReceiver {
         if self.owed == 0 {
             return Ok(());
         }
-        while self.owed > 0 && crate::bell::take_one(&self.socket)? {
+        while self.owed > 0 && crate::bell::take_one(self.socket())? {
             self.owed -= 1;
         }
-        crate::bell::forget_readiness(&self.socket);
+        crate::bell::forget_readiness(self.socket());
         Ok(())
+    }
+
+    fn socket(&self) -> &tokio::net::UnixDatagram {
+        self.socket.as_ref().expect("a live receiver owns its socket")
+    }
+
+    fn close(
+        &mut self,
+        release: impl FnOnce(&LinkSegment, usize),
+    ) {
+        let Some(socket) = self.socket.take() else {
+            return;
+        };
+        self.segment.inbox().unbind_receiver(self.lane);
+        // The sender may still be connected to this socket. Close it before
+        // another receiver can take the registry entry and arm the same lane.
+        drop(socket);
+        release(&self.segment, self.lane);
     }
 
     pub fn lane(&self) -> usize {
@@ -182,7 +200,6 @@ mod tests;
 
 impl Drop for InboxReceiver {
     fn drop(&mut self) {
-        self.segment.inbox().unbind_receiver(self.lane);
-        self.segment.release_receiver(self.lane);
+        self.close(LinkSegment::release_receiver);
     }
 }

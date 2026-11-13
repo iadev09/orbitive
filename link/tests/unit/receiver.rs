@@ -122,19 +122,19 @@ async fn cancelled_receives_do_not_accumulate_obsolete_wakes() {
         assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
         drop(waiting);
         assert_eq!(
-            peek(&receiver.socket).unwrap_err().kind(),
+            peek(receiver.socket()).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
 
         for item in 0..4u8 {
             scratch.0.inbox().write(0, &[b'x', turn, item]).unwrap();
         }
-        assert_eq!(peek(&receiver.socket).unwrap(), 1);
+        assert_eq!(peek(receiver.socket()).unwrap(), 1);
         for item in 0..4u8 {
             receiver.recv(&mut frame).await.unwrap();
             assert_eq!(frame, [b'x', turn, item]);
             // Ready SHM frames do not consume or inspect the socket.
-            assert_eq!(peek(&receiver.socket).unwrap(), 1);
+            assert_eq!(peek(receiver.socket()).unwrap(), 1);
         }
     }
 }
@@ -148,7 +148,7 @@ async fn a_commit_while_disarmed_remains_visible_before_parking() {
     let inbox = scratch.0.inbox();
     let seen = inbox.receiver_generation(0).unwrap();
     inbox.disarm_receiver(0);
-    crate::bell::drain(&receiver.socket).unwrap();
+    crate::bell::drain(receiver.socket()).unwrap();
     inbox.write(0, b"during drain").unwrap();
     inbox.arm_receiver(0).unwrap();
     assert_ne!(inbox.receiver_generation(0).unwrap(), seen);
@@ -157,7 +157,7 @@ async fn a_commit_while_disarmed_remains_visible_before_parking() {
     receiver.recv(&mut frame).await.unwrap();
     assert_eq!(frame, b"during drain");
     assert_eq!(
-        peek(&receiver.socket).unwrap_err().kind(),
+        peek(receiver.socket()).unwrap_err().kind(),
         io::ErrorKind::WouldBlock
     );
 }
@@ -232,7 +232,7 @@ async fn a_receiver_that_read_its_bell_exactly_is_woken_again() {
     }
     let receiver = reader.await.unwrap();
     // The last wake's bell is the only one still unread.
-    assert_eq!(peek(&receiver.socket).unwrap(), 1);
+    assert_eq!(peek(receiver.socket()).unwrap(), 1);
 }
 
 /// A writer keeps a socket connected to the lane's bell. When the lane's
@@ -271,4 +271,57 @@ async fn a_replaced_receiver_is_still_rung() {
             );
         assert_eq!(frame.unwrap(), [b'z', turn]);
     }
+}
+
+/// Replace the receiver at the instant the old one releases its entry,
+/// while the sender still has a cached connection to the old bell.
+#[tokio::test(flavor = "current_thread")]
+async fn replaced_receiver_is_rung_at_registry_release() {
+    let scratch = Scratch::new();
+    let inbox = scratch.0.inbox();
+    let mut original = scratch.0.receiver(0).unwrap();
+    let mut frame = Vec::new();
+    let mut cx = Context::from_waker(Waker::noop());
+
+    {
+        let mut pending = std::pin::pin!(original.recv(&mut frame));
+        assert!(pending.as_mut().poll(&mut cx).is_pending());
+        inbox.write(0, b"prime").unwrap();
+    }
+    assert_eq!(peek(original.socket()).unwrap(), 1);
+    tokio::time::timeout(LOST_WAKE, original.recv(&mut frame))
+        .await
+        .expect("the original receiver must receive its priming frame")
+        .unwrap();
+    assert_eq!(frame, b"prime");
+
+    let mut replacement = None;
+    original.close(|segment, lane| {
+        assert!(scratch.0.receiver(lane).is_err(), "lane is still registered");
+        segment.release_receiver(lane);
+        let mut receiver = scratch
+            .0
+            .receiver(lane)
+            .expect("the old socket must be closed before releasing the lane");
+        let mut frame = Vec::new();
+        {
+            let mut pending = std::pin::pin!(receiver.recv(&mut frame));
+            assert!(pending.as_mut().poll(&mut cx).is_pending());
+            inbox.write(lane, b"replacement").unwrap();
+        }
+        assert_eq!(
+            peek(receiver.socket())
+                .expect("the wake must reach the replacement socket"),
+            1
+        );
+        replacement = Some(receiver);
+    });
+    drop(original);
+
+    let mut receiver = replacement.unwrap();
+    tokio::time::timeout(LOST_WAKE, receiver.recv(&mut frame))
+        .await
+        .expect("the replacement must receive its frame")
+        .unwrap();
+    assert_eq!(frame, b"replacement");
 }
