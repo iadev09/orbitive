@@ -147,7 +147,15 @@ impl LocalCache {
         budget: Arc<LocalBudget>,
         coherent: Arc<AtomicBool>,
     ) -> Self {
-        let shards = shard_count(capacity);
+        Self::with_shards(capacity, shard_count(capacity), budget, coherent)
+    }
+
+    fn with_shards(
+        capacity: NonZeroUsize,
+        shards: usize,
+        budget: Arc<LocalBudget>,
+        coherent: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             shards: (0..shards)
                 .map(|_| {
@@ -212,7 +220,7 @@ impl LocalCache {
             match state.slots.pop_lru() {
                 Some((_, evicted)) => {
                     empty = 0;
-                    state.advance_floor(evicted.revision().sequence);
+                    state.raise_floor(evicted.revision().sequence);
                 }
                 None => empty += 1,
             }
@@ -264,9 +272,17 @@ impl LocalCache {
         if !self.is_coherent() {
             return CacheRead::ResyncRequired;
         }
+        let floor = state.revision_floor;
         let Some(slot) = state.slots.get_mut(key) else {
             return CacheRead::Miss;
         };
+        if below(floor, slot.revision()) {
+            // An eviction's floor covers it: gone, though not yet removed.
+            state.slots.pop(key);
+            drop(state);
+            self.resident.fetch_sub(1, Ordering::Relaxed);
+            return CacheRead::Miss;
+        }
         match slot {
             LocalSlot::Present { value, revision, expires_at_ms } => {
                 if !expires_at_ms.is_some_and(|deadline| deadline <= now_ms()) {
@@ -288,11 +304,13 @@ impl LocalCache {
     pub fn len(&self) -> usize {
         (0..self.shards.len())
             .map(|shard| {
-                self.lock(shard)
+                let state = self.lock(shard);
+                state
                     .slots
                     .iter()
                     .filter(|(_, slot)| {
                         matches!(slot, LocalSlot::Present { .. })
+                            && !below(state.revision_floor, slot.revision())
                     })
                     .count()
             })
@@ -627,15 +645,34 @@ impl LocalState {
         true
     }
 
+    /// Free the least recently used value's bytes, fencing its revision.
     fn evict_value(&mut self) -> bool {
-        let oldest = self.slots.iter().rev().find_map(|(_, slot)| match slot {
-            LocalSlot::Present { revision, .. } => Some(revision.sequence),
-            LocalSlot::Missing { .. } => None,
-        });
-        if let Some(floor) = oldest {
-            self.advance_floor(floor);
-        }
-        oldest.is_some()
+        let oldest =
+            self.slots.iter().rev().find_map(|(key, slot)| match slot {
+                LocalSlot::Present { revision, .. } => {
+                    Some((key.clone(), revision.sequence))
+                }
+                LocalSlot::Missing { .. } => None,
+            });
+        let Some((key, sequence)) = oldest else { return false };
+        self.slots.pop(&key);
+        self.raise_floor(sequence);
+        true
+    }
+
+    /// Fence revisions up to `revision` without looking for what it covers.
+    /// The entries it covers stay where they are, dead: a read of one is a
+    /// miss that removes it, and the LRU order reaches the rest. A capacity
+    /// eviction raises the floor on every put into a full store, so it must
+    /// not walk the shard.
+    fn raise_floor(
+        &mut self,
+        revision: u64,
+    ) {
+        self.revision_floor = Some(
+            self.revision_floor
+                .map_or(revision, |current| current.max(revision)),
+        );
     }
 
     fn advance_floor(
@@ -656,6 +693,14 @@ impl LocalState {
             self.slots.pop(&key);
         }
     }
+}
+
+/// Whether a floor covers `revision`: the slot is dead.
+fn below(
+    floor: Option<u64>,
+    revision: CacheRevision,
+) -> bool {
+    floor.is_some_and(|floor| revision.sequence <= floor)
 }
 
 fn now_ms() -> u64 {
@@ -692,5 +737,40 @@ mod tests {
         assert!(matches!(cache.read_at(b"ttl", 9), CacheRead::Hit(_)));
         assert_eq!(cache.read_with_clock(b"ttl", || 10), CacheRead::Miss);
         assert_eq!(cache.read_with_clock(b"ttl", no_clock), CacheRead::Miss);
+    }
+
+    #[test]
+    fn an_eviction_floor_hides_what_it_covers_without_walking_to_it() {
+        // One shard, so the LRU order is the store's.
+        let cache = LocalCache::with_shards(
+            NonZeroUsize::new(2).unwrap(),
+            1,
+            Arc::new(LocalBudget::new(64)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        let at = |sequence| CacheRevision {
+            sequence,
+            mutation_id: orbit_core::NetId64::ZERO,
+        };
+        cache.install_local(b"older", b"value", at(1), None, || false);
+        cache.install_local(b"newer", b"value", at(2), None, || false);
+        // Read the older one, so the newer one is least recently used.
+        assert!(matches!(cache.read(b"older"), CacheRead::Hit(_)));
+
+        // A third key evicts `newer`; its floor (2) covers `older` too.
+        cache.install_local(b"third", b"value", at(3), None, || false);
+        assert_eq!(cache.len(), 1, "only `third` is alive");
+        assert_eq!(cache.read(b"older"), CacheRead::Miss);
+        assert_eq!(cache.read(b"newer"), CacheRead::Miss);
+        assert!(matches!(cache.read(b"third"), CacheRead::Hit(_)));
+
+        // The read removed `older`, and the store takes a new key without
+        // evicting `third`.
+        cache.install_local(b"fourth", b"value", at(4), None, || false);
+        assert!(matches!(cache.read(b"third"), CacheRead::Hit(_)));
+        assert!(matches!(cache.read(b"fourth"), CacheRead::Hit(_)));
+        // A delayed older write under the floor is refused.
+        cache.install_local(b"older", b"stale", at(1), None, || false);
+        assert_eq!(cache.read(b"older"), CacheRead::Miss);
     }
 }
