@@ -278,6 +278,7 @@ mod process {
     use super::*;
     use orbit_core::NodeId;
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::process::ExitStatusExt;
     use std::process::{Child, Command, Stdio};
 
     const FLEET: &str = "ORBIT_TEXT_RECOVERY_TEST_FLEET";
@@ -356,8 +357,11 @@ mod process {
             Self(child, output)
         }
         fn kill(&mut self) {
+            // Child::wait closes stdin. Keep the gate open so the helper
+            // cannot unwind on EOF and release its writer before SIGKILL.
+            let _gate = self.0.stdin.take().unwrap();
             self.0.kill().unwrap();
-            assert!(!self.0.wait().unwrap().success());
+            assert_eq!(self.0.wait().unwrap().signal(), Some(libc::SIGKILL));
         }
         fn finish(&mut self) {
             self.0.stdin.as_mut().unwrap().write_all(&[1]).unwrap();
@@ -433,7 +437,11 @@ mod process {
             };
             assert_eq!(text.load().unwrap(), expected, "{phase:?}");
             let version = text.version().unwrap();
-            assert_eq!(fixture.cells.recover_text_writers().unwrap(), 1);
+            assert_eq!(
+                fixture.cells.recover_text_writers().unwrap(),
+                1,
+                "{phase:?}"
+            );
             assert_eq!(
                 text.version().unwrap(),
                 version,
