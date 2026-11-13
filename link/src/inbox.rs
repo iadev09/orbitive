@@ -558,7 +558,8 @@ impl Inbox {
         self.lanes
     }
 
-    pub(crate) fn lane_epoch(
+    /// The lane lifetime to fence writes and capacity waits against.
+    pub fn lane_epoch(
         &self,
         lane: usize,
     ) -> Result<u64> {
@@ -1086,6 +1087,7 @@ impl Inbox {
         // routing is not death: accepted streams may still be draining. A
         // later confirmed process exit must still be able to end those sides.
         self.clear_interest(lane_index);
+        std::sync::atomic::fence(Ordering::SeqCst);
         self.capacity_changed(lane_index);
         self.table_header().directory.fetch_add(1, Ordering::AcqRel);
         self.wake(lane_index, lane);
@@ -1175,7 +1177,7 @@ impl Inbox {
         lane_index: usize,
         parts: &[&[u8]],
     ) -> Result<u64> {
-        self.write_frame(lane_index, parts, None, None)
+        self.write_frame(lane_index, parts, None, None, false)
     }
 
     /// Send only to the specified receiver epoch, including after reserving
@@ -1186,7 +1188,17 @@ impl Inbox {
         epoch: u64,
         parts: &[&[u8]],
     ) -> Result<u64> {
-        self.write_frame(lane, parts, None, Some(epoch))
+        self.write_frame(lane, parts, None, Some(epoch), false)
+    }
+
+    /// A reply write that distinguishes a full inbox from claim contention.
+    pub fn write_reply_at_epoch(
+        &self,
+        lane: usize,
+        epoch: u64,
+        parts: &[&[u8]],
+    ) -> Result<u64> {
+        self.write_frame(lane, parts, None, Some(epoch), true)
     }
 
     pub(crate) fn write_work(
@@ -1200,6 +1212,7 @@ impl Inbox {
             parts,
             Some(ticket),
             Some(ticket.epoch),
+            false,
         )
     }
 
@@ -1209,8 +1222,15 @@ impl Inbox {
         parts: &[&[u8]],
         work: Option<crate::WorkTicket>,
         epoch: Option<u64>,
+        reply: bool,
     ) -> Result<u64> {
         self.check_lane(lane_index)?;
+        if reply
+            && (self.lane_epoch(lane_index)? != epoch.unwrap_or_default()
+                || self.consumers(lane_index)? == 0)
+        {
+            return Err(Error::NoConsumer);
+        }
         let len = parts
             .iter()
             .try_fold(0usize, |len, part| len.checked_add(part.len()))
@@ -1218,8 +1238,15 @@ impl Inbox {
         if len > self.geometry.payload_capacity {
             return Err(Error::FrameTooLarge);
         }
-        let mut reservation = self.reserve_frame(lane_index)?;
-        if epoch.is_some_and(|epoch| epoch != reservation.epoch) {
+        let mut reservation = match self.reserve_frame(lane_index) {
+            Err(Error::InboxContended) if !reply => {
+                return Err(Error::InboxFull);
+            }
+            result => result?,
+        };
+        if epoch.is_some_and(|epoch| epoch != reservation.epoch)
+            || (reply && self.consumers(lane_index)? == 0)
+        {
             return Err(Error::NoConsumer);
         }
         let position = reservation.position;
@@ -1333,12 +1360,6 @@ impl Inbox {
                 return Ok(Some(work));
             }
         }
-        // No wake. Nobody waits on a consume — a writer that finds the lane
-        // full is refused, never parked — and the only waiter there is, the
-        // owner, is the one reading. Bumping the word here spoiled its own
-        // token: every drain moved `changes` past the value it would park on,
-        // so each wake-up paid a park that returned at once before the one
-        // that waited.
         Ok(None)
     }
 
@@ -1425,6 +1446,9 @@ impl Inbox {
         // a free one. `claim_lane` sets it after this; `join` set it before.
         lane.service_len.store(0, Ordering::Relaxed);
         lane.epoch.store(next_epoch, Ordering::Release);
+        self.advertise_inbox_space(lane_index, next_epoch);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.inbox_space_changed(lane_index);
         lane.role_len.store(0, Ordering::Relaxed);
         lane.waiters.store(0, Ordering::Relaxed);
         lane.reactor.store(0, Ordering::Relaxed);

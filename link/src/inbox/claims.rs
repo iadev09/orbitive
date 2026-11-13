@@ -365,7 +365,7 @@ impl Inbox {
                 Err(error) => return Err(error),
             }
         }
-        Err(Error::InboxFull)
+        Err(Error::InboxContended)
     }
 
     fn try_reserve_frame(
@@ -491,7 +491,7 @@ impl Inbox {
         if lane.reserve.load(Ordering::Acquire) > position {
             Ok(None)
         } else {
-            Err(Error::InboxFull)
+            Err(Error::InboxContended)
         }
     }
 
@@ -611,9 +611,11 @@ impl Inbox {
         checkpoint("reader-head");
         // FREE released the producer's record. Pairs with the fence in
         // `wait_for_record`: either that producer sees FREE, or this reader
-        // sees it waiting.
+        // sees it waiting. The same fence pairs the read cursor update with
+        // the inbox-space arm and recheck.
         fence(Ordering::SeqCst);
         self.release_waiter(index / self.geometry.capacity);
+        self.inbox_space_changed(lane_index);
         Ok(())
     }
 

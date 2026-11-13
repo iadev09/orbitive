@@ -99,6 +99,19 @@ impl InboxReceiver {
         &mut self,
         out: &mut Vec<u8>,
     ) -> Result<Received> {
+        self.next_inner(Some(out)).await
+    }
+
+    /// Drive lane notifications after intake has stopped, without consuming
+    /// work or control frames still in the inbox.
+    pub async fn next_notification(&mut self) -> Result<Received> {
+        self.next_inner(None).await
+    }
+
+    async fn next_inner(
+        &mut self,
+        mut out: Option<&mut Vec<u8>>,
+    ) -> Result<Received> {
         // A wait that was cancelled left its arm raised.
         self.lower();
         loop {
@@ -114,7 +127,9 @@ impl InboxReceiver {
                 self.capacity = capacity;
                 return Ok(Received::Capacity(capacity));
             }
-            if let Some(work) = inbox.read_frame(self.lane, out)? {
+            if let Some(out) = out.as_deref_mut()
+                && let Some(work) = inbox.read_frame(self.lane, out)?
+            {
                 return Ok(if let Some(ticket) = work {
                     Received::Work(ticket)
                 } else if crate::frame::is_event(out) {

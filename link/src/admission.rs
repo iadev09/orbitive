@@ -30,7 +30,7 @@ impl WorkTicket {
     }
 }
 
-/// Kept separate from traffic counters; only bounded work touches this row.
+/// Per-lane work admission and capacity notifications.
 #[repr(C, align(64))]
 pub(crate) struct Capacity {
     // Low word: current bound. High word: slots that may still hold work
@@ -47,7 +47,10 @@ pub(crate) struct Capacity {
     /// wait in its own queue, accepted when one of these ends. Zero: all of
     /// them run, the window is the execution bound.
     execution: AtomicU32,
-    _padding: [u8; 36],
+    /// At least one publisher may be waiting for this lane to consume a frame.
+    inbox_space_waiting: AtomicU32,
+    inbox_space_epoch: AtomicU64,
+    _padding: [u8; 24],
 }
 
 const _: () = assert!(size_of::<Capacity>() == 64);
@@ -503,6 +506,72 @@ impl Inbox {
         self.capacity_interest(lane, origin / 64)
             .fetch_or(1 << (origin % 64), Ordering::SeqCst);
         Ok(())
+    }
+
+    pub(crate) fn advertise_inbox_space(
+        &self,
+        lane: usize,
+        epoch: u64,
+    ) {
+        self.capacity_row(lane)
+            .inbox_space_epoch
+            .store(epoch, Ordering::Release);
+    }
+
+    /// Whether this exact lane lifetime signals freed inbox space.
+    pub fn signals_inbox_space(
+        &self,
+        lane: usize,
+        epoch: u64,
+    ) -> bool {
+        epoch != 0
+            && self.check_lane(lane).is_ok()
+            && self.lane_epoch(lane).ok() == Some(epoch)
+            && self.capacity_row(lane).inbox_space_epoch.load(Ordering::Acquire)
+                == epoch
+    }
+
+    /// Register for space in an exact destination inbox. Drive the origin's
+    /// receiver for `Received::Capacity` and retry the write after a wake.
+    /// False means space is already visible. `NoConsumer` ends the wait.
+    ///
+    /// Capture the destination epoch before the first write. Take a capacity
+    /// generation snapshot before arming, then wait for a change from that
+    /// snapshot. Like work admission notifications, wakes may coalesce or
+    /// require another check. Both peers must support this notification.
+    pub fn watch_inbox_space(
+        &self,
+        lane: usize,
+        epoch: u64,
+        origin: usize,
+    ) -> Result<bool> {
+        self.check_lane(lane)?;
+        self.check_lane(origin)?;
+        if !self.signals_inbox_space(lane, epoch) {
+            return Err(Error::NoConsumer);
+        }
+        self.watch_capacity(lane, origin)?;
+        self.capacity_row(lane).inbox_space_waiting.store(1, Ordering::SeqCst);
+        let admission = self.admits(lane)?;
+        if self.lane_epoch(lane)? != epoch
+            || admission == crate::Admission::NoConsumer
+        {
+            return Err(Error::NoConsumer);
+        }
+        Ok(admission == crate::Admission::Full)
+    }
+
+    /// The reader has published its next position before checking the arm.
+    pub(crate) fn inbox_space_changed(
+        &self,
+        lane: usize,
+    ) {
+        let waiting = &self.capacity_row(lane).inbox_space_waiting;
+        if waiting.load(Ordering::SeqCst) != 0
+            && waiting.swap(0, Ordering::SeqCst) != 0
+        {
+            self.capacity_changed(lane);
+        }
     }
 
     pub fn capacity_generation(

@@ -56,6 +56,38 @@ fn peek(socket: &tokio::net::UnixDatagram) -> io::Result<usize> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn freeing_inbox_space_rings_the_waiting_publisher() {
+    let scratch = Scratch::new();
+    let inbox = scratch.0.inbox();
+    inbox.claim_lane(1, "edge", "edge", 1).unwrap();
+    let mut publisher = scratch.0.receiver(0).unwrap();
+    for _ in 0..inbox.geometry().capacity {
+        inbox.write(1, b"full").unwrap();
+    }
+
+    let epoch = inbox.lane_epoch(1).unwrap();
+    assert!(inbox.watch_inbox_space(1, epoch, 0).unwrap());
+    {
+        let mut notification = std::pin::pin!(publisher.next_notification());
+        assert!(
+            notification
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert!(inbox.read(1, &mut Vec::new()).unwrap());
+    }
+    assert_eq!(peek(publisher.socket()).unwrap(), 1);
+    assert!(matches!(
+        tokio::time::timeout(LOST_WAKE, publisher.next_notification())
+            .await
+            .unwrap()
+            .unwrap(),
+        Received::Capacity(_)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn returned_capacity_resumes_the_existing_receiver_without_a_frame() {
     let scratch = Scratch::new();
     scratch

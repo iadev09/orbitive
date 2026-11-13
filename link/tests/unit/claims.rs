@@ -375,7 +375,10 @@ fn a_live_claim_without_an_admissible_snapshot_refuses_without_waiting() {
     let record = inbox.record(index);
     let even = record.seq.load(Ordering::Acquire);
     record.seq.store(even | 1, Ordering::Release);
-    assert!(matches!(inbox.reserve_frame(0), Err(crate::Error::InboxFull)));
+    assert!(matches!(
+        inbox.reserve_frame(0),
+        Err(crate::Error::InboxContended)
+    ));
     assert_eq!(inbox.lane_header(0).reserve.load(Ordering::Acquire), 0);
     record.seq.store(even, Ordering::Release);
     inbox.help_claim(0, 0).unwrap();
