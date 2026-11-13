@@ -45,7 +45,10 @@ pub use admission::WorkTicket;
 pub use admission::{WorkExecution, WorkReservation};
 pub use body::LinkBodies;
 #[cfg(unix)]
-pub use control::{ExchangeControl, ExchangeControlState, ExchangeControlTicket, ExchangeControls};
+pub use control::{
+    ExchangeControl, ExchangeControlState, ExchangeControlTicket,
+    ExchangeControls,
+};
 #[cfg(all(unix, feature = "events"))]
 pub use events::{LinkEvents, Routing};
 pub use frame::{EVENT_FRAME_TAG, RESERVED_FRAME_TAGS, is_reserved};

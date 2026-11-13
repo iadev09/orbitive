@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use orbit_core::process::ProcessOwner;
 
 #[path = "inbox/claims.rs"]
-mod claims;
+pub(crate) mod claims;
 use claims::{CANCELLED, COMMITTED};
 
 use super::{Error, Result};
@@ -1279,6 +1279,26 @@ impl Inbox {
         Ok(position)
     }
 
+    /// Capture the exclusive upper position of currently reserved turns.
+    /// After recovering a dead producer, its committed frames precede this
+    /// position even when a still-live producer owns an earlier turn.
+    pub fn reserved_through(
+        &self,
+        lane: usize,
+    ) -> Result<u64> {
+        self.check_lane(lane)?;
+        Ok(self.lane_header(lane).reserve.load(Ordering::Acquire))
+    }
+
+    /// The next turn the single reader will consume.
+    pub fn read_position(
+        &self,
+        lane: usize,
+    ) -> Result<u64> {
+        self.check_lane(lane)?;
+        Ok(self.lane_header(lane).read.load(Ordering::Acquire))
+    }
+
     /// Take the next frame from this node's own lane, if one is there.
     ///
     /// Only the lane's owner may call this. It copies out rather than lending
@@ -1308,11 +1328,22 @@ impl Inbox {
         lane_index: usize,
         out: &mut Vec<u8>,
     ) -> Result<Option<Option<crate::WorkTicket>>> {
+        self.read_frame_before(lane_index, out, None)
+    }
+
+    pub(crate) fn read_frame_before(
+        &self,
+        lane_index: usize,
+        out: &mut Vec<u8>,
+        boundary: Option<u64>,
+    ) -> Result<Option<Option<crate::WorkTicket>>> {
         self.check_lane(lane_index)?;
         let lane = self.lane_header(lane_index);
         for _ in 0..self.geometry.capacity {
             let position = lane.read.load(Ordering::Relaxed);
-            if position >= lane.reserve.load(Ordering::Acquire) {
+            if boundary.is_some_and(|boundary| position >= boundary)
+                || position >= lane.reserve.load(Ordering::Acquire)
+            {
                 return Ok(None);
             }
             let slot = self.slot_header(lane_index, position);

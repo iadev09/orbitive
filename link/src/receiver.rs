@@ -99,19 +99,30 @@ impl InboxReceiver {
         &mut self,
         out: &mut Vec<u8>,
     ) -> Result<Received> {
-        self.next_inner(Some(out)).await
+        Ok(self.next_inner(Some(out), None).await?.expect("no read boundary"))
+    }
+
+    /// Read as usual until the cursor reaches a captured reservation boundary.
+    /// Report progress even if reaching it only consumed cancelled turns.
+    pub async fn next_until_read(
+        &mut self,
+        out: &mut Vec<u8>,
+        boundary: u64,
+    ) -> Result<Option<Received>> {
+        self.next_inner(Some(out), Some(boundary)).await
     }
 
     /// Drive lane notifications after intake has stopped, without consuming
     /// work or control frames still in the inbox.
     pub async fn next_notification(&mut self) -> Result<Received> {
-        self.next_inner(None).await
+        Ok(self.next_inner(None, None).await?.expect("no read boundary"))
     }
 
     async fn next_inner(
         &mut self,
         mut out: Option<&mut Vec<u8>>,
-    ) -> Result<Received> {
+        boundary: Option<u64>,
+    ) -> Result<Option<Received>> {
         // A wait that was cancelled left its arm raised.
         self.lower();
         loop {
@@ -119,24 +130,31 @@ impl InboxReceiver {
             let directory = inbox.directory();
             if directory != self.directory {
                 self.directory = directory;
-                return Ok(Received::Directory(directory));
+                return Ok(Some(Received::Directory(directory)));
             }
             let seen = inbox.receiver_generation(self.lane)?;
             let capacity = inbox.capacity_generation(self.lane)?;
             if capacity != self.capacity {
                 self.capacity = capacity;
-                return Ok(Received::Capacity(capacity));
+                return Ok(Some(Received::Capacity(capacity)));
             }
             if let Some(out) = out.as_deref_mut()
-                && let Some(work) = inbox.read_frame(self.lane, out)?
+                && let Some(work) =
+                    inbox.read_frame_before(self.lane, out, boundary)?
             {
-                return Ok(if let Some(ticket) = work {
+                return Ok(Some(if let Some(ticket) = work {
                     Received::Work(ticket)
                 } else if crate::frame::is_event(out) {
                     Received::Event
                 } else {
                     Received::Frame
-                });
+                }));
+            }
+
+            if let Some(boundary) = boundary
+                && inbox.read_position(self.lane)? >= boundary
+            {
+                return Ok(None);
             }
 
             // Only the empty-to-wait transition touches the socket, and

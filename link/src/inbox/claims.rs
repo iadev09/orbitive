@@ -95,7 +95,7 @@ impl Record {
     }
 }
 
-pub(super) struct Reservation<'a> {
+pub(crate) struct Reservation<'a> {
     inbox: &'a Inbox,
     record: usize,
     pub(super) position: u64,
@@ -350,7 +350,7 @@ impl Inbox {
         Ok(())
     }
 
-    pub(super) fn reserve_frame(
+    pub(crate) fn reserve_frame(
         &self,
         lane_index: usize,
     ) -> Result<Reservation<'_>> {

@@ -50,7 +50,8 @@ pub(crate) struct Capacity {
     /// At least one publisher may be waiting for this lane to consume a frame.
     inbox_space_waiting: AtomicU32,
     inbox_space_epoch: AtomicU64,
-    _padding: [u8; 24],
+    inline_exchange_epoch: AtomicU64,
+    _padding: [u8; 16],
 }
 
 const _: () = assert!(size_of::<Capacity>() == 64);
@@ -508,6 +509,38 @@ impl Inbox {
         Ok(())
     }
 
+    /// Advertise the protocol's inline exchange support after opening its
+    /// control table. Old readers leave this previously reserved word zero.
+    pub fn advertise_inline_exchanges(
+        &self,
+        lane: usize,
+        epoch: u64,
+    ) -> Result<()> {
+        self.check_lane(lane)?;
+        if epoch == 0 || self.lane_epoch(lane)? != epoch {
+            return Err(Error::StaleWork);
+        }
+        self.capacity_row(lane)
+            .inline_exchange_epoch
+            .store(epoch, Ordering::Release);
+        Ok(())
+    }
+
+    /// The epoch of a lane advertising inline exchanges.
+    pub fn inline_exchange_epoch(
+        &self,
+        lane: usize,
+    ) -> Option<u64> {
+        let epoch = self.lane_epoch(lane).ok()?;
+        (epoch != 0
+            && self
+                .capacity_row(lane)
+                .inline_exchange_epoch
+                .load(Ordering::Acquire)
+                == epoch)
+            .then_some(epoch)
+    }
+
     pub(crate) fn advertise_inbox_space(
         &self,
         lane: usize,
@@ -600,7 +633,10 @@ impl Inbox {
         }
     }
 
-    pub(crate) fn notify_capacity_observer(&self, lane: usize) {
+    pub(crate) fn notify_capacity_observer(
+        &self,
+        lane: usize,
+    ) {
         self.capacity_row(lane).changes.fetch_add(1, Ordering::SeqCst);
         self.wake(lane, self.lane_header(lane));
     }
