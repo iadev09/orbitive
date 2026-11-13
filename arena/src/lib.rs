@@ -24,7 +24,9 @@ use std::fmt;
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 #[cfg(feature = "bench-timing")]
@@ -355,6 +357,10 @@ struct Inner {
     /// Serialises this process's writers; the cross-process lock is taken
     /// inside it, so threads never contend for a file lock they cannot share.
     write: Mutex<()>,
+    /// Where this process's writers look next for an addressed record's slot
+    /// (`free_addressed_slot_locked`). Process-local: any unpinned victim is
+    /// correct, so writers of other processes need not agree on it.
+    hand: AtomicUsize,
     reader: usize,
     owner: ProcessOwner,
     claimed: bool,
@@ -665,6 +671,7 @@ impl Arena {
             backing,
             kind,
             write: Mutex::new(()),
+            hand: AtomicUsize::new(0),
             reader: 0,
             owner,
             claimed: false,
@@ -843,13 +850,15 @@ impl Arena {
             }
             Err(error) => return Err(error),
         };
-        let index = match self
-            .free_slot_locked(key.unwrap_or(Key::new(offset as u128)))
-        {
+        let free_slot = || match key {
+            Some(key) => self.free_slot_locked(key),
+            None => self.free_addressed_slot_locked(),
+        };
+        let index = match free_slot() {
             Ok(index) => index,
             Err(Error::Pinned) => {
                 self.inner.reclaim_locked()?;
-                self.free_slot_locked(key.unwrap_or(Key::new(offset as u128)))?
+                free_slot()?
             }
             Err(error) => return Err(error),
         };
@@ -1062,6 +1071,46 @@ impl Arena {
 
     /// The first slot in `key`'s probe chain that can take a record: empty,
     /// or retired with no reader left on it.
+    /// A slot for an addressed record, which is found by its slot and not by
+    /// a probe, so it may go anywhere. The hand takes the next slot that is
+    /// empty, retired and unpinned, or holds a record at least as old as the
+    /// oldest a full table can hold: with every slot live, the oldest is at
+    /// least `ARENA_SLOTS - 1` generations behind the newest, so one full turn
+    /// always finds one. Records take slots in the hand's order, so in steady
+    /// state the next slot is the oldest record and a write looks at one slot.
+    /// A turn that finds nothing (retired slots all pinned) falls back to the
+    /// exact search.
+    fn free_addressed_slot_locked(&self) -> Result<usize> {
+        let slots = self.inner.slots();
+        let mask = ARENA_SLOTS - 1;
+        let newest =
+            self.inner.header().record_generation.load(Ordering::Relaxed);
+        let start = self.inner.hand.load(Ordering::Relaxed);
+        for step in 0..ARENA_SLOTS {
+            let index = (start + step) & mask;
+            let slot = &slots[index];
+            let free = match slot.state.load(Ordering::Acquire) {
+                SLOT_EMPTY => true,
+                SLOT_RETIRED => !self.inner.pinned(index),
+                _ => {
+                    slot.generation.load(Ordering::Relaxed) + ARENA_SLOTS as u64
+                        <= newest + 1
+                        && !self.inner.pinned(index)
+                        && {
+                            evict(slot);
+                            // A reader got in between: its record stays.
+                            !self.inner.pinned(index)
+                        }
+                }
+            };
+            if free {
+                self.inner.hand.store(index + 1, Ordering::Relaxed);
+                return Ok(index);
+            }
+        }
+        self.free_slot_locked(Key::new(start as u128))
+    }
+
     fn free_slot_locked(
         &self,
         key: Key,

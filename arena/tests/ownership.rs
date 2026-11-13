@@ -85,6 +85,19 @@ fn empty_and_tiny_records_evict_under_index_pressure() {
     );
 }
 
+#[test]
+fn index_pressure_evicts_addressed_records_oldest_first() {
+    let arena =
+        Arena::new(Arc::new(Fleet::join("example", 1).unwrap())).unwrap();
+    let slots = orbit_arena::ARENA_SLOTS;
+    let addresses: Vec<_> = (0..slots * 2 + slots / 2)
+        .map(|_| arena.store(Record::body(b"")).unwrap())
+        .collect();
+    let (gone, kept) = addresses.split_at(addresses.len() - slots);
+    assert!(gone.iter().all(|address| arena.get_address(*address).is_none()));
+    assert!(kept.iter().all(|address| arena.get_address(*address).is_some()));
+}
+
 #[cfg(unix)]
 #[test]
 fn child_pin_owner() {
