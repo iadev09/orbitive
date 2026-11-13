@@ -47,6 +47,10 @@ pub struct Joined {
 }
 
 impl Joined {
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     pub(crate) fn belongs_to(
         &self,
         segment: &LinkSegment,
@@ -640,6 +644,38 @@ impl LinkSegment {
                 Ok(bodies)
             }
         }
+    }
+
+    pub(crate) fn open_control_region(
+        &self,
+        kind: u8,
+        size: usize,
+    ) -> Result<(ShmRegion, orbit_core::shm::ShmRegionLock)> {
+        if let Some(access) = &self.group {
+            let name = access.segment_name(&self.fleet_name, kind);
+            return access.open_region(&name, size).map_err(Error::Io);
+        }
+        ShmRegion::open_or_create_locked(&ring_segment_name(&self.fleet_name, kind), size)
+            .map_err(Error::Io)
+    }
+
+    pub(crate) fn lock_control_region(
+        &self,
+        kind: u8,
+        region: &ShmRegion,
+    ) -> Result<orbit_core::shm::ShmRegionLock> {
+        if self.group.is_some() {
+            let (_, lock) = self.open_control_region(kind, region.len())?;
+            return Ok(lock);
+        }
+        region.lock_exclusive().map_err(Error::Io)
+    }
+
+    pub(crate) fn unlink_control_region(&self, region: &ShmRegion) -> Result<()> {
+        match &self.group {
+            Some(access) => access.unlink_region(region),
+            None => region.unlink(),
+        }.map_err(Error::Io)
     }
 
     pub fn created(&self) -> bool {

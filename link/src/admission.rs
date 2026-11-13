@@ -594,13 +594,15 @@ impl Inbox {
                 bits &= bits - 1;
                 let origin = word * 64 + bit;
                 if origin < self.lanes {
-                    self.capacity_row(origin)
-                        .changes
-                        .fetch_add(1, Ordering::SeqCst);
-                    self.wake(origin, self.lane_header(origin));
+                    self.notify_capacity_observer(origin);
                 }
             }
         }
+    }
+
+    pub(crate) fn notify_capacity_observer(&self, lane: usize) {
+        self.capacity_row(lane).changes.fetch_add(1, Ordering::SeqCst);
+        self.wake(lane, self.lane_header(lane));
     }
 
     /// Called only under the replaced member's kernel hold. Accepted work
