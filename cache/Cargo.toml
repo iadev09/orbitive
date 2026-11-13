@@ -38,11 +38,3 @@ harness = false
 [[bench]]
 name = "fleet_write"
 harness = false
-
-[[bench]]
-name = "read_contention"
-harness = false
-
-[[bench]]
-name = "eviction"
-harness = false
