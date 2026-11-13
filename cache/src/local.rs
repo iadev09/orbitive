@@ -1,10 +1,11 @@
+use std::hash::BuildHasher;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use lru::LruCache;
+use lru::{DefaultHasher, LruCache};
 
 use crate::layout::CacheLayout;
 use crate::protocol::{CacheMutation, CacheRevision};
@@ -48,6 +49,9 @@ pub struct LocalCache {
     shards: Arc<[Mutex<LocalState>]>,
     /// `shards.len() - 1`; the count is a power of two.
     mask: usize,
+    /// Picks a key's shard. Its own seed, kept by every clone of the view, so
+    /// a key keeps its shard and the choice owes nothing to a shard's table.
+    router: DefaultHasher,
     /// Entries this store keeps, across its shards.
     capacity: usize,
     /// Entries resident now, across its shards.
@@ -154,6 +158,7 @@ impl LocalCache {
                 })
                 .collect(),
             mask: shards - 1,
+            router: DefaultHasher::default(),
             capacity: capacity.get(),
             resident: Arc::new(AtomicUsize::new(0)),
             victim: Arc::new(AtomicUsize::new(0)),
@@ -166,7 +171,12 @@ impl LocalCache {
         &self,
         key: &[u8],
     ) -> usize {
-        if self.mask == 0 { 0 } else { key_hash(key) as usize & self.mask }
+        if self.mask == 0 {
+            return 0;
+        }
+        // The same fast hash the shards' tables use. Bits from the middle:
+        // a table takes its bucket from the low bits and its tag from the top.
+        (self.router.hash_one(key) >> SHARD_BITS_SHIFT) as usize & self.mask
     }
 
     fn lock(
@@ -530,13 +540,10 @@ fn shard_count(capacity: NonZeroUsize) -> usize {
     cores.next_power_of_two().min(most)
 }
 
-/// FNV-1a: cheap for the short keys a cache holds, and the same in every
-/// process, though only this process's shards depend on it.
-fn key_hash(key: &[u8]) -> u64 {
-    key.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
+/// Where a shard index starts in a key's hash: clear of the low bits a table
+/// buckets by and of the top seven it tags with, for any shard count a store
+/// can have.
+const SHARD_BITS_SHIFT: u32 = 32;
 
 impl LocalState {
     fn accepts(
