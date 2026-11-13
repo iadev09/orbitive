@@ -16,8 +16,10 @@
 //!   it carries, so a parent that dies holding it would leave the lock held by
 //!   the child. A `pthread_atfork` handler closes every kept description in
 //!   the child, and the child never uses its parent's state: it opens a
-//!   description per section, as before. `O_CLOEXEC` covers `exec`. A fork
-//!   that bypasses libc's `fork` runs no handler and brings the hazard back.
+//!   description per section, as before. `O_CLOEXEC` covers `exec`, so a
+//!   `vfork` or `posix_spawn` child holds them only until it execs. A child
+//!   that bypasses libc's `fork` and does not exec runs no handler and keeps
+//!   them: the hazard is back for it.
 //!
 //! A lock file unlinked under a live region (teardown, `orbit clear`) is
 //! found by its link count when the process next takes the `flock`, and
