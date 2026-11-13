@@ -124,3 +124,48 @@ fn a_region_locks_the_file_its_path_names_and_recreates_it_there() {
     assert_eq!(refused(region), Some(io::ErrorKind::WouldBlock));
     drop(held);
 }
+
+#[test]
+fn a_process_drops_its_shared_lock_with_its_last_holder() {
+    let name = format!("orbit-sh{:x}", std::process::id());
+    let (region, initialization) =
+        ShmRegion::open_or_create_locked(&format!("/{name}"), 1).unwrap();
+    drop(initialization);
+    struct Cleanup(ShmRegion);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = self.0.unlink();
+        }
+    }
+    let cleanup = Cleanup(region);
+    let region = &cleanup.0;
+    let refused = |region: &ShmRegion| {
+        region.try_lock_exclusive().err().map(|error| error.kind())
+    };
+
+    // Two holders share one kept description; another description is kept
+    // out until the second of them lets go.
+    let first = region.lock_shared().unwrap();
+    let second = region.lock_shared().unwrap();
+    assert_eq!(refused(region), Some(io::ErrorKind::WouldBlock));
+    drop(first);
+    assert_eq!(refused(region), Some(io::ErrorKind::WouldBlock));
+    drop(second);
+    assert_eq!(refused(region), None);
+
+    // An exclusive holder of the process waits for its shared holders.
+    let shared = region.lock_shared().unwrap();
+    std::thread::scope(|scope| {
+        let (taken, observed) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let held = region.lock_exclusive().unwrap();
+            taken.send(()).unwrap();
+            drop(held);
+        });
+        assert!(observed.try_recv().is_err(), "exclusive waits for shared");
+        drop(shared);
+        observed
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("exclusive is granted once the last shared holder leaves");
+    });
+}

@@ -41,12 +41,13 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::process::ProcessOwner;
 
 mod group;
+mod section;
 pub use group::GroupAccess;
 
 /// Namespace used by Orbit POSIX shared-memory objects.
@@ -111,11 +112,11 @@ pub struct ShmRegion {
     name: CString,
     lock_path: PathBuf,
     /// Whether this region uses the companion file for ordered writes.
-    ///
-    /// The descriptor itself is deliberately not retained: every critical
-    /// section opens its own file description so a later fork does not inherit
-    /// an idle descriptor that can keep a future `flock` alive.
     process_lock: bool,
+    /// This process's description of the lock file, opened by the first
+    /// critical section and kept (see `section`). A forked child never uses
+    /// its parent's; it opens a description for each section instead.
+    section: OnceLock<Arc<section::Section>>,
     /// The verified lock directory, opened by the first critical section.
     ///
     /// It carries no lock, so a child that inherits it keeps nothing alive.
@@ -281,6 +282,7 @@ impl ShmRegion {
             name: cname,
             process_lock: false,
             lock_dir: OnceLock::new(),
+            section: OnceLock::new(),
             ptr,
             len: actual_size,
             created: false,
@@ -535,6 +537,7 @@ impl ShmRegion {
                 lock_path,
                 process_lock,
                 lock_dir: OnceLock::new(),
+                section: OnceLock::new(),
                 ptr,
                 len: size,
                 created,
@@ -588,10 +591,17 @@ impl ShmRegion {
         }
         #[cfg(feature = "bench-timing")]
         let opening = std::time::Instant::now();
-        let fd = self.open_own_lock_file()?;
+        let section = self.section()?;
         #[cfg(feature = "bench-timing")]
         let opened = std::time::Instant::now();
-        let guard = lock_fd(fd, operation)?;
+        let guard = match section {
+            Some(section) => {
+                let exclusive = operation == libc::LOCK_EX;
+                section.acquire(exclusive, || self.open_own_lock_file())?;
+                ShmRegionLock::kept(section, exclusive)
+            }
+            None => lock_fd(self.open_own_lock_file()?, operation)?,
+        };
         #[cfg(feature = "bench-timing")]
         let guard = {
             let flock = opened.elapsed();
@@ -605,8 +615,21 @@ impl ShmRegion {
         Ok(guard)
     }
 
-    /// A new description of this region's lock file, for one critical
-    /// section, opened inside the directory verified for this region.
+    /// This process's kept description, opened on first use; `None` in a
+    /// forked child holding its parent's, which locks per section instead.
+    fn section(&self) -> io::Result<Option<Arc<section::Section>>> {
+        if let Some(section) = self.section.get() {
+            return Ok(section.is_current().then(|| Arc::clone(section)));
+        }
+        let fresh =
+            Arc::new(section::Section::new(self.open_own_lock_file()?)?);
+        // Two first sections may both open one; the other is closed.
+        let kept = self.section.get_or_init(|| fresh);
+        Ok(kept.is_current().then(|| Arc::clone(kept)))
+    }
+
+    /// A new description of this region's lock file, opened inside the
+    /// directory verified for this region.
     fn open_own_lock_file(&self) -> io::Result<OwnedFd> {
         let (Some(dir), Some(name)) =
             (self.lock_path.parent(), self.lock_path.file_name())
@@ -777,7 +800,7 @@ fn validate_minimum_size(
 /// Semantic crates use this when a current-state transition must be atomic
 /// across fleet processes. Dropping the guard releases the kernel lock.
 pub struct ShmRegionLock {
-    lock_fd: OwnedFd,
+    held: Held,
     #[cfg(feature = "bench-timing")]
     timing: Option<LockTiming>,
 }
@@ -789,10 +812,28 @@ pub struct LockTiming {
     pub flock: std::time::Duration,
 }
 
+enum Held {
+    /// A description opened for this section alone; closing it unlocks too.
+    Own(OwnedFd),
+    /// The region's kept description, shared with the process's other holders.
+    Kept { section: Arc<section::Section>, exclusive: bool },
+}
+
 impl ShmRegionLock {
     fn new(lock_fd: OwnedFd) -> Self {
         Self {
-            lock_fd,
+            held: Held::Own(lock_fd),
+            #[cfg(feature = "bench-timing")]
+            timing: None,
+        }
+    }
+
+    fn kept(
+        section: Arc<section::Section>,
+        exclusive: bool,
+    ) -> Self {
+        Self {
+            held: Held::Kept { section, exclusive },
             #[cfg(feature = "bench-timing")]
             timing: None,
         }
@@ -806,7 +847,14 @@ impl ShmRegionLock {
 
 impl Drop for ShmRegionLock {
     fn drop(&mut self) {
-        let _ = unsafe { libc::flock(self.lock_fd.as_raw_fd(), libc::LOCK_UN) };
+        match &self.held {
+            Held::Own(lock_fd) => {
+                // SAFETY: a plain syscall on a descriptor this guard owns.
+                let _ =
+                    unsafe { libc::flock(lock_fd.as_raw_fd(), libc::LOCK_UN) };
+            }
+            Held::Kept { section, exclusive } => section.release(*exclusive),
+        }
     }
 }
 

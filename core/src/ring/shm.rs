@@ -1763,12 +1763,15 @@ mod tests {
         let ring = ShmRing::open_or_create_for_fleet(&fleet_name, 196, spec, 2)
             .expect("create shared-ordered test ring");
         ring.reset();
+        // Lock once before the fork, so the parent keeps its description of
+        // the lock file and the child inherits it idle.
+        drop(ring.region.lock_exclusive().expect("parent locks ring"));
 
         match unsafe { fork() }.expect("fork test writer") {
             ForkResult::Child => {
-                // Use the handle inherited while it was idle. It must not carry
-                // a persistent lock descriptor across fork; the child opens a
-                // fresh file description for this critical section.
+                // Use the handle inherited while it was idle. The fork handler
+                // closed the parent's kept description in this child, and the
+                // child opens a fresh one for this critical section.
                 let _lock =
                     ring.region.lock_exclusive().expect("child locks ring");
                 let slot_ptr = ring.slot_ptr(0, 0);
