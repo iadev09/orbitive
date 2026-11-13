@@ -5,7 +5,9 @@
 //! resident keys, either all on one store (`shared`: one `Mutex` for all of
 //! them) or each on a store of its own on the same connection (`separate`:
 //! the same work with no lock shared). The gap between the two at the same
-//! thread count is what serializing on one store costs.
+//! thread count is what serializing on one store costs. `hot` has every
+//! thread read the same key of the shared store: no store layout can spread
+//! it, so it shows what one key's lock and its value's reference count cost.
 //!
 //! Run: `cargo bench -p orbit-cache --bench read_contention -- [reads] [samples] [threads,...]`.
 
@@ -62,6 +64,7 @@ mod unix {
         stores: &[Store],
         threads: usize,
         reads: usize,
+        hot: bool,
     ) -> (f64, f64) {
         let barrier = Arc::new(Barrier::new(threads + 1));
         let handles = (0..threads)
@@ -74,7 +77,12 @@ mod unix {
                     let cpu = thread_cpu_ns();
                     let mut found = 0;
                     for index in 0..reads {
-                        let key = &keys[(index + thread * 13) % KEYS];
+                        // `hot`: every thread reads the store's first key.
+                        let key = if hot {
+                            &keys[0]
+                        } else {
+                            &keys[(index + thread * 13) % KEYS]
+                        };
                         if let CacheRead::Hit(_) =
                             black_box(store.read(black_box(key)))
                         {
@@ -132,12 +140,14 @@ mod unix {
         );
         println!("| --- | ---: | --- | ---: | ---: | ---: |");
         for &threads in &counts {
-            for (label, stores) in
-                [("shared", &shared[..]), ("separate", &separate[..threads])]
-            {
-                let _ = sample(stores, threads, reads / 10);
+            for (label, stores, hot) in [
+                ("shared", &shared[..], false),
+                ("separate", &separate[..threads], false),
+                ("hot", &shared[..], true),
+            ] {
+                let _ = sample(stores, threads, reads / 10, hot);
                 let mut rows = (0..samples)
-                    .map(|_| sample(stores, threads, reads))
+                    .map(|_| sample(stores, threads, reads, hot))
                     .collect::<Vec<_>>();
                 let list = rows
                     .iter()
