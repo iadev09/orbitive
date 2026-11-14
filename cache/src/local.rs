@@ -106,6 +106,24 @@ impl LocalSlot {
     }
 }
 
+/// What a value claims about its revision when it is kept.
+#[derive(Clone, Copy)]
+enum Admission {
+    /// A mutation: at or below the floor it may be a delayed older write.
+    Mutation,
+    /// A backing read: it saw every write up to its revision, so a floor at
+    /// that sequence does not make it stale.
+    Fill,
+}
+
+/// The revision, expiry and admission rule of a value being kept.
+#[derive(Clone, Copy)]
+struct Stamp {
+    revision: CacheRevision,
+    expires_at_ms: Option<u64>,
+    admission: Admission,
+}
+
 pub(crate) enum ApplyOutcome {
     Applied,
     Ignored,
@@ -277,8 +295,11 @@ impl LocalCache {
                     &self.budget,
                     &key,
                     value,
-                    revision,
-                    expires_at_ms,
+                    Stamp {
+                        revision,
+                        expires_at_ms,
+                        admission: Admission::Mutation,
+                    },
                     reclaim,
                 );
                 match (applied, entry.is_some()) {
@@ -319,11 +340,45 @@ impl LocalCache {
                 &self.budget,
                 key,
                 Some(value),
-                revision,
-                expires_at_ms,
+                Stamp {
+                    revision,
+                    expires_at_ms,
+                    admission: Admission::Mutation,
+                },
                 reclaim,
             );
         }
+    }
+
+    /// Keep a value read from a backing store as current at `revision`.
+    ///
+    /// The revision is the last one allocated before the read, so the value
+    /// has seen every backing write published up to it: a floor at that very
+    /// sequence leaves it current, while any revision this view already holds
+    /// for the key at or above it makes the fill stale. Publishes nothing.
+    pub(crate) fn install_fill(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        revision: CacheRevision,
+        expires_at_ms: Option<u64>,
+        reclaim: impl FnMut() -> bool,
+    ) -> bool {
+        let mut state =
+            self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if !self.is_coherent()
+            || !state.admits(revision, Admission::Fill)
+            || !state.accepts_key(key, revision)
+        {
+            return false;
+        }
+        state.put_value(
+            &self.budget,
+            key,
+            Some(value),
+            Stamp { revision, expires_at_ms, admission: Admission::Fill },
+            reclaim,
+        )
     }
 
     pub(crate) fn evict_value(&self) -> bool {
@@ -362,7 +417,18 @@ impl LocalState {
         &self,
         revision: CacheRevision,
     ) -> bool {
-        !self.revision_floor.is_some_and(|floor| revision.sequence <= floor)
+        self.admits(revision, Admission::Mutation)
+    }
+
+    fn admits(
+        &self,
+        revision: CacheRevision,
+        admission: Admission,
+    ) -> bool {
+        self.revision_floor.is_none_or(|floor| match admission {
+            Admission::Mutation => revision.sequence > floor,
+            Admission::Fill => revision.sequence >= floor,
+        })
     }
 
     /// Install `slot` under `key`. An existing key is replaced in place and
@@ -408,17 +474,18 @@ impl LocalState {
         budget: &Arc<LocalBudget>,
         key: &[u8],
         value: Option<&[u8]>,
-        revision: CacheRevision,
-        expires_at_ms: Option<u64>,
+        stamp: Stamp,
         mut reclaim: impl FnMut() -> bool,
     ) -> bool {
+        let Stamp { revision, expires_at_ms, admission } = stamp;
         // Drop the old slot before charging its replacement, keeping its key
         // buffer. If the payload cannot be kept, record its revision as a miss.
         let key_buffer = self.slots.pop_entry(key).map(|(key, _)| key);
         let mut slot = LocalSlot::Missing { revision };
         if let Some(value) = value.filter(|value| value.len() <= budget.limit) {
             loop {
-                if !self.accepts(revision) {
+                // An eviction below may have raised the floor.
+                if !self.admits(revision, admission) {
                     return false;
                 }
                 if budget.reserve(value.len()) {
@@ -541,6 +608,65 @@ mod tests {
         assert!(matches!(cache.read_at(b"ttl", 9), CacheRead::Hit(_)));
         assert_eq!(cache.read_with_clock(b"ttl", || 10), CacheRead::Miss);
         assert_eq!(cache.read_with_clock(b"ttl", no_clock), CacheRead::Miss);
+    }
+
+    #[test]
+    fn a_fill_is_kept_until_a_revision_at_or_after_it_says_otherwise() {
+        let cache = LocalCache::with_connection(
+            NonZeroUsize::new(4).unwrap(),
+            Arc::new(LocalBudget::new(64)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        let at = |sequence, id| CacheRevision {
+            sequence,
+            mutation_id: orbit_core::NetId64::from_raw(id),
+        };
+        let token = |sequence| at(sequence, 0);
+
+        assert!(cache.install_fill(
+            b"cold",
+            b"backing",
+            token(3),
+            None,
+            || false
+        ));
+        assert!(matches!(cache.read(b"cold"), CacheRead::Hit(_)));
+
+        // A delete this view applied at the token's sequence is newer.
+        cache.install_missing(b"deleted", at(5, 1));
+        assert!(!cache.install_fill(
+            b"deleted",
+            b"old",
+            token(5),
+            None,
+            || false
+        ));
+        assert_eq!(cache.read(b"deleted"), CacheRead::Miss);
+
+        // A floor at the token's sequence leaves the fill current; one past
+        // it does not.
+        cache.reset_local(at(7, 1));
+        assert!(cache.install_fill(
+            b"after",
+            b"backing",
+            token(7),
+            None,
+            || false
+        ));
+        assert!(!cache.install_fill(
+            b"before",
+            b"backing",
+            token(6),
+            None,
+            || false
+        ));
+
+        // A mutation published after the token replaces the fill.
+        cache.install_local(b"after", b"newer", at(8, 1), None, || false);
+        assert!(matches!(
+            cache.read(b"after"),
+            CacheRead::Hit(entry) if entry.value.as_ref() == b"newer"
+        ));
     }
 
     #[test]

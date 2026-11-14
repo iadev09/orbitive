@@ -442,6 +442,40 @@ impl<L: CacheLayout> Store<L> {
         Ok(revision)
     }
 
+    /// The revision a backing read started now is current as of. Take it
+    /// before the read and pass it to [`Store::fill`]: every mutation
+    /// published up to it wrote its backing value first, and any later one is
+    /// newer than the fill.
+    pub fn fill_revision(&self) -> CacheRevision {
+        CacheRevision {
+            sequence: self.cache.transport.current_revision_sequence(),
+            mutation_id: orbit_core::NetId64::ZERO,
+        }
+    }
+
+    /// Keep `value`, read from a backing store after
+    /// [`Store::fill_revision`], in this worker's view unless a mutation it
+    /// has applied since makes it stale. A value this store could not hold,
+    /// or one already expired, is not kept. Publishes nothing; returns whether
+    /// the value is kept.
+    pub fn fill(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        revision: CacheRevision,
+        expires_at_ms: Option<u64>,
+    ) -> bool {
+        if self.validate_put(key, value).is_err()
+            || expires_at_ms
+                .is_some_and(|deadline| deadline <= transport::now_ms())
+        {
+            return false;
+        }
+        self.local.install_fill(key, value, revision, expires_at_ms, || {
+            self.cache.reclaim_value(&self.name)
+        })
+    }
+
     pub fn local(&self) -> &LocalCache {
         &self.local
     }

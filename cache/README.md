@@ -16,8 +16,11 @@ Delete and Reset. A Put references an arena payload, which the receiving
 worker copies into L1. Hits read local bytes and check TTL. Each process
 starts empty at the current ring heads, and a driver applies later mutations.
 
-A normal miss may fall through to a backing store. Detected mutation loss
-places the connection in `ResyncRequired` until explicit recovery.
+A normal miss may fall through to a backing store. Take `Store::fill_revision`
+before reading it and give the value to `Store::fill`: the store keeps it with
+its expiry unless a mutation it applied since is newer, and publishes nothing.
+Detected mutation loss places the connection in `ResyncRequired` until explicit
+recovery.
 
 ```rust
 use std::sync::Arc;
