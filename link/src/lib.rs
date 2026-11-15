@@ -60,6 +60,8 @@ pub use inbox::{
 pub use orbit_core::shm::GroupAccess;
 #[cfg(all(unix, feature = "probe"))]
 pub use probe::{BellCounts, bell_counts};
+#[cfg(all(unix, feature = "tokio", feature = "probe"))]
+pub use probe::{LaneCounts, LaneProbe};
 #[cfg(all(unix, feature = "tokio"))]
 pub use receiver::{InboxReceiver, Received};
 #[cfg(unix)]

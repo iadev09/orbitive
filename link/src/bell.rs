@@ -9,38 +9,55 @@ use std::io;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-/// Empty obsolete bells only when the receiver has no shared work left.
-/// Callers disarm first and recheck the shared generation after rearming.
 #[cfg(feature = "tokio")]
-pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
+fn recv(
+    socket: &tokio::net::UnixDatagram,
+    scratch: &mut [u8],
+    flags: libc::c_int,
+) -> io::Result<usize> {
     use std::os::fd::AsRawFd;
 
-    let mut scratch = [0u8; 64];
-    loop {
-        // Tokio may not have observed readiness yet when the generation
-        // recheck avoided parking. Drain the kernel queue in that case too.
-        // SAFETY: the socket owns this fd and scratch is writable for len bytes.
+    crate::probe::read(|| {
+        // SAFETY: socket owns this fd and scratch is writable for its length.
         let read = unsafe {
             libc::recv(
                 socket.as_raw_fd(),
                 scratch.as_mut_ptr().cast(),
                 scratch.len(),
-                libc::MSG_DONTWAIT,
+                flags,
             )
         };
-        crate::probe::read(read >= 0);
         if read >= 0 {
-            continue;
+            Ok(read as usize)
+        } else {
+            Err(io::Error::last_os_error())
         }
-        let error = io::Error::last_os_error();
+    })
+}
+
+/// Empty obsolete bells only when the receiver has no shared work left.
+/// Callers disarm first and recheck the shared generation after rearming.
+#[cfg(feature = "tokio")]
+pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
+    let mut scratch = [0u8; 64];
+    loop {
+        // A generation recheck may have skipped the readiness wait.
+        let error = match recv(socket, &mut scratch, libc::MSG_DONTWAIT) {
+            Ok(_) => continue,
+            Err(error) => error,
+        };
         match error.kind() {
             io::ErrorKind::Interrupted => continue,
             io::ErrorKind::WouldBlock => {
                 // Let Tokio clear a cached readiness bit with its own IO
                 // attempt. A late bell is harmless; consume it and finish
                 // draining before rearming.
+                #[cfg(not(feature = "probe"))]
                 let late = socket.try_recv(&mut scratch);
-                crate::probe::read(late.is_ok());
+                #[cfg(feature = "probe")]
+                let late = socket.try_io(tokio::io::Interest::READABLE, || {
+                    recv(socket, &mut scratch, 0)
+                });
                 match late {
                     Ok(_) => continue,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -60,24 +77,12 @@ pub(crate) fn drain(socket: &tokio::net::UnixDatagram) -> io::Result<()> {
 /// may not have seen the bell arrive yet, and would answer for it.
 #[cfg(feature = "tokio")]
 pub(crate) fn take_one(socket: &tokio::net::UnixDatagram) -> io::Result<bool> {
-    use std::os::fd::AsRawFd;
-
     let mut scratch = [0u8; 64];
     loop {
-        // SAFETY: the socket owns this fd and scratch is writable for len bytes.
-        let read = unsafe {
-            libc::recv(
-                socket.as_raw_fd(),
-                scratch.as_mut_ptr().cast(),
-                scratch.len(),
-                libc::MSG_DONTWAIT,
-            )
+        let error = match recv(socket, &mut scratch, libc::MSG_DONTWAIT) {
+            Ok(_) => return Ok(true),
+            Err(error) => error,
         };
-        crate::probe::read(read >= 0);
-        if read >= 0 {
-            return Ok(true);
-        }
-        let error = io::Error::last_os_error();
         match error.kind() {
             io::ErrorKind::Interrupted => continue,
             io::ErrorKind::WouldBlock => return Ok(false),

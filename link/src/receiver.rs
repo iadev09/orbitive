@@ -45,6 +45,8 @@ pub struct InboxReceiver {
     armed: bool,
     /// Bells sent for arms a writer took, and not read yet.
     owed: u32,
+    #[cfg(feature = "probe")]
+    observation: crate::probe::LaneObservation,
 }
 
 impl InboxReceiver {
@@ -63,7 +65,15 @@ impl InboxReceiver {
             capacity,
             armed: false,
             owed: 0,
+            #[cfg(feature = "probe")]
+            observation: Default::default(),
         })
+    }
+
+    /// Read probe counters for this receiver from the benchmark driver.
+    #[cfg(feature = "probe")]
+    pub fn lane_probe(&self) -> crate::LaneProbe {
+        self.observation.probe.clone()
     }
 
     /// Wait for and copy the next frame from this lane, of either kind.
@@ -130,25 +140,37 @@ impl InboxReceiver {
             let directory = inbox.directory();
             if directory != self.directory {
                 self.directory = directory;
+                #[cfg(feature = "probe")]
+                self.observation.notification();
                 return Ok(Some(Received::Directory(directory)));
             }
             let seen = inbox.receiver_generation(self.lane)?;
             let capacity = inbox.capacity_generation(self.lane)?;
             if capacity != self.capacity {
                 self.capacity = capacity;
+                #[cfg(feature = "probe")]
+                self.observation.notification();
                 return Ok(Some(Received::Capacity(capacity)));
             }
             if let Some(out) = out.as_deref_mut()
                 && let Some(work) =
                     inbox.read_frame_before(self.lane, out, boundary)?
             {
-                return Ok(Some(if let Some(ticket) = work {
+                let received = if let Some(ticket) = work {
                     Received::Work(ticket)
                 } else if crate::frame::is_event(out) {
                     Received::Event
                 } else {
                     Received::Frame
-                }));
+                };
+                #[cfg(feature = "probe")]
+                match received {
+                    Received::Frame | Received::Work(_) => {
+                        self.observation.frame()
+                    }
+                    _ => self.observation.notification(),
+                }
+                return Ok(Some(received));
             }
 
             if let Some(boundary) = boundary
@@ -171,7 +193,25 @@ impl InboxReceiver {
                 continue;
             }
 
+            #[cfg(not(feature = "probe"))]
             self.socket().readable().await?;
+            #[cfg(feature = "probe")]
+            {
+                self.observation.finish();
+                let mut pending = false;
+                {
+                    let mut readiness =
+                        std::pin::pin!(self.socket().readable());
+                    use std::future::Future;
+                    std::future::poll_fn(|cx| {
+                        let result = readiness.as_mut().poll(cx);
+                        pending |= result.is_pending();
+                        result
+                    })
+                    .await?;
+                }
+                self.observation.begin(pending);
+            }
             self.lower();
             if self.owed == 0 {
                 // Woken with the arm still raised: a bell this receiver did

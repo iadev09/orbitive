@@ -48,14 +48,28 @@ together, over the counted time. The `probe` feature supplies the bell counts.
 
 | Column | What it counts |
 | --- | --- |
-| bells/op | datagrams sent to ring an inbox bell |
-| ns/bell | what one such send took |
-| empty bell reads/op | reads of a bell socket that found nothing |
+| bells/op | doorbell send attempts, including failures |
+| ns/bell | mean elapsed time per send attempt |
+| empty bell reads/op | actual doorbell receive calls that returned `WouldBlock` |
 | parks/op | times a runtime thread ran out of work and went to wait |
 | switches/op | voluntary context switches; macOS reports none |
 
-A stream's own wake is not a bell and is not counted in the first three; it
-shows in parks and switches.
+A stream's own wake is outside the bell counters. Parks and context switches
+cover the whole benchmark runtime.
+
+The `frame` path also prints one lane snapshot and one syscall summary for
+each process. The caller receives reply frames and the responder receives
+request frames. A wake here is a successful `readable()` return that followed
+at least one `Pending` poll. Its batch ends at the next socket readiness
+attempt or receiver drop. The histogram buckets are 0, 1, 2 and 3+ data
+frames. First-poll readiness, frames before any readiness return and control
+notifications have separate counters. Snapshots include completed batches.
+
+The syscall summaries count send and receive attempts separately, including
+`WouldBlock` and other errors. The receive timer runs inside Tokio's
+readiness gate, so a cached `WouldBlock` does not count as a syscall. The
+send and receive timers measure elapsed call time. User and system CPU
+counters cover the entire process over the snapshot window.
 
 Results: [after the bell changes](transport-2026-11-12-bell.md), compared with
 [the baseline of 12 November 2026](transport-2026-11-12.md), which has the

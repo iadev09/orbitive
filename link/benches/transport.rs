@@ -38,7 +38,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use orbit_link::{InboxGeometry, LinkBodies, LinkSegment, LinkSpec, Received};
+use orbit_link::{
+    InboxGeometry, InboxReceiver, LaneCounts, LaneProbe, LinkBodies,
+    LinkSegment, LinkSpec, Received,
+};
 use orbit_stream::{Endpoint, StreamSpec, Ticket};
 use tokio::io::{
     AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
@@ -107,8 +110,15 @@ struct Spent {
     rings: u64,
     /// Nanoseconds inside those sends.
     ring_nanos: u64,
-    /// Bell reads that found nothing.
     empty_reads: u64,
+    reads: u64,
+    read_nanos: u64,
+    read_errors: u64,
+    ring_would_block: u64,
+    ring_errors: u64,
+    user_cpu: u64,
+    system_cpu: u64,
+    lane: LaneCounts,
     /// Times the runtime thread went to wait for an event.
     parks: u64,
     /// Voluntary context switches. macOS does not count them.
@@ -116,7 +126,7 @@ struct Spent {
 }
 
 impl Spent {
-    fn now() -> Self {
+    fn now(probe: Option<&LaneProbe>) -> Self {
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
         // SAFETY: `usage` is a valid rusage for the duration of the call.
         unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
@@ -129,39 +139,83 @@ impl Spent {
             rings: bells.rings,
             ring_nanos: bells.ring_nanos,
             empty_reads: bells.empty_reads,
+            reads: bells.reads,
+            read_nanos: bells.read_nanos,
+            read_errors: bells.read_errors,
+            ring_would_block: bells.ring_would_block,
+            ring_errors: bells.ring_errors,
+            user_cpu: of(usage.ru_utime),
+            system_cpu: of(usage.ru_stime),
+            lane: probe.map_or_else(LaneCounts::default, LaneProbe::snapshot),
             parks: PARKS.load(Ordering::Relaxed),
             switches: usage.ru_nvcsw as u64,
         }
     }
 
-    /// Both processes' spending between two readings of each.
-    fn between(
-        near: (Self, Self),
-        far: (Self, Self),
+    fn since(
+        self,
+        before: Self,
     ) -> Self {
-        let of = |field: fn(&Self) -> u64| {
-            (field(&near.1) - field(&near.0)) + (field(&far.1) - field(&far.0))
-        };
         Self {
-            cpu: of(|s| s.cpu),
-            rings: of(|s| s.rings),
-            ring_nanos: of(|s| s.ring_nanos),
-            empty_reads: of(|s| s.empty_reads),
-            parks: of(|s| s.parks),
-            switches: of(|s| s.switches),
+            cpu: self.cpu - before.cpu,
+            rings: self.rings - before.rings,
+            ring_nanos: self.ring_nanos - before.ring_nanos,
+            empty_reads: self.empty_reads - before.empty_reads,
+            reads: self.reads - before.reads,
+            read_nanos: self.read_nanos - before.read_nanos,
+            read_errors: self.read_errors - before.read_errors,
+            ring_would_block: self.ring_would_block - before.ring_would_block,
+            ring_errors: self.ring_errors - before.ring_errors,
+            user_cpu: self.user_cpu - before.user_cpu,
+            system_cpu: self.system_cpu - before.system_cpu,
+            parks: self.parks - before.parks,
+            switches: self.switches - before.switches,
+            lane: LaneCounts {
+                wakes: self.lane.wakes - before.lane.wakes,
+                immediate: self.lane.immediate - before.lane.immediate,
+                woken_frames: self.lane.woken_frames - before.lane.woken_frames,
+                immediate_frames: self.lane.immediate_frames
+                    - before.lane.immediate_frames,
+                direct_frames: self.lane.direct_frames
+                    - before.lane.direct_frames,
+                notifications: self.lane.notifications
+                    - before.lane.notifications,
+                frames_per_wake: std::array::from_fn(|i| {
+                    self.lane.frames_per_wake[i]
+                        - before.lane.frames_per_wake[i]
+                }),
+            },
         }
     }
 
     fn line(self) -> String {
-        format!(
-            "{} {} {} {} {} {}",
+        [
             self.cpu,
             self.rings,
             self.ring_nanos,
             self.empty_reads,
+            self.reads,
+            self.read_nanos,
+            self.read_errors,
+            self.ring_would_block,
+            self.ring_errors,
+            self.user_cpu,
+            self.system_cpu,
             self.parks,
-            self.switches
-        )
+            self.switches,
+            self.lane.wakes,
+            self.lane.immediate,
+            self.lane.woken_frames,
+            self.lane.immediate_frames,
+            self.lane.direct_frames,
+            self.lane.notifications,
+            self.lane.frames_per_wake[0],
+            self.lane.frames_per_wake[1],
+            self.lane.frames_per_wake[2],
+            self.lane.frames_per_wake[3],
+        ]
+        .map(|count| count.to_string())
+        .join(" ")
     }
 
     fn parse(line: &str) -> Self {
@@ -173,8 +227,24 @@ impl Spent {
             rings: next(),
             ring_nanos: next(),
             empty_reads: next(),
+            reads: next(),
+            read_nanos: next(),
+            read_errors: next(),
+            ring_would_block: next(),
+            ring_errors: next(),
+            user_cpu: next(),
+            system_cpu: next(),
             parks: next(),
             switches: next(),
+            lane: LaneCounts {
+                wakes: next(),
+                immediate: next(),
+                woken_frames: next(),
+                immediate_frames: next(),
+                direct_frames: next(),
+                notifications: next(),
+                frames_per_wake: std::array::from_fn(|_| next()),
+            },
         }
     }
 }
@@ -352,9 +422,8 @@ async fn answer_link(
 async fn serve_whole(
     segment: Arc<LinkSegment>,
     bodies: Arc<LinkBodies>,
-    lane: usize,
+    mut receiver: InboxReceiver,
 ) {
-    let mut receiver = segment.receiver(lane).expect("receiver");
     let mut frame = Vec::new();
     loop {
         match receiver.next(&mut frame).await.expect("next frame") {
@@ -469,11 +538,9 @@ struct Caller {
 impl Caller {
     /// Replies come back to this lane and go to whoever waits on them.
     async fn read_replies(
-        segment: Arc<LinkSegment>,
-        lane: usize,
+        mut receiver: InboxReceiver,
         waiting: Waiting,
     ) {
-        let mut receiver = segment.receiver(lane).expect("receiver");
         let mut frame = Vec::new();
         loop {
             match receiver.next(&mut frame).await.expect("next reply") {
@@ -573,10 +640,10 @@ impl Caller {
 
 /// Answer `mark` on standard input with what this process has spent, until
 /// the parent closes it.
-async fn control() {
+async fn control(probe: Option<&LaneProbe>) {
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(_)) = lines.next_line().await {
-        println!("{}", Spent::now().line());
+        println!("{}", Spent::now(probe).line());
         let _ = std::io::stdout().flush();
     }
 }
@@ -596,7 +663,7 @@ fn server(role: &str) {
             let listener = UnixListener::bind(&path).expect("bind");
             ready();
             tokio::select! {
-                () = control() => {}
+                () = control(None) => {}
                 () = async {
                     loop {
                         let (stream, _) =
@@ -618,7 +685,7 @@ fn server(role: &str) {
         ready();
         if role == "link" {
             tokio::select! {
-                () = control() => {}
+                () = control(None) => {}
                 () = serve_link(
                     Arc::clone(&segment),
                     Arc::clone(&bodies),
@@ -629,12 +696,14 @@ fn server(role: &str) {
             return;
         }
         if role == "inline" || role == "frame" {
+            let receiver = segment.receiver(joined.lane).expect("receiver");
+            let probe = receiver.lane_probe();
             tokio::select! {
-                () = control() => {}
+                () = control(Some(&probe)) => {}
                 () = serve_whole(
                     Arc::clone(&segment),
                     Arc::clone(&bodies),
-                    joined.lane,
+                    receiver,
                 ) => {}
             }
             return;
@@ -654,7 +723,7 @@ fn server(role: &str) {
             }
         };
         tokio::select! {
-            () = control() => {}
+            () = control(None) => {}
             () = accept => {}
         }
     });
@@ -722,7 +791,8 @@ fn report(
     conns: usize,
     seconds: u64,
     samples: &[Sample],
-    spent: Spent,
+    near: Spent,
+    far: Spent,
 ) {
     let of = |span: fn(&Sample) -> i64| -> i64 {
         let mut values: Vec<i64> = samples.iter().map(span).collect();
@@ -734,21 +804,53 @@ fn report(
     let p99 = totals.get(totals.len() * 99 / 100).copied().unwrap_or(0);
     let count = samples.len().max(1) as u64;
     let each = |total: u64| total as f64 / count as f64;
+    let rings = near.rings + far.rings;
     println!(
         "| {path} | {size} | {conns} | {} | {p50} | {p99} | {} | {} | {} | {} | {} | {} | {:.2} | {} | {:.2} | {:.2} | {:.2} |",
         samples.len() as u64 / seconds,
-        spent.cpu / count,
+        (near.cpu + far.cpu) / count,
         of(|s| s.sent as i64 - s.start as i64),
         of(|s| s.arrived as i64 - s.sent as i64),
         of(|s| s.read as i64 - s.arrived as i64),
         of(|s| s.answered as i64 - s.answering as i64),
         of(|s| s.done as i64 - s.answered as i64),
-        each(spent.rings),
-        spent.ring_nanos.checked_div(spent.rings).unwrap_or(0),
-        each(spent.empty_reads),
-        each(spent.parks),
-        each(spent.switches),
+        each(rings),
+        (near.ring_nanos + far.ring_nanos).checked_div(rings).unwrap_or(0),
+        each(near.empty_reads + far.empty_reads),
+        each(near.parks + far.parks),
+        each(near.switches + far.switches),
     );
+    if path == "frame" {
+        for (side, spent) in [("caller", near), ("responder", far)] {
+            let lane = spent.lane;
+            let frame_mean =
+                lane.woken_frames as f64 / lane.wakes.max(1) as f64;
+            println!(
+                "probe {size}B x{conns} {side}: ops={} wakes={} frames/wake={frame_mean:.3} histogram={:?} woken_frames={} immediate={} immediate_frames={} direct_frames={} notifications={}",
+                samples.len(),
+                lane.wakes,
+                lane.frames_per_wake,
+                lane.woken_frames,
+                lane.immediate,
+                lane.immediate_frames,
+                lane.direct_frames,
+                lane.notifications,
+            );
+            println!(
+                "syscalls {size}B x{conns} {side}: send={} eagain={} other={} send_ns={} recv={} eagain={} other={} recv_ns={} user_ns={} system_ns={}",
+                spent.rings,
+                spent.ring_would_block,
+                spent.ring_errors,
+                spent.ring_nanos,
+                spent.reads,
+                spent.empty_reads,
+                spent.read_errors,
+                spent.read_nanos,
+                spent.user_cpu,
+                spent.system_cpu,
+            );
+        }
+    }
 }
 
 fn run(
@@ -778,7 +880,7 @@ fn run(
 
     let named = matches!(path, "link" | "inline" | "frame");
     let runtime = runtime();
-    let (samples, spent) = runtime.block_on(async {
+    let (samples, near, far) = runtime.block_on(async {
         let measure = seconds * 1_000_000_000;
         let from = now() + WARM_UP.as_nanos() as u64;
         let end = from + measure;
@@ -786,13 +888,12 @@ fn run(
         let replies = match (&setup, &joined, &bodies) {
             (Some(segment), Some(joined), Some(_)) if named => {
                 let waiting = Waiting::default();
+                let receiver = segment.receiver(joined.lane).expect("receiver");
+                let probe = receiver.lane_probe();
                 Some((
                     waiting.clone(),
-                    tokio::spawn(Caller::read_replies(
-                        Arc::clone(segment),
-                        joined.lane,
-                        waiting,
-                    )),
+                    tokio::spawn(Caller::read_replies(receiver, waiting)),
+                    probe,
                 ))
             }
             _ => None,
@@ -857,21 +958,23 @@ fn run(
         // time.
         tokio::time::sleep(WARM_UP).await;
         let far = peer.spent();
-        let near = Spent::now();
+        let probe = replies.as_ref().map(|(_, _, probe)| probe);
+        let near = Spent::now(probe);
         tokio::time::sleep(Duration::from_secs(seconds)).await;
-        let spent = Spent::between((near, Spent::now()), (far, peer.spent()));
+        let near = Spent::now(probe).since(near);
+        let far = peer.spent().since(far);
         let mut samples = Vec::new();
         for task in tasks {
             samples.extend(task.await.expect("a caller"));
         }
-        if let Some((_, reader)) = replies {
+        if let Some((_, reader, _)) = replies {
             reader.abort();
         }
-        (samples, spent)
+        (samples, near, far)
     });
     drop(runtime);
     peer.stop();
-    report(path, size, conns, seconds, &samples, spent);
+    report(path, size, conns, seconds, &samples, near, far);
 
     let _ = std::fs::remove_file(&socket);
     drop(joined);
