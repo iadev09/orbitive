@@ -324,18 +324,33 @@ impl TextBackend {
         Ok(Text { table: self.clone(), id, _lease: lease })
     }
 
+    /// Without the structural lock, as a scalar open: count this owner on
+    /// the slot, then validate its generation (`Owners::acquire`).
     pub(crate) fn open(
         &self,
         id: TextId,
     ) -> Result<Text> {
-        let lease = self.with_structure(|slots, _, owners| {
-            slots
-                .get(id.index as usize)
-                .filter(|slot| slot.is(id))
-                .ok_or(Error::StaleText(id))?;
-            owners.lease(id.index as usize)
+        let index = id.index as usize;
+        let slot = self.slots().get(index).ok_or(Error::StaleText(id))?;
+        let lease = self.owners().acquire(index, || {
+            // SeqCst pairs with the retirement store and allocation's pin check.
+            if slot.state.load(Ordering::SeqCst) == SLOT_OCCUPIED
+                && slot.generation.load(Ordering::Relaxed) == id.generation()
+            {
+                Ok(())
+            } else {
+                Err(Error::StaleText(id))
+            }
         })?;
         Ok(Text { table: self.clone(), id, _lease: lease })
+    }
+
+    fn owners(&self) -> Owners {
+        match self {
+            Self::InMemory(table) => table.owners.clone(),
+            #[cfg(unix)]
+            Self::Shm(table) => Owners::Shared(table.shared.clone()),
+        }
     }
 
     pub(crate) fn release(

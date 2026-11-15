@@ -100,3 +100,100 @@ fn released_text_and_reset_cells_stay_pinned_until_the_last_handle_drops() {
     assert_eq!(replacement.load().unwrap(), 42);
     drop(held);
 }
+
+/// An open takes no lock: it counts first and validates after. One that
+/// finds its slot stale gives the count back, so the slot is reused; one
+/// that holds a handle keeps its slot from reuse until the handle drops.
+#[test]
+fn a_failed_open_leaves_no_pin_and_a_held_one_keeps_its_slot() {
+    let cells = cells();
+    let mut held: Vec<_> = (0..CELL_CAPACITY)
+        .map(|value| cells.allocate(value as i64).unwrap())
+        .collect();
+    assert!(matches!(cells.allocate(0_i64), Err(Error::Full { .. })));
+
+    let stale = held.pop().unwrap();
+    let stale_id = stale.id();
+    stale.release().unwrap();
+    assert!(matches!(cells.open::<i64>(stale_id), Err(Error::Stale(_))));
+    let reused = cells.allocate(1_i64).expect("a failed open pins nothing");
+
+    let pinned = held.pop().unwrap();
+    let opened = cells.open::<i64>(pinned.id()).unwrap();
+    pinned.release().unwrap();
+    assert!(matches!(cells.allocate(2_i64), Err(Error::Full { .. })));
+    drop(opened);
+    let _after =
+        cells.allocate(3_i64).expect("the last handle released the slot");
+    drop(reused);
+}
+
+#[test]
+fn a_scalar_opens_by_id_as_the_type_its_slot_holds() {
+    use orbit_cell::Scalar;
+
+    let cells = cells();
+    let int = cells.allocate(7_i64).unwrap();
+    let float = cells.allocate(0.5_f64).unwrap();
+    let flag = cells.allocate(true).unwrap();
+    assert!(
+        matches!(cells.open_scalar(int.id()), Ok(Scalar::Int(cell)) if cell.load().unwrap() == 7)
+    );
+    assert!(
+        matches!(cells.open_scalar(float.id()), Ok(Scalar::Float(cell)) if cell.load().unwrap() == 0.5)
+    );
+    assert!(
+        matches!(cells.open_scalar(flag.id()), Ok(Scalar::Bool(cell)) if cell.load().unwrap())
+    );
+
+    let other = cells.allocate(Paused(1)).unwrap();
+    assert!(matches!(
+        cells.open_scalar(other.id()),
+        Err(Error::TypeMismatch { .. })
+    ));
+    let gone = int.id();
+    int.release().unwrap();
+    assert!(matches!(cells.open_scalar(gone), Err(Error::Stale(_))));
+}
+
+/// Opens race reuse of the very slot they name; when every handle is gone,
+/// every count an open took has been given back and the table fills again.
+#[test]
+fn concurrent_opens_racing_reuse_give_every_count_back() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let cells = cells();
+    let first = cells.allocate(0_i64).unwrap();
+    let current = Arc::new(Mutex::new(first.id()));
+    first.release().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let openers: Vec<_> = (0..2)
+        .map(|_| {
+            let (cells, current, stop) =
+                (cells.clone(), Arc::clone(&current), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let id = *current.lock().unwrap();
+                    if let Ok(cell) = cells.open::<i64>(id) {
+                        let _ = cell.load();
+                    }
+                }
+            })
+        })
+        .collect();
+    for value in 0..20_000_i64 {
+        let cell = cells.allocate(value).unwrap();
+        *current.lock().unwrap() = cell.id();
+        cell.release().unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    for opener in openers {
+        opener.join().unwrap();
+    }
+    let filled: Vec<_> = (0..CELL_CAPACITY)
+        .map(|value| cells.allocate(value as i64))
+        .collect::<Result<_, _>>()
+        .expect("no open left a count behind");
+    assert_eq!(filled.len(), CELL_CAPACITY);
+}

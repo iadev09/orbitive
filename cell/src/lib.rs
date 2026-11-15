@@ -488,25 +488,22 @@ impl Cells {
         })
     }
 
-    /// A handle to a live cell of type `T`.
+    /// A handle to a live cell of type `T`. Opening takes no lock: it counts
+    /// this owner on the slot and then validates the generation and type.
     pub fn open<T: CellType>(
         &self,
         id: CellId,
     ) -> Result<Orbital<T>> {
-        let lease = self.with_structure(|slots, _, owners| {
-            let slot = slots
-                .get(id.index as usize)
-                .filter(|slot| slot.is(id))
-                .ok_or(Error::Stale(id))?;
-            let found = slot.tag.load(Ordering::Relaxed);
-            if found != T::TAG {
-                return Err(Error::TypeMismatch {
+        let lease = self.lease(id, |found| {
+            if found == T::TAG {
+                Ok(())
+            } else {
+                Err(Error::TypeMismatch {
                     id,
                     expected: T::NAME,
                     found: type_name(found),
-                });
+                })
             }
-            owners.lease(id.index as usize)
         })?;
         Ok(Orbital {
             cells: self.clone(),
@@ -514,6 +511,79 @@ impl Cells {
             _type: PhantomData,
             _lease: lease,
         })
+    }
+
+    /// A handle to a live scalar cell whose type its id does not say: the
+    /// slot's tag decides, read once, in one open.
+    pub fn open_scalar(
+        &self,
+        id: CellId,
+    ) -> Result<Scalar> {
+        let mut tag = 0;
+        let lease = self.lease(id, |found| {
+            tag = found;
+            if [i64::TAG, f64::TAG, bool::TAG].contains(&found) {
+                Ok(())
+            } else {
+                Err(Error::TypeMismatch {
+                    id,
+                    expected: "a scalar",
+                    found: type_name(found),
+                })
+            }
+        })?;
+        let cells = self.clone();
+        Ok(if tag == i64::TAG {
+            Scalar::Int(Orbital {
+                cells,
+                id,
+                _type: PhantomData,
+                _lease: lease,
+            })
+        } else if tag == f64::TAG {
+            Scalar::Float(Orbital {
+                cells,
+                id,
+                _type: PhantomData,
+                _lease: lease,
+            })
+        } else {
+            Scalar::Bool(Orbital {
+                cells,
+                id,
+                _type: PhantomData,
+                _lease: lease,
+            })
+        })
+    }
+
+    /// Count this owner on `id`'s slot, then check it is live in that
+    /// generation and that `check` accepts its tag.
+    fn lease(
+        &self,
+        id: CellId,
+        check: impl FnOnce(u8) -> Result<()>,
+    ) -> Result<Arc<Lease>> {
+        let index = id.index as usize;
+        let slot = self.slots().get(index).ok_or(Error::Stale(id))?;
+        self.owners().acquire(index, || {
+            // SeqCst pairs with the retirement store and allocation's pin
+            // check; it is also the Acquire that publishes `install`.
+            if slot.state.load(Ordering::SeqCst) != SLOT_OCCUPIED
+                || slot.generation.load(Ordering::Relaxed) != id.generation
+            {
+                return Err(Error::Stale(id));
+            }
+            check(slot.tag.load(Ordering::Relaxed))
+        })
+    }
+
+    fn owners(&self) -> Owners {
+        match &self.backend {
+            CellBackend::InMemory(table) => table.owners.clone(),
+            #[cfg(unix)]
+            CellBackend::Shm(table) => Owners::Shared(table.shared.clone()),
+        }
     }
 
     /// Retire this generation immediately. Existing handles go stale, but
@@ -527,7 +597,8 @@ impl Cells {
                 .get(id.index as usize)
                 .filter(|slot| slot.is(id))
                 .ok_or(Error::Stale(id))?;
-            slot.state.store(SLOT_RETIRED, Ordering::Release);
+            // SeqCst pairs with an open's count: see `Owners::acquire`.
+            slot.state.store(SLOT_RETIRED, Ordering::SeqCst);
             // Whoever is parked on it finds the slot gone and answers Stale.
             slot.changed();
             Ok(())
@@ -546,7 +617,7 @@ impl Cells {
     pub fn reset_all(&self) -> Result<()> {
         self.with_structure(|slots, hint, _| {
             for slot in slots {
-                slot.state.store(SLOT_RETIRED, Ordering::Release);
+                slot.state.store(SLOT_RETIRED, Ordering::SeqCst);
                 slot.changed();
             }
             hint.store(0, Ordering::Relaxed);
@@ -599,6 +670,13 @@ impl Cells {
             CellBackend::Shm(table) => table.with_structure(operation),
         }
     }
+}
+
+/// A scalar cell opened by id alone, typed by what its slot holds.
+pub enum Scalar {
+    Int(Orbital<i64>),
+    Float(Orbital<f64>),
+    Bool(Orbital<bool>),
 }
 
 /// What [`Orbital::add_until`] did. A bounded add either takes some of what

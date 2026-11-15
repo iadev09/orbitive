@@ -43,16 +43,40 @@ impl Owners {
         Ok(Arc::new(Lease { owners: self.clone(), index }))
     }
 
+    /// An open, without the structural lock: count this owner first, then
+    /// validate, and give the count back when validation fails. The count is
+    /// SeqCst, as are `validate`'s state load, the retirement store and
+    /// [`Self::pinned`], so an open that validated a live slot is seen by any
+    /// allocation that would reuse it (ARCHITECTURE.md, "Opening without the
+    /// lock"). A failed open leaves its count for at most the moment between
+    /// the two steps, during which an allocation passes the slot over.
+    pub(crate) fn acquire(
+        &self,
+        index: usize,
+        validate: impl FnOnce() -> Result<()>,
+    ) -> Result<Arc<Lease>> {
+        self.check_process()?;
+        self.counter(index)
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_add(1)
+            })
+            .map_err(|_| Error::Overflow)?;
+        let lease = Arc::new(Lease { owners: self.clone(), index });
+        validate()?;
+        Ok(lease)
+    }
+
     /// Called under the structural lock. A last Drop releases preceding IO.
+    /// SeqCst pairs with [`Self::acquire`]'s count.
     pub(crate) fn pinned(
         &self,
         index: usize,
     ) -> bool {
         match self {
-            Self::Memory(counts) => counts[index].load(Ordering::Acquire) != 0,
+            Self::Memory(counts) => counts[index].load(Ordering::SeqCst) != 0,
             #[cfg(unix)]
             Self::Shared(shared) => (0..shared.owners).any(|owner| {
-                shared.counts(owner)[index].load(Ordering::Acquire) != 0
+                shared.counts(owner)[index].load(Ordering::SeqCst) != 0
             }),
         }
     }
