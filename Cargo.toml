@@ -1,6 +1,6 @@
 [package]
 name = "orbitive"
-version = "0.6.14"
+version = "0.6.15"
 publish.workspace = true
 edition.workspace = true
 authors.workspace = true
