@@ -54,9 +54,9 @@ pub mod quota {
     pub use orbit_quota::*;
 }
 
-#[cfg(feature = "cell")]
-pub mod cell {
-    pub use orbit_cell::*;
+#[cfg(feature = "atomic")]
+pub mod atomic {
+    pub use orbit_atomic::*;
 }
 
 #[cfg(feature = "arena")]

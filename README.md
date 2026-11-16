@@ -175,7 +175,7 @@ your application uses; each linked guide describes its API and limits.
 | Topic and byte-payload events | `events` | [Events](events/README.md) |
 | Keyed shared counters | `counter` | [Counters](counter/README.md) |
 | Bounded GCRA quota admission | `quota` | [Quota](quota/README.md) |
-| Typed atomic cells | `cell` | [Cells](cell/README.md) |
+| Atomics shared between processes, with wait and notify | `atomic` | [Atomics](atomic/README.md) |
 | Per-process caches with shared invalidation | `cache` | [Cache](cache/README.md) |
 | Shared byte storage with pinned reads | `arena` | [Arena](arena/README.md) |
 | Keyed leases with fencing tokens | `lock` | [Locks](lock/README.md) |
@@ -197,9 +197,10 @@ The `*-tokio` features also enable their base modules. Client pools require
 Tokio. The `rustls_0_24` feature currently selects a rustls 0.24 prerelease;
 choose the feature matching your application's rustls dependency.
 
-`full` is a convenience bundle containing `auth`, `arena`, `cache`, `cell`,
-`events`, `counter`, `invoke`, `link`, `metrics`, `lock`, `rustls`, `stream`,
-`stream-tokio` and `pool`. It does **not** enable every optional integration:
+`full` is a convenience bundle containing `auth`, `arena`, `atomic`, `cache`,
+`events`, `counter`, `invoke`, `link`, `metrics`, `lock`, `rustls`,
+`stream`, `stream-tokio` and `pool`. It does **not** enable every optional
+integration:
 `link-tokio`, `invoke-tokio`, `pool-stream`, client pools and `rustls_0_24`
 remain explicit choices.
 

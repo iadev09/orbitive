@@ -1,0 +1,16 @@
+[package]
+name = "orbit-atomic"
+version = "0.1.0"
+publish.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Atomics shared between the processes of a fleet over Orbit shared memory, with wait and notify."
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/orbit-atomic"
+keywords = ["atomic", "shm", "fleet", "orbit", "ipc"]
+categories = ["concurrency"]
+exclude.workspace = true
+
+[dependencies]
+orbit-core.workspace = true
