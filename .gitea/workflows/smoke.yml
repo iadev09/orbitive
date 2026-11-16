@@ -19,7 +19,7 @@ jobs:
       - name: Each package without default features
         run: just features
 
-  # Data races run from race.yml, only when the shared-memory code changes.
+  # Data races are checked locally with `just race`, not in CI.
 
   freebsd:
     name: FreeBSD

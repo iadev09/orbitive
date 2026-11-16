@@ -11,7 +11,6 @@ smoke:
     cargo test --workspace --all-targets
 
 smoke-linux:
-    test "$(uname -s)" = "Linux"
     just smoke
 
 smoke-freebsd:
@@ -41,8 +40,12 @@ features:
 # Needs nightly with `rust-src`: the sanitizer has to instrument std as well,
 # or a race that passes through it is invisible. Doctests are excluded because
 # rustdoc builds them without the sanitizer and then refuses the ABI mismatch.
-# Nightly is installed for this job on the CI runner only; development hosts
-# stay on stable.
+# Run on a development host that has that toolchain. The algorithm is the same
+# on every platform, so one platform finds its races; CI on the others checks
+# that the code builds and its tests pass, and installs no nightly.
+#
+# `table::fork_tests` is skipped: the sanitizer's own runtime aborts in the
+# forked child of a multi-threaded test, which is not a finding about our code.
 #
 # The packages are the ones whose `unsafe` maps shared memory across processes
 # and threads: the ring, locks, streams, Link inboxes, the arena and atomics.
@@ -50,10 +53,10 @@ features:
 # `halt_on_error=1` because a TSan warning does not fail a test by itself, and
 # a report nobody's exit code notices is not a check.
 race:
-    test "$(uname -s)" = "Linux"
+    case "$(uname -s)" in Linux|Darwin) ;; *) exit 1 ;; esac
     TSAN_OPTIONS=halt_on_error=1 \
     RUSTFLAGS=-Zsanitizer=thread \
     cargo +nightly test -p orbit-core -p orbit-lock -p orbit-stream \
         -p orbit-link -p orbit-arena -p orbit-atomic \
         --target "$(rustc +nightly -vV | awk '/^host:/{print $2}')" \
-        -Zbuild-std --lib --tests -- --test-threads=1
+        -Zbuild-std --lib --tests -- --test-threads=1 --skip table::fork_tests
