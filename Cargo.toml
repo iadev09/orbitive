@@ -1,6 +1,6 @@
 [package]
 name = "orbitive"
-version = "0.6.16"
+version = "0.6.17"
 publish.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -124,7 +124,7 @@ orbit-lock = { version = "0.5.5", path = "lock", default-features = false }
 orbit-events = { version = "0.5.6", path = "events", default-features = false }
 orbit-counter = { version = "0.5.4", path = "counter", default-features = false }
 orbit-quota = { version = "0.1.1", path = "quota", default-features = false }
-orbit-atomic = { version = "0.1.0", path = "atomic", default-features = false }
+orbit-atomic = { version = "0.1.1", path = "atomic", default-features = false }
 orbit-arena = { version = "0.5.6", path = "arena", default-features = false }
 orbit-invoke = { version = "0.5.5", path = "invoke", default-features = false }
 orbit-link = { version = "0.6.8", path = "link", default-features = false }
