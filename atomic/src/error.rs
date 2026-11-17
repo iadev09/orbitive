@@ -1,8 +1,9 @@
-//! What can fail: allocating, opening and waiting. Value operations cannot.
+//! What can fail: allocating, declaring, opening and waiting. Value
+//! operations cannot.
 
 use std::fmt;
 
-use crate::{Kind, OrbitalId};
+use crate::{Kind, Lifetime, OrbitalId};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -19,6 +20,19 @@ pub enum Error {
     KindMismatch {
         id: OrbitalId,
         expected: Kind,
+    },
+    /// The name was declared with the other [`Lifetime`].
+    LifetimeMismatch {
+        id: OrbitalId,
+        expected: Lifetime,
+    },
+    /// A declaration needs a name.
+    NameEmpty,
+    /// The name is longer than [`ATOMIC_NAME_MAX`](crate::ATOMIC_NAME_MAX)
+    /// bytes.
+    NameTooLong {
+        len: usize,
+        max: usize,
     },
     /// The leading byte of an encoded id is not a known kind.
     UnknownKind(u8),
@@ -42,6 +56,13 @@ impl fmt::Display for Error {
             Self::Stale(id) => write!(f, "orbital {id} is not in this table"),
             Self::KindMismatch { id, expected } => {
                 write!(f, "orbital {id} is not {expected}")
+            }
+            Self::LifetimeMismatch { id, expected } => {
+                write!(f, "orbital {id} is not declared {expected}")
+            }
+            Self::NameEmpty => f.write_str("orbital name is empty"),
+            Self::NameTooLong { len, max } => {
+                write!(f, "orbital name is {len} bytes, longer than {max}")
             }
             Self::UnknownKind(kind) => {
                 write!(f, "unknown orbital kind byte {kind:#04x}")

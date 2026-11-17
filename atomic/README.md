@@ -3,13 +3,20 @@
 `std::sync::atomic` between processes instead of between threads.
 
 `orbit-atomic` keeps 64-bit values in one fleet-shared table in shared
-memory. A process declares a value and gets an `Orbital<T>`, a handle with the
-operations of an atomic: `load`, `store`, `swap`, `compare_exchange` and the
-`fetch_*` family. The handle's id is eight bytes. Hand it to any other process
-of the fleet, in a message or a page, and whoever opens it holds the same
-value: nothing is copied and nothing is sent between them. A handle can also
-park until the value changes, as C++ `atomic::wait` does, and a write in one
-process wakes a waiter in another.
+memory. A process gets an `Orbital<T>`, a handle with the operations of an
+atomic: `load`, `store`, `swap`, `compare_exchange` and the `fetch_*` family.
+It reaches a value in one of two ways:
+
+- **By name.** Every process that declares the same name holds the same
+  value. This is the way for a value with a fixed identity, such as a
+  counter, a flag or a gauge of the whole fleet.
+- **By id.** `allocate` returns a handle whose id is eight bytes. Hand the id
+  to any other process of the fleet, in a message or a page, and whoever
+  opens it holds the same value.
+
+Either way nothing is copied and nothing is sent between processes. A handle
+can also park until the value changes, as C++ `atomic::wait` does, and a
+write in one process wakes a waiter in another.
 
 Applications normally use it through the
 [Orbitive](https://github.com/iadev09/orbitive) facade as `orbitive::atomic`,
@@ -19,21 +26,79 @@ with the `atomic` feature.
 use std::sync::Arc;
 
 use orbitive::Fleet;
-use orbitive::atomic::{OrbitalId, Orbitals};
+use orbitive::atomic::{Orbitals, orbital};
+
+orbital! {
+    /// The fleet's hit counter.
+    pub Hits: i64 = 0, "hits"
+}
 
 let fleet = Arc::new(Fleet::join("example", 1)?);
 let orbitals = Orbitals::new(fleet)?;
 
-let hits = orbitals.allocate(0_i64)?;      // declared once, kept
-let id = hits.id().to_string();            // "i64:<slot>:<epoch>": what travels
-
-// In any process of the fleet:
-let same = orbitals.open::<i64>(id.parse::<OrbitalId>()?)?;
-same.fetch_add(1);
-assert_eq!(hits.load(), 1);
-
+// In any process of the fleet; the first one installs the initial value.
+let hits = Hits::open(&orbitals)?;
+hits.fetch_add(1);                         // the Orbital itself: no lookup
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+## Declaring a value by name
+
+`Orbitals::declare(name, initial)` is get-or-create. The first caller in the
+table's epoch allocates a slot holding `initial`; every later caller, in any
+process, gets a handle to the same slot, and its `initial` is ignored.
+
+```rust
+# use std::sync::Arc;
+# use orbitive::Fleet;
+# use orbitive::atomic::Orbitals;
+# let orbitals = Orbitals::new(Arc::new(Fleet::join("example", 1)?))?;
+let ready = orbitals.declare("ready", false)?;
+let again = orbitals.declare("ready", true)?;   // the same value, still false
+assert_eq!(again.id(), ready.id());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+- The name is hashed and looked up only in `declare`. Hold the handle, not
+  the name: the value operations never see it.
+- A name that is already installed is found without a lock. Installing takes
+  a short structural lock, which the kernel releases if its holder dies.
+- Declaring a name again allocates nothing. A worker that restarts and
+  declares its values again consumes no slots.
+- Declaring a name with another type is `Error::KindMismatch`. A name is at
+  most `ATOMIC_NAME_MAX` bytes (default 48); an empty or longer name is
+  `Error::NameEmpty` or `Error::NameTooLong`.
+
+The `orbital!` macro gives a declared value a type of its own: a newtype with
+the doc comment and visibility written, `Clone`, `Deref<Target = Orbital<T>>`,
+and an inherent `open`. Several declarations can share one macro call. A name
+the directory cannot hold does not compile.
+
+```rust
+use orbitive::atomic::orbital;
+
+orbital! {
+    /// Requests served since the fleet booted.
+    pub Requests: u64 = 0, "requests"
+    /// Survives the owner's reset, see below.
+    pub Visitors: u64 = 0, "visitors", kept
+    pub(crate) Draining: bool = false, "draining"
+}
+```
+
+Each generated type implements the `Declared` trait, which carries
+`type Value`, `const NAME`, `const INITIAL`, `const LIFETIME` and
+`fn open(&Orbitals)`. A host that registers or injects declared values
+generically works over that trait.
+
+### Kept values
+
+A value declared with `, kept` in the macro, or with
+`Orbitals::declare_kept`, survives `reset_all`. It keeps its value and is
+found again by declaring its name after the reset, under a new id. Every
+other value returns to empty: a plain name is forgotten and starts again from
+its initial value when it is next declared. Declaring an existing name with
+the other lifetime is `Error::LifetimeMismatch`.
 
 ## Types and operations
 
@@ -110,19 +175,28 @@ in one process watch one value.
 
 ## Lifetime
 
-A value lives as long as its table's shared memory. There is no way to
-release one value and no slot is reused, so:
+A value lives as long as the table. There is no release: nothing gives one
+value back, and dropping a handle changes nothing. A slot allocated with
+`allocate` and passed by id is never returned within an epoch, so:
 
 - **Declare, do not allocate per request.** The table holds
   `ORBIT_ATOMIC_CAPACITY` values (default 4,096) between two resets. When
-  they are used up, `allocate` returns `Error::Full`.
-- **Dropping a handle changes nothing.** The value stays, and its id opens it
-  again.
-- **`reset_all` is how values end.** It empties the table and starts a new
-  epoch, after which every earlier id is `Error::Stale`. It is for the
-  process that owns the fleet's lifecycle, at a boot where no other process
-  is attached and no handle is in use: a handle kept across a reset still
-  points at its slot, which the table may hand out again.
+  they are used up, `allocate` and `declare` return `Error::Full`.
+- **Names last exactly as long as the epoch.** When workers are restarted
+  and the table is reused, names and their slots stay, and declaring again
+  returns the same value.
+- **`reset_all` is how values end.** It starts a new epoch, after which
+  every earlier id is `Error::Stale`. It empties every slot and forgets every
+  name except the kept ones. It is for the process that owns the fleet's
+  lifecycle, at a boot where no other process is attached and no handle is
+  in use: a handle kept across a reset still points at its slot, which the
+  table may hand out again.
+
+Not designed yet: values that should live only as long as one job, created
+for the job, passed through an invocation and gone when it ends. Who owns
+such a value and when its slot comes back is undecided, and is tracked in
+issue 19 of the repository. Until then, `allocate` per job uses up the table
+for good. Declarations are the stable path for values with a fixed identity.
 
 An id is valid on the host and in the table that minted it, until that table
 is reset or its shared memory is removed. It survives the restart of a
@@ -140,10 +214,18 @@ is `<kind>:<slot>:<epoch>`, such as `i64:12:3`.
 two no larger than 16,777,216. Every binary that opens one fleet's table must
 be built with the same value; a different one is refused at attach.
 
+`ORBIT_ATOMIC_NAME_MAX` sets the longest name the same way: at most 255, and
+the same in every binary of a fleet.
+
 The table uses Orbit SHM kind `174` (`ATOMIC_KIND`), one 64-byte header and
-one 64-byte slot per value, so two hot values never share a cache line. An
-in-memory fleet gets the same table on the heap, shared by everything that
-holds the same `Fleet`.
+one 64-byte slot per value, so two hot values never share a cache line. Names
+live in a directory of their own, Orbit SHM kind `170` (`ATOMIC_NAMES_KIND`),
+created by the first declaration: one entry per slot the table can hold, 64
+bytes each at the default name length. A fleet that never declares a name
+never creates it. `Orbitals::unlink` removes both, and so must anything else
+that clears the table's shared memory. An in-memory fleet gets the same
+table and directory on the heap, shared by everything that holds the same
+`Fleet`.
 
 After `fork`, call `Orbitals::new` again in the child; it maps the table for
 that process.

@@ -93,6 +93,11 @@ impl OrbitalId {
         self.0 as u32
     }
 
+    /// The 64 bits as they are kept in shared memory.
+    pub(crate) const fn to_word(self) -> u64 {
+        self.0
+    }
+
     /// Big-endian: the kind is the first byte.
     pub const fn to_bytes(self) -> [u8; 8] {
         self.0.to_be_bytes()

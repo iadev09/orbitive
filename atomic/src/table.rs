@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
 
 use orbit_core::Fleet;
 #[cfg(unix)]
@@ -11,6 +11,7 @@ use orbit_core::process::ProcessOwner;
 #[cfg(unix)]
 use orbit_core::shm::ShmRegion;
 
+use crate::names::{self, KeptName, Lifetime, Locked, Names, Resolved};
 use crate::wake::Wake;
 use crate::{Error, Kind, OrbitalId, Result};
 
@@ -88,6 +89,9 @@ pub(crate) struct Table {
     /// Serializes resets within this process; the region's lock does the
     /// same between processes.
     reset_lock: Mutex<()>,
+    /// The name directory, attached at the first declaration or reset that
+    /// needs it. Nothing on the value path or in `open` reads it.
+    names: OnceLock<Names>,
 }
 
 enum Backing {
@@ -100,7 +104,12 @@ enum Backing {
         slots: Box<[Slot]>,
     },
     #[cfg(unix)]
-    Shm { region: ShmRegion, name: Box<str> },
+    Shm {
+        region: ShmRegion,
+        name: Box<str>,
+        /// The directory's own segment, of kind `ATOMIC_NAMES_KIND`.
+        names_name: Box<str>,
+    },
 }
 
 impl Table {
@@ -117,6 +126,7 @@ impl Table {
                 slots,
             },
             reset_lock: Mutex::new(()),
+            names: OnceLock::new(),
         }
     }
 
@@ -185,25 +195,143 @@ impl Table {
         Ok(NonNull::from(slot))
     }
 
-    /// Start a new epoch with every slot empty. The caller guarantees that
+    /// The directory, attached or created on first use.
+    fn names(&self) -> Result<&Names> {
+        if let Some(names) = self.names.get() {
+            return Ok(names);
+        }
+        let attached = match &self.backing {
+            Backing::Memory { .. } => Names::memory(),
+            #[cfg(unix)]
+            Backing::Shm { names_name, .. } => names::shm_names(names_name)?,
+        };
+        // Two first declarations may both attach; one mapping stays.
+        Ok(self.names.get_or_init(|| attached))
+    }
+
+    /// The directory if any process has created it, for a reset: with no
+    /// names declared there is nothing to keep.
+    fn existing_names(&self) -> Result<Option<&Names>> {
+        if let Some(names) = self.names.get() {
+            return Ok(Some(names));
+        }
+        match &self.backing {
+            Backing::Memory { .. } => Ok(None),
+            #[cfg(unix)]
+            Backing::Shm { names_name, .. } => {
+                Ok(names::existing_shm_names(names_name)?
+                    .map(|attached| self.names.get_or_init(|| attached)))
+            }
+        }
+    }
+
+    /// Find `name` in the current epoch, or allocate a slot holding `word`
+    /// and record it under the name. An installed name is found without a
+    /// lock; installing takes the directory's structural lock.
+    pub(crate) fn declare(
+        &self,
+        name: &str,
+        kind: Kind,
+        word: u64,
+        lifetime: Lifetime,
+    ) -> Result<Resolved> {
+        names::check_name(name)?;
+        let name = name.as_bytes();
+        let hash = names::name_hash(name);
+        let names = self.names()?;
+        let epoch = self.epoch();
+        if let Some(resolved) =
+            names.find(epoch.load(Ordering::Acquire), hash, name)
+        {
+            return Ok(resolved);
+        }
+        names.with_structure(|names| {
+            names.find_or_install(
+                epoch.load(Ordering::Acquire),
+                hash,
+                name,
+                lifetime,
+                || Ok(self.allocate(kind, word)?.0.to_word()),
+            )
+        })
+    }
+
+    /// Start a new epoch. Every slot is emptied except those of kept
+    /// names, whose values move to the front of the table in their slot
+    /// order and whose names are recorded again with ids of the new epoch.
+    /// With `keep` false nothing survives. The caller guarantees that
     /// nothing else uses the table.
-    pub(crate) fn reset(&self) -> Result<()> {
+    pub(crate) fn reset(
+        &self,
+        keep: bool,
+    ) -> Result<()> {
         let _local = lock_unpoisoned(&self.reset_lock);
         #[cfg(unix)]
         let _process = match &self.backing {
             Backing::Shm { region, .. } => Some(region.lock_exclusive()?),
             Backing::Memory { .. } => None,
         };
+        let names = if keep { self.existing_names()? } else { None };
+        match names {
+            // Table, then directory: the order every path takes both in.
+            Some(names) => {
+                names.with_structure(|names| self.renew(Some(&names)))
+            }
+            None => self.renew(None),
+        }
+    }
+
+    /// Under the table's locks and, with `names`, the directory's.
+    ///
+    /// Compacted rather than left in place: allocation only moves forward,
+    /// so a kept value left high in the table would hold every slot below
+    /// it out of use across all later epochs. Ids change anyway, because
+    /// the epoch does, so moving a value costs its holders nothing.
+    fn renew(
+        &self,
+        names: Option<&Locked<'_>>,
+    ) -> Result<()> {
         let epoch = self.epoch();
-        let advanced = epoch
-            .load(Ordering::Acquire)
-            .checked_add(1)
-            .ok_or(Error::EpochExhausted)?;
-        epoch.store(advanced, Ordering::Release);
-        for slot in self.slots() {
+        let previous = epoch.load(Ordering::Acquire);
+        let current = previous.checked_add(1).ok_or(Error::EpochExhausted)?;
+        let slots = self.slots();
+
+        // Copy out what survives before anything is cleared.
+        let mut kept: Vec<(u32, Kind, u64, KeptName)> = names
+            .map(|names| names.kept(previous))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| {
+                let id = OrbitalId::from_bytes(name.id.to_be_bytes()).ok()?;
+                let slot = slots.get(id.slot() as usize)?;
+                (id.epoch() == previous && slot.holds(id.kind())).then(|| {
+                    let value = slot.value.load(Ordering::Acquire);
+                    (id.slot(), id.kind(), value, name)
+                })
+            })
+            .collect();
+        kept.sort_unstable_by_key(|(slot, ..)| *slot);
+
+        // From here until `publish`, no name resolves: a reset cut short
+        // loses the kept values, never points a name at another one.
+        if let Some(names) = names {
+            names.clear();
+        }
+        epoch.store(current, Ordering::Release);
+        for slot in slots {
             slot.clear();
         }
-        self.next().store(0, Ordering::Release);
+        for (index, (_, kind, value, name)) in kept.iter_mut().enumerate() {
+            slots[index].install(*kind, *value);
+            name.id = OrbitalId::new(*kind, index as u32, current).to_word();
+        }
+        self.next().store(kept.len() as u32, Ordering::Release);
+        if let Some(names) = names {
+            for (.., name) in &kept {
+                names.restore(name);
+            }
+            names.publish(current);
+        }
         Ok(())
     }
 
@@ -212,10 +340,11 @@ impl Table {
     #[cfg(unix)]
     pub(crate) fn unlink(&self) -> Result<()> {
         match &self.backing {
-            Backing::Memory { .. } => self.reset(),
-            Backing::Shm { region, name } => {
+            Backing::Memory { .. } => self.reset(false),
+            Backing::Shm { region, name, names_name } => {
                 let mut tables = shm::TABLES.lock()?;
                 region.unlink()?;
+                names::unlink_shm_names(names_name)?;
                 tables.remove(&**name);
                 Ok(())
             }
@@ -223,7 +352,7 @@ impl Table {
     }
 }
 
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
@@ -293,7 +422,10 @@ mod shm {
         }
     }
 
-    fn open_or_create(name: &str) -> Result<Table> {
+    fn open_or_create(
+        name: &str,
+        names_name: &str,
+    ) -> Result<Table> {
         let (region, _initialization_lock) =
             ShmRegion::open_or_create_locked(name, SEGMENT_SIZE)?;
         if region.created() {
@@ -315,6 +447,11 @@ mod shm {
                     },
                 );
             }
+            // A table created now has no names. A directory left by an
+            // earlier table with this name would resolve them to slots
+            // of this one, whose epoch starts over; it goes, while the
+            // initialization lock still keeps every peer out.
+            names::unlink_shm_names(names_name)?;
         } else {
             let header = header(&region);
             if header.magic != MAGIC {
@@ -340,8 +477,13 @@ mod shm {
             }
         }
         Ok(Table {
-            backing: Backing::Shm { region, name: name.into() },
+            backing: Backing::Shm {
+                region,
+                name: name.into(),
+                names_name: names_name.into(),
+            },
             reset_lock: Mutex::new(()),
+            names: OnceLock::new(),
         })
     }
 
@@ -398,13 +540,16 @@ mod shm {
         }
     }
 
-    pub(crate) fn table(name: &str) -> Result<Arc<Table>> {
+    pub(crate) fn table(
+        name: &str,
+        names_name: &str,
+    ) -> Result<Arc<Table>> {
         let mut tables = TABLES.lock()?;
         tables.retain(|_, table| table.strong_count() != 0);
         if let Some(table) = tables.get(name).and_then(Weak::upgrade) {
             return Ok(table);
         }
-        let table = Arc::new(open_or_create(name)?);
+        let table = Arc::new(open_or_create(name, names_name)?);
         tables.insert(name.into(), Arc::downgrade(&table));
         Ok(table)
     }
