@@ -8,34 +8,112 @@
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="license">
 </p>
 
-**Shared state and bounded communication between Rust processes on the same machine.**
+**Share live state between the processes of one machine as you would between threads.**
 
-Orbitive lets processes share events, counters, caches, locks and byte streams
-through POSIX shared memory. It runs inside your application, with no separate
-broker to deploy. Processes find shared resources by name; they do not need to
-inherit memory mappings from a common parent.
+A multi-worker web or application server, a pool of job workers, an
+application split into services with different privileges: each process has
+its own memory, so a counter, a flag, a cached value or a lock in one of them
+is invisible to the others. The usual answer is a broker such as Redis, or
+sockets and a protocol of your own.
 
-Use it when several local workers need to exchange data or coordinate access
-to resources within a fixed memory budget. Choose the modules you need through
-Cargo features. The core API does not require an async runtime; Tokio
-integration is available for asynchronous communication.
-
-Shared memory is runtime state. Orbitive does not provide durable storage,
-cross-machine replication or a network protocol. Applications own their message
-formats, process lifecycle and recovery policy.
+Orbitive is a library that keeps that state in shared memory instead. Every
+process of the group reads and writes the same value directly: no server to
+run, no network round trip, no serialization for a number. Memory use is fixed
+when a resource is created.
 
 [API documentation](https://docs.rs/orbitive) ·
 [Crate](https://crates.io/crates/orbitive) ·
 [Source](https://github.com/iadev09/orbitive)
 
-## Quick start: send an event between processes
+## What you can do with it
 
-This Unix example publishes an event in one process and reads it from another.
-It uses the `events` feature, which provides topics and byte payloads over a
-bounded shared ring. See [platform support](#platform-support) for release-specific
-requirements.
+**A value every process sees.** `std::sync::atomic`, between processes. Declare
+it once; any process opens it by type and uses it as an atomic.
 
-Create a project:
+```rust
+orbital! {
+    /// Requests served by the whole group.
+    pub Hits: u64 = 0, "hits"
+}
+
+let hits = Hits::open(&orbitals)?;
+hits.fetch_add(1);                  // one atomic instruction, no lookup
+```
+
+**Wait for another process, without polling.** A write in one process wakes a
+waiter parked in another.
+
+```rust
+let mut left = jobs_left.load();
+while left != 0 {
+    left = jobs_left.wait(left)?;   // parks until the value changes
+}
+```
+
+**One cache for all workers.** A value stored by one worker is a hit in the
+others, and one call invalidates everything carrying a tag, everywhere.
+
+```rust
+store.put_tagged(b"user:42", b"profile", None, &["users", "team:7"])?;
+store.invalidate_tags(&["team:7"])?;          // a miss in every process
+```
+
+**Count by key.** Counters named at run time, shared by the group.
+
+```rust
+let served = counter.increment("tenant:42:requests", 1)?;
+```
+
+**Tell the others something happened.** Publish to a topic; each reader keeps
+its own position in a bounded history.
+
+```rust
+bus.publish("worker.ready", b"hello from another process")?;
+```
+
+**Split an application into processes that work as one.** A web server and a
+firewall service can be two programs, each under its own OS user, with its own
+privileges and its own restarts. Over a [Link](link/README.md) one finds the
+other by name and calls it as if it were a module in the same process: the
+request, the reply and any stream between them travel through shared memory.
+The two share that one link through an OS group and nothing else; neither can
+reach the other's files or its other state.
+
+And with the same model:
+
+| You want to | Use |
+| --- | --- |
+| Let one process at a time hold something, with a fencing token | [Locks](lock/README.md) |
+| Limit a rate across all processes | [Quota](quota/README.md) |
+| Hand work to another process and get its answer | [Invoke](invoke/README.md), [Link](link/README.md) |
+| Move bytes between two processes with backpressure | [Stream](stream/README.md) |
+| Share a pool of connections or other resources | [Pool](pool/README.md), [Client pool](client-pool/README.md) |
+| Keep sessions and tokens valid in every worker | [Auth](auth/README.md) |
+| Resume TLS sessions whichever worker takes the connection | [rustls](rustls/README.md) |
+| Read every worker's metrics from one place | [Metrics](metrics/README.md) |
+
+[Claviron](https://github.com/claviron/claviron) is a fleet-aware application
+server built on these modules together with
+[Continuo](https://github.com/iadev09/continuo); its repository shows them
+working together in one system.
+
+Each is a Cargo feature; you compile only what you use. The core needs no
+async runtime, and Tokio integration is available where waiting is
+asynchronous.
+
+## What it is not
+
+Shared memory is runtime state. Orbitive does not store data durably, does not
+replicate between machines and is not a network protocol. It serves
+cooperating processes on one machine: by default those of one OS user, and
+across users only for a link they are explicitly given through a shared
+group. It is not a sandbox between hostile processes. Applications own their
+message formats, their process lifecycle and their recovery policy.
+
+## Try it: two processes, one value
+
+One process watches a value; another changes it. This uses the `atomic`
+feature and runs on Linux, FreeBSD and macOS 14.4 or later.
 
 ```sh
 cargo new orbitive-demo
@@ -46,7 +124,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-orbitive = { version = "0.6.11", features = ["events"] }
+orbitive = { version = "0.6.17", features = ["atomic"] }
 ```
 
 Replace `src/main.rs` with:
@@ -54,78 +132,72 @@ Replace `src/main.rs` with:
 ```rust
 use std::sync::Arc;
 
-use orbitive::events::FleetEventBus;
+use orbitive::atomic::Orbitals;
 use orbitive::{Fleet, NodeId};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let action = std::env::args().nth(1).unwrap_or_default();
     let node = match action.as_str() {
-        "publish" => NodeId::new(0),
-        "read" => NodeId::new(1),
-        _ => return Err("usage: orbitive-demo <publish|read>".into()),
+        "watch" => NodeId::new(0),
+        "hit" => NodeId::new(1),
+        _ => return Err("usage: orbitive-demo <watch|hit>".into()),
     };
 
-    // Same name and capacity; a different node id for each process role.
+    // Same fleet name in both processes; a different node id for each.
     let fleet = Arc::new(Fleet::join_shm_as("demo", 2, node)?);
-    let bus = FleetEventBus::new(fleet);
+    // Both processes declare the same name and get the same value.
+    let hits = Orbitals::new(fleet)?.declare("hits", 0_u64)?;
 
-    if action == "publish" {
-        bus.publish("worker.ready", b"hello from another process")?;
-        println!("Published worker.ready");
-    } else {
-        let mut cursor = bus.cursor_from_start();
-        let batch = bus.poll(&mut cursor);
-        for event in batch.events {
-            println!("{}: {}", event.topic, String::from_utf8_lossy(&event.payload));
-        }
-        if batch.lagged != 0 {
-            eprintln!("{} events were unavailable", batch.lagged);
-        }
+    if action == "hit" {
+        println!("hits = {}", hits.fetch_add(1) + 1);
+        return Ok(());
     }
-    Ok(())
+
+    let mut seen = hits.load();
+    loop {
+        println!("hits = {seen}");
+        // Parks until another process changes the value. No polling.
+        seen = hits.wait(seen)?;
+    }
 }
 ```
 
-Run the publisher, then the reader, as the same OS user:
+Start the watcher in one terminal:
 
 ```sh
-cargo run -- publish
-cargo run -- read
+cargo run -- watch
 ```
 
-On a fresh `demo` fleet, the output from the two commands is:
+and run this a few times in another:
+
+```sh
+cargo run -- hit
+```
+
+Each `hit` prints the new count, and the watcher prints it at the same moment:
 
 ```text
-Published worker.ready
-worker.ready: hello from another process
+hits = 0
+hits = 1
+hits = 2
 ```
 
-These are separate process invocations. The publisher can exit before the
-reader starts because the named SHM object survives the publisher. This is not
-disk persistence: the data is not a durable log and should not be expected to
+Stop the watcher and run `hit` again: the count continues. The value belongs
+to the shared memory, not to either process. It is not on disk and does not
 survive a reboot.
 
-The reader takes one snapshot of retained events and exits. Each run starts a
-new cursor, so repeated runs can read earlier retained messages again. In a
-long-lived consumer, keep the cursor between reads; use `cursor_at_head()` to
-start after existing events. For event-driven waiting, the event bus exposes
-`event_fd()`; drain readiness and then poll the ring. With an async reactor,
-clear its readiness before draining: the fd signals once per drain, and a
-signal cleared after the drain is not repeated.
-
-Only run one publisher for node 0 and one reader for node 1 at a time in this
-example. Use a different fleet name if `demo` already belongs to an application.
-When both programs have exited, remove the example's event ring:
+Use a different fleet name if `demo` already belongs to an application. When
+both programs have exited, remove the example's shared memory:
 
 ```sh
 cargo install orbitive-cli
 orbit list demo
-orbit clear demo --kind 220
+orbit clear demo --all --yes
 ```
 
-Kind `220` is the default event bus ring. The CLI is a separate package; it is
-not required to use the library. See [resource lifecycle](#resource-lifecycle)
-before clearing resources used by a running application.
+The CLI is a separate package; it is not required to use the library. See
+[resource lifecycle](#resource-lifecycle) before clearing resources used by a
+running application.
 
 ## The model
 
@@ -147,6 +219,8 @@ Storage has different semantics depending on the module:
 
 The published entry point is `orbitive`. Public names such as `Fleet`,
 `OrbitTyped` and `OrbitEpoch` use **Orbit**, the runtime model's name.
+The rings, cursors and mappings underneath every module are in
+[Core](core/README.md); most applications never use them directly.
 
 ### Local memory versus shared memory
 
@@ -166,20 +240,20 @@ node id below the fleet capacity; the core does not allocate unique ids for you.
 
 ## Choose a module
 
-Core types are available without optional features. Enable only the modules
-your application uses; each linked guide describes its API and limits.
+Enable only the modules your application uses; each linked guide describes
+its API and limits.
 
 | Need | Cargo feature | Guide |
 | --- | --- | --- |
-| Typed rings, cursors, SHM mappings and read-only observers | None | [Core](core/README.md) |
+| Atomics shared between processes, declared by name, with wait and notify | `atomic` | [Atomics](atomic/README.md) |
 | Topic and byte-payload events | `events` | [Events](events/README.md) |
 | Keyed shared counters | `counter` | [Counters](counter/README.md) |
 | Bounded GCRA quota admission | `quota` | [Quota](quota/README.md) |
-| Atomics shared between processes, with wait and notify | `atomic` | [Atomics](atomic/README.md) |
 | Fleet caches with shared invalidation by key, store or tag | `cache` | [Cache](cache/README.md) |
 | Shared byte storage with pinned reads | `arena` | [Arena](arena/README.md) |
 | Keyed leases with fencing tokens | `lock` | [Locks](lock/README.md) |
 | Worker metrics snapshots | `metrics` | [Metrics](metrics/README.md) |
+| Typed rings, cursors, SHM mappings and read-only observers | None | [Core](core/README.md) |
 | Bounded invocation requests | `invoke`, `invoke-tokio` | [Invoke](invoke/README.md) |
 | Named dispatch and reusable duplex sessions | `link`, `link-tokio` | [Link](link/README.md) |
 | Duplex byte streams and paired exchanges | `stream`, `stream-tokio` | [Stream](stream/README.md) |
@@ -286,6 +360,13 @@ read/write access. Processes sharing those credentials are within the same
 trust boundary. For external observation, `FleetObserver` opens existing rings
 read-only without allocating a writer node or changing their lifecycle; see
 [Core](core/README.md#external-read-only-observation).
+
+## Benchmarks
+
+Measurements currently live with each crate: its `benches/` directory and,
+where one exists, the record beside it, such as
+[Link's](link/docs/benches/README.md). A page that gathers them per module is
+in preparation.
 
 ## Platform support
 
