@@ -48,7 +48,8 @@ features:
 # forked child of a multi-threaded test, which is not a finding about our code.
 #
 # The packages are the ones whose `unsafe` maps shared memory across processes
-# and threads: the ring, locks, streams, Link inboxes, the arena and atomics.
+# and threads: the ring, locks, streams, Link inboxes, the arena and atomics,
+# and the replicated cache, whose stores share one byte budget across threads.
 #
 # `halt_on_error=1` because a TSan warning does not fail a test by itself, and
 # a report nobody's exit code notices is not a check.
@@ -57,6 +58,6 @@ race:
     TSAN_OPTIONS=halt_on_error=1 \
     RUSTFLAGS=-Zsanitizer=thread \
     cargo +nightly test -p orbit-core -p orbit-lock -p orbit-stream \
-        -p orbit-link -p orbit-arena -p orbit-atomic \
+        -p orbit-link -p orbit-arena -p orbit-atomic -p orbit-cache \
         --target "$(rustc +nightly -vV | awk '/^host:/{print $2}')" \
         -Zbuild-std --lib --tests -- --test-threads=1 --skip table::fork_tests

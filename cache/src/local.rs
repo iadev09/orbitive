@@ -1,3 +1,4 @@
+use std::hash::BuildHasher;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,6 +40,38 @@ pub enum CacheRead {
     ResyncRequired,
 }
 
+/// One logical store's bounded, process-local view of a replicated store.
+///
+/// # Coherence invariant
+///
+/// For a key `K`, call every Put or Delete for `K` this view has applied or
+/// refused *observed*. The view keeps two facts:
+///
+/// 1. If `K` has a slot, its value is at least as new as every observed
+///    mutation for `K`: a mutation slot's revision is at or above each of
+///    them, and a fill slot's token sequence is at or above each of their
+///    sequences (the fill saw them all in its backing read, so a mutation at
+///    the token's own sequence does not replace it).
+/// 2. If `K` has no slot, every observed mutation for `K` has a sequence at
+///    or below `max(floor, fence(K))`.
+///
+/// Admission follows from them. A mutation for `K` is applied when it is
+/// above the floor and newer than `K`'s slot, or, with no slot, above `K`'s
+/// fence; a fill at token `t` when `t` is at or above the floor and newer than
+/// `K`'s slot, or, with no slot, at or above `K`'s fence. Everything that
+/// removes a slot first records its revision in `K`'s fence or under the
+/// floor, so fact 2 holds again. A Reset raises the floor to its sequence and
+/// removes every slot at or below it, so what stays is newer than the Reset.
+/// A read therefore never returns a value older than a mutation this view has
+/// applied or refused for that key, and a delayed older mutation or a stale
+/// fill cannot bring a value back.
+///
+/// A slot is its key's own fence, so forgetting one key never hides or
+/// refuses another resident key: no read checks a floor. The floor is
+/// store-wide and moves only with Reset and recovery, which remove every
+/// slot they cover at once. Fences are per hash bucket and move with every
+/// eviction, Delete, expiry and value that could not be kept; keys sharing a
+/// bucket only refuse more.
 #[derive(Clone)]
 pub struct LocalCache {
     inner: Arc<Mutex<LocalState>>,
@@ -48,7 +81,13 @@ pub struct LocalCache {
 
 struct LocalState {
     slots: LruCache<Vec<u8>, LocalSlot>,
-    revision_floor: Option<u64>,
+    /// Store-wide: no mutation at or below it is admitted, and no fill below
+    /// it. Raised by Reset and recovery.
+    floor: u64,
+    /// The highest sequence forgotten among the keys hashing to each bucket.
+    /// One bucket per entry the store can hold, rounded up to a power of two.
+    fences: Box<[u64]>,
+    fence_hasher: lru::DefaultHasher,
 }
 
 pub(crate) struct LocalBudget {
@@ -65,8 +104,9 @@ impl LocalBudget {
         &self,
         len: usize,
     ) -> bool {
-        // The connection serializes inserts. Readers can only lower the
-        // charge as they expire a value.
+        // Every insert holds the connection cursor, so reservations are
+        // serialized. Anything else can only lower the charge, by dropping a
+        // value.
         if len > self.limit - self.used.load(Ordering::Relaxed) {
             return false;
         }
@@ -86,22 +126,25 @@ impl Drop for LocalValue {
     }
 }
 
-enum LocalSlot {
-    Present {
-        value: LocalValue,
-        revision: CacheRevision,
-        expires_at_ms: Option<u64>,
-    },
-    Missing {
-        revision: CacheRevision,
-    },
+struct LocalSlot {
+    value: LocalValue,
+    revision: CacheRevision,
+    expires_at_ms: Option<u64>,
+    /// A backing fill, current as of every mutation up to its revision's
+    /// sequence, rather than one mutation's value.
+    fill: bool,
 }
 
 impl LocalSlot {
-    fn revision(&self) -> CacheRevision {
-        match self {
-            Self::Present { revision, .. } => *revision,
-            Self::Missing { revision } => *revision,
+    /// Whether `revision` is newer than this slot's value.
+    fn precedes(
+        &self,
+        revision: CacheRevision,
+    ) -> bool {
+        if self.fill {
+            revision.sequence > self.revision.sequence
+        } else {
+            revision > self.revision
         }
     }
 }
@@ -109,19 +152,11 @@ impl LocalSlot {
 /// What a value claims about its revision when it is kept.
 #[derive(Clone, Copy)]
 enum Admission {
-    /// A mutation: at or below the floor it may be a delayed older write.
+    /// A mutation: at or below a fence it may be a delayed older write.
     Mutation,
-    /// A backing read: it saw every write up to its revision, so a floor at
-    /// that sequence does not make it stale.
+    /// A backing read: it saw every write up to its revision's sequence, so a
+    /// fence at that sequence does not make it stale.
     Fill,
-}
-
-/// The revision, expiry and admission rule of a value being kept.
-#[derive(Clone, Copy)]
-struct Stamp {
-    revision: CacheRevision,
-    expires_at_ms: Option<u64>,
-    admission: Admission,
 }
 
 pub(crate) enum ApplyOutcome {
@@ -131,28 +166,21 @@ pub(crate) enum ApplyOutcome {
 }
 
 impl LocalCache {
-    /// Construct a standalone local view. The arena argument is retained for
-    /// source compatibility; resident values are owned by the view.
-    pub fn new(
-        capacity: NonZeroUsize,
-        _arena: orbit_arena::Arena,
-    ) -> Self {
-        Self::with_connection(
-            capacity,
-            Arc::new(LocalBudget::new(orbit_arena::ARENA_BYTES)),
-            Arc::new(AtomicBool::new(true)),
-        )
-    }
-
     pub(crate) fn with_connection(
         capacity: NonZeroUsize,
         budget: Arc<LocalBudget>,
         coherent: Arc<AtomicBool>,
     ) -> Self {
+        let buckets = capacity
+            .get()
+            .checked_next_power_of_two()
+            .unwrap_or(1 << (usize::BITS - 1));
         Self {
             inner: Arc::new(Mutex::new(LocalState {
                 slots: LruCache::new(capacity),
-                revision_floor: None,
+                floor: 0,
+                fences: vec![0; buckets].into_boxed_slice(),
+                fence_hasher: lru::DefaultHasher::default(),
             })),
             budget,
             coherent,
@@ -184,44 +212,26 @@ impl LocalCache {
         if !self.is_coherent() {
             return CacheRead::ResyncRequired;
         }
-        let floor = state.revision_floor;
         let Some(slot) = state.slots.get_mut(key) else {
             return CacheRead::Miss;
         };
-        if below(floor, slot.revision()) {
-            // An eviction's floor covers it: gone, though not yet removed.
-            state.slots.pop(key);
-            return CacheRead::Miss;
+        if !slot.expires_at_ms.is_some_and(|deadline| deadline <= now_ms()) {
+            return CacheRead::Hit(CacheEntry {
+                value: slot.value.bytes.clone(),
+                revision: slot.revision,
+                expires_at_ms: slot.expires_at_ms,
+            });
         }
-        match slot {
-            LocalSlot::Present { value, revision, expires_at_ms } => {
-                if !expires_at_ms.is_some_and(|deadline| deadline <= now_ms()) {
-                    return CacheRead::Hit(CacheEntry {
-                        value: value.bytes.clone(),
-                        revision: *revision,
-                        expires_at_ms: *expires_at_ms,
-                    });
-                }
-                // Expiry is an honest miss; the revision tombstone
-                // still prevents a delayed older Put from resurrecting it.
-                *slot = LocalSlot::Missing { revision: *revision };
-                CacheRead::Miss
-            }
-            LocalSlot::Missing { .. } => CacheRead::Miss,
-        }
+        // Expiry is an honest miss. The fence keeps a delayed older Put from
+        // resurrecting the value.
+        let sequence = slot.revision.sequence;
+        state.forget(key, sequence);
+        CacheRead::Miss
     }
 
+    /// Resident entries, including expired ones no read has reached yet.
     pub fn len(&self) -> usize {
-        let state =
-            self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        state
-            .slots
-            .iter()
-            .filter(|(_, slot)| {
-                matches!(slot, LocalSlot::Present { .. })
-                    && !below(state.revision_floor, slot.revision())
-            })
-            .count()
+        self.inner.lock().unwrap_or_else(|error| error.into_inner()).slots.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -237,7 +247,11 @@ impl LocalCache {
         self.coherent.store(false, Ordering::Release);
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        state.advance_floor_from_slots();
+        let newest =
+            state.slots.iter().map(|(_, slot)| slot.revision.sequence).max();
+        if let Some(newest) = newest {
+            state.raise_floor(newest);
+        }
         state.slots.clear();
     }
 
@@ -248,18 +262,17 @@ impl LocalCache {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
         state.slots.clear();
-        state.revision_floor = Some(
-            state
-                .revision_floor
-                .map_or(revision_floor, |current| current.max(revision_floor)),
-        );
+        state.raise_floor(revision_floor);
     }
 
+    /// The ring restarts its sequences, so every fence and the floor restart
+    /// with it.
     pub(crate) fn reset_after_transport_reset(&self) {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
         state.slots.clear();
-        state.revision_floor = None;
+        state.floor = 0;
+        state.fences.fill(0);
     }
 
     pub(crate) fn apply<L: CacheLayout>(
@@ -268,10 +281,9 @@ impl LocalCache {
         mutation: CacheMutation,
         reclaim: impl FnMut() -> bool,
     ) -> ApplyOutcome {
-        let revision = mutation.revision();
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        if !self.is_coherent() || !state.accepts(revision) {
+        if !self.is_coherent() {
             return ApplyOutcome::Ignored;
         }
 
@@ -283,41 +295,42 @@ impl LocalCache {
                 expires_at_ms,
                 payload,
             } => {
-                if !state.accepts_key(&key, revision) {
+                if !state.admits(&key, revision, Admission::Mutation) {
                     return ApplyOutcome::Ignored;
                 }
-                let entry =
+                let Some(entry) =
                     transport.arena().get_address(payload.address).filter(
                         |entry| entry.body().len() as u64 == payload.value_len,
-                    );
-                let value = entry.as_ref().map(|entry| entry.body());
-                let applied = state.put_value(
+                    )
+                else {
+                    state.forget(&key, revision.sequence);
+                    return ApplyOutcome::PayloadUnavailable { key };
+                };
+                state.put_value(
                     &self.budget,
                     &key,
-                    value,
-                    Stamp {
-                        revision,
-                        expires_at_ms,
-                        admission: Admission::Mutation,
-                    },
+                    entry.body(),
+                    (revision, expires_at_ms),
+                    Admission::Mutation,
                     reclaim,
                 );
-                match (applied, entry.is_some()) {
-                    (true, true) => ApplyOutcome::Applied,
-                    (true, false) => ApplyOutcome::PayloadUnavailable { key },
-                    (false, _) => ApplyOutcome::Ignored,
-                }
+                ApplyOutcome::Applied
             }
             CacheMutation::Delete { store: _, key, revision } => {
-                if state.put_slot(&key, LocalSlot::Missing { revision }) {
+                if !state.admits(&key, revision, Admission::Mutation) {
+                    return ApplyOutcome::Ignored;
+                }
+                state.forget(&key, revision.sequence);
+                ApplyOutcome::Applied
+            }
+            CacheMutation::Reset { store: _, revision } => {
+                // Fences do not gate a Reset: residents survive them, so a
+                // delayed Reset may still have residents to remove.
+                if state.reset(revision.sequence) {
                     ApplyOutcome::Applied
                 } else {
                     ApplyOutcome::Ignored
                 }
-            }
-            CacheMutation::Reset { store: _, revision } => {
-                state.advance_floor(revision.sequence);
-                ApplyOutcome::Applied
             }
         }
     }
@@ -333,18 +346,14 @@ impl LocalCache {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if self.is_coherent()
-            && state.accepts(revision)
-            && state.accepts_key(key, revision)
+            && state.admits(key, revision, Admission::Mutation)
         {
             state.put_value(
                 &self.budget,
                 key,
-                Some(value),
-                Stamp {
-                    revision,
-                    expires_at_ms,
-                    admission: Admission::Mutation,
-                },
+                value,
+                (revision, expires_at_ms),
+                Admission::Mutation,
                 reclaim,
             );
         }
@@ -353,9 +362,10 @@ impl LocalCache {
     /// Keep a value read from a backing store as current at `revision`.
     ///
     /// The revision is the last one allocated before the read, so the value
-    /// has seen every backing write published up to it: a floor at that very
-    /// sequence leaves it current, while any revision this view already holds
-    /// for the key at or above it makes the fill stale. Publishes nothing.
+    /// has seen every backing write published up to it: a fence or floor at
+    /// that very sequence leaves it current, while a slot this view already
+    /// holds for the key at or above it makes the fill stale. Publishes
+    /// nothing; returns whether the value is kept.
     pub(crate) fn install_fill(
         &self,
         key: &[u8],
@@ -366,19 +376,16 @@ impl LocalCache {
     ) -> bool {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        if !self.is_coherent()
-            || !state.admits(revision, Admission::Fill)
-            || !state.accepts_key(key, revision)
-        {
-            return false;
-        }
-        state.put_value(
-            &self.budget,
-            key,
-            Some(value),
-            Stamp { revision, expires_at_ms, admission: Admission::Fill },
-            reclaim,
-        )
+        self.is_coherent()
+            && state.admits(key, revision, Admission::Fill)
+            && state.put_value(
+                &self.budget,
+                key,
+                value,
+                (revision, expires_at_ms),
+                Admission::Fill,
+                reclaim,
+            )
     }
 
     pub(crate) fn evict_value(&self) -> bool {
@@ -395,8 +402,10 @@ impl LocalCache {
     ) {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        if self.is_coherent() && state.accepts(revision) {
-            let _ = state.put_slot(key, LocalSlot::Missing { revision });
+        if self.is_coherent()
+            && state.admits(key, revision, Admission::Mutation)
+        {
+            state.forget(key, revision.sequence);
         }
     }
 
@@ -406,172 +415,156 @@ impl LocalCache {
     ) {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        if self.is_coherent() && state.accepts(revision) {
-            state.advance_floor(revision.sequence);
+        if self.is_coherent() {
+            state.reset(revision.sequence);
         }
     }
 }
 
 impl LocalState {
-    fn accepts(
+    fn bucket(
         &self,
-        revision: CacheRevision,
-    ) -> bool {
-        self.admits(revision, Admission::Mutation)
+        key: &[u8],
+    ) -> usize {
+        // The bucket count is a power of two.
+        self.fence_hasher.hash_one(key) as usize & (self.fences.len() - 1)
     }
 
+    /// Whether `revision` is newer, for `key`, than everything this view has
+    /// observed: the key's own slot when it has one, its fence when not.
     fn admits(
         &self,
+        key: &[u8],
         revision: CacheRevision,
         admission: Admission,
     ) -> bool {
-        self.revision_floor.is_none_or(|floor| match admission {
-            Admission::Mutation => revision.sequence > floor,
-            Admission::Fill => revision.sequence >= floor,
-        })
+        let sequence = revision.sequence;
+        let above = |fence: u64| match admission {
+            Admission::Mutation => sequence > fence,
+            Admission::Fill => sequence >= fence,
+        };
+        above(self.floor)
+            && match self.slots.peek(key) {
+                Some(slot) => slot.precedes(revision),
+                None => above(self.fences[self.bucket(key)]),
+            }
     }
 
-    /// Install `slot` under `key`. An existing key is replaced in place and
-    /// keeps its allocation; only a new key is copied.
-    fn put_slot(
+    fn raise_fence(
         &mut self,
         key: &[u8],
-        slot: LocalSlot,
-    ) -> bool {
-        if !self.accepts_key(key, slot.revision()) {
-            return false;
-        }
-        if let Some(current) = self.slots.get_mut(key) {
-            *current = slot;
-            return true;
-        }
-        self.insert_slot(key.to_vec(), slot);
-        true
+        sequence: u64,
+    ) {
+        let bucket = self.bucket(key);
+        let fence = &mut self.fences[bucket];
+        *fence = (*fence).max(sequence);
+    }
+
+    fn raise_floor(
+        &mut self,
+        sequence: u64,
+    ) {
+        self.floor = self.floor.max(sequence);
+    }
+
+    /// Drop `key`'s slot, if any, and fence `sequence`, which is at or above
+    /// the slot's.
+    fn forget(
+        &mut self,
+        key: &[u8],
+        sequence: u64,
+    ) {
+        self.slots.pop(key);
+        self.raise_fence(key, sequence);
     }
 
     /// Insert under a key known to be absent. Anything `push` returns is
-    /// therefore an eviction, whose revision the floor must cover.
+    /// therefore a capacity eviction, which is fenced.
     fn insert_slot(
         &mut self,
         key: Vec<u8>,
         slot: LocalSlot,
     ) {
-        if let Some((_, evicted)) = self.slots.push(key, slot) {
-            self.raise_floor(evicted.revision().sequence);
+        if let Some((evicted_key, evicted)) = self.slots.push(key, slot) {
+            self.raise_fence(&evicted_key, evicted.revision.sequence);
         }
     }
 
-    fn accepts_key(
-        &self,
-        key: &[u8],
-        revision: CacheRevision,
-    ) -> bool {
-        self.slots.peek(key).is_none_or(|current| current.revision() < revision)
-    }
-
+    /// Keep `value` under `key`, admitted by the caller. The old slot is
+    /// dropped before its replacement is charged, keeping its key buffer.
+    /// Returns whether the value is kept; when it is not, the key is fenced.
     fn put_value(
         &mut self,
         budget: &Arc<LocalBudget>,
         key: &[u8],
-        value: Option<&[u8]>,
-        stamp: Stamp,
+        value: &[u8],
+        (revision, expires_at_ms): (CacheRevision, Option<u64>),
+        admission: Admission,
         mut reclaim: impl FnMut() -> bool,
     ) -> bool {
-        let Stamp { revision, expires_at_ms, admission } = stamp;
-        // Drop the old slot before charging its replacement, keeping its key
-        // buffer. If the payload cannot be kept, record its revision as a miss.
-        let key_buffer = self.slots.pop_entry(key).map(|(key, _)| key);
-        let mut slot = LocalSlot::Missing { revision };
-        if let Some(value) = value.filter(|value| value.len() <= budget.limit) {
+        let old = self.slots.pop_entry(key);
+        let forgotten = match admission {
+            // An observed mutation, newer than the old slot.
+            Admission::Mutation => Some(revision.sequence),
+            // A fill observed nothing; only the slot it replaced is forgotten.
+            Admission::Fill => {
+                old.as_ref().map(|(_, slot)| slot.revision.sequence)
+            }
+        };
+        let key_buffer = old.map(|(key, _)| key);
+        if value.len() <= budget.limit {
+            // Evictions here fence other keys only: this key was admitted
+            // against its own slot or fence, which they do not change.
             loop {
-                // An eviction below may have raised the floor.
-                if !self.admits(revision, admission) {
-                    return false;
-                }
                 if budget.reserve(value.len()) {
-                    slot = LocalSlot::Present {
+                    let slot = LocalSlot {
                         value: LocalValue {
                             bytes: Bytes::copy_from_slice(value),
                             budget: budget.clone(),
                         },
                         revision,
                         expires_at_ms,
+                        fill: matches!(admission, Admission::Fill),
                     };
-                    break;
+                    self.insert_slot(
+                        key_buffer.unwrap_or_else(|| key.to_vec()),
+                        slot,
+                    );
+                    return true;
                 }
                 if !self.evict_value() && !reclaim() {
                     break;
                 }
             }
         }
-        self.insert_slot(key_buffer.unwrap_or_else(|| key.to_vec()), slot);
-        true
+        if let Some(sequence) = forgotten {
+            self.raise_fence(key, sequence);
+        }
+        false
     }
 
-    /// Free the least recently used value's bytes, fencing its revision.
+    /// Free the least recently used value, fencing its revision.
     fn evict_value(&mut self) -> bool {
-        let oldest =
-            self.slots.iter().rev().find_map(|(key, slot)| match slot {
-                LocalSlot::Present { revision, .. } => {
-                    Some((key.clone(), revision.sequence))
-                }
-                LocalSlot::Missing { .. } => None,
-            });
-        let Some((key, sequence)) = oldest else { return false };
-        self.slots.pop(&key);
-        self.raise_floor(sequence);
+        let Some((key, slot)) = self.slots.pop_lru() else { return false };
+        self.raise_fence(&key, slot.revision.sequence);
         true
     }
 
-    /// Fence revisions up to `revision` without looking for what it covers.
-    /// The entries it covers stay where they are, dead: a read of one is a
-    /// miss that removes it, and the LRU order reaches the rest. A capacity
-    /// eviction raises the floor on every put into a full store, so it must
-    /// not walk the store.
-    fn raise_floor(
+    /// Refuse every mutation at or below `sequence` and drop every slot it
+    /// covers. Slots above it are newer than the Reset and stay. A Reset at or
+    /// below the floor covers nothing left: only fills at the floor's own
+    /// sequence can be resident there, and they saw it.
+    fn reset(
         &mut self,
-        revision: u64,
-    ) {
-        self.revision_floor = Some(
-            self.revision_floor
-                .map_or(revision, |current| current.max(revision)),
-        );
-    }
-
-    fn advance_floor_from_slots(&mut self) {
-        if let Some(revision) =
-            self.slots.iter().map(|(_, slot)| slot.revision()).max()
-        {
-            self.advance_floor(revision.sequence);
+        sequence: u64,
+    ) -> bool {
+        if sequence <= self.floor {
+            return false;
         }
+        self.floor = sequence;
+        self.slots.retain(|_, slot| slot.revision.sequence > sequence);
+        true
     }
-
-    fn advance_floor(
-        &mut self,
-        revision: u64,
-    ) {
-        let floor = self
-            .revision_floor
-            .map_or(revision, |current| current.max(revision));
-        self.revision_floor = Some(floor);
-        let stale_keys = self
-            .slots
-            .iter()
-            .filter(|(_, slot)| slot.revision().sequence <= floor)
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for key in stale_keys {
-            self.slots.pop(&key);
-        }
-    }
-}
-
-/// Whether a floor covers `revision`: the slot is dead.
-fn below(
-    floor: Option<u64>,
-    revision: CacheRevision,
-) -> bool {
-    floor.is_some_and(|floor| revision.sequence <= floor)
 }
 
 fn now_ms() -> u64 {
@@ -585,19 +578,40 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
+    fn view(
+        capacity: usize,
+        bytes: usize,
+    ) -> LocalCache {
+        LocalCache::with_connection(
+            NonZeroUsize::new(capacity).unwrap(),
+            Arc::new(LocalBudget::new(bytes)),
+            Arc::new(AtomicBool::new(true)),
+        )
+    }
+
+    fn at(
+        sequence: u64,
+        id: u64,
+    ) -> CacheRevision {
+        CacheRevision {
+            sequence,
+            mutation_id: orbit_core::NetId64::from_raw(id),
+        }
+    }
+
+    fn holds(
+        cache: &LocalCache,
+        key: &[u8],
+        value: &[u8],
+    ) -> bool {
+        matches!(cache.read(key), CacheRead::Hit(entry) if entry.value.as_ref() == value)
+    }
+
     #[test]
     fn read_checks_the_clock_only_for_a_value_with_expiry() {
-        let cache = LocalCache::with_connection(
-            NonZeroUsize::new(2).unwrap(),
-            Arc::new(LocalBudget::new(16)),
-            Arc::new(AtomicBool::new(true)),
-        );
-        let revision = CacheRevision {
-            sequence: 1,
-            mutation_id: orbit_core::NetId64::ZERO,
-        };
-        cache.install_local(b"plain", b"value", revision, None, || false);
-        cache.install_local(b"ttl", b"value", revision, Some(10), || false);
+        let cache = view(2, 16);
+        cache.install_local(b"plain", b"value", at(1, 0), None, || false);
+        cache.install_local(b"ttl", b"value", at(1, 0), Some(10), || false);
 
         let no_clock = || panic!("unexpected clock read");
         assert!(matches!(
@@ -611,16 +625,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fill_is_kept_until_a_revision_at_or_after_it_says_otherwise() {
-        let cache = LocalCache::with_connection(
-            NonZeroUsize::new(4).unwrap(),
-            Arc::new(LocalBudget::new(64)),
-            Arc::new(AtomicBool::new(true)),
-        );
-        let at = |sequence, id| CacheRevision {
-            sequence,
-            mutation_id: orbit_core::NetId64::from_raw(id),
-        };
+    fn a_fill_is_kept_until_a_revision_after_it_says_otherwise() {
+        let cache = view(4, 64);
         let token = |sequence| at(sequence, 0);
 
         assert!(cache.install_fill(
@@ -628,20 +634,25 @@ mod tests {
             b"backing",
             token(3),
             None,
-            || false
+            || { false }
         ));
         assert!(matches!(cache.read(b"cold"), CacheRead::Hit(_)));
 
-        // A delete this view applied at the token's sequence is newer.
-        cache.install_missing(b"deleted", at(5, 1));
+        // A delete this view applied after the token is newer than the fill;
+        // one at the token's own sequence is in what the fill read.
+        cache.install_missing(b"deleted", at(6, 1));
         assert!(!cache.install_fill(
             b"deleted",
             b"old",
             token(5),
             None,
-            || false
+            || { false }
         ));
         assert_eq!(cache.read(b"deleted"), CacheRead::Miss);
+        assert!(
+            cache
+                .install_fill(b"deleted", b"new", token(6), None, || { false })
+        );
 
         // A floor at the token's sequence leaves the fill current; one past
         // it does not.
@@ -651,7 +662,7 @@ mod tests {
             b"backing",
             token(7),
             None,
-            || false
+            || { false }
         ));
         assert!(!cache.install_fill(
             b"before",
@@ -661,44 +672,94 @@ mod tests {
             || false
         ));
 
-        // A mutation published after the token replaces the fill.
+        // A mutation at the token's sequence is in what the fill read; one
+        // published after the token replaces the fill.
+        cache.install_local(b"after", b"seen", at(7, 2), None, || false);
+        assert!(holds(&cache, b"after", b"backing"));
         cache.install_local(b"after", b"newer", at(8, 1), None, || false);
-        assert!(matches!(
-            cache.read(b"after"),
-            CacheRead::Hit(entry) if entry.value.as_ref() == b"newer"
-        ));
+        assert!(holds(&cache, b"after", b"newer"));
     }
 
     #[test]
-    fn an_eviction_floor_hides_what_it_covers_without_walking_to_it() {
-        let cache = LocalCache::with_connection(
-            NonZeroUsize::new(2).unwrap(),
-            Arc::new(LocalBudget::new(64)),
-            Arc::new(AtomicBool::new(true)),
-        );
-        let at = |sequence| CacheRevision {
-            sequence,
-            mutation_id: orbit_core::NetId64::ZERO,
-        };
-        cache.install_local(b"older", b"value", at(1), None, || false);
-        cache.install_local(b"newer", b"value", at(2), None, || false);
+    fn an_eviction_fences_only_the_key_it_evicts() {
+        let cache = view(2, 64);
+        cache.install_local(b"older", b"value", at(1, 1), None, || false);
+        cache.install_local(b"newer", b"value", at(2, 1), None, || false);
         // Read the older one, so the newer one is least recently used.
-        assert!(matches!(cache.read(b"older"), CacheRead::Hit(_)));
+        assert!(holds(&cache, b"older", b"value"));
 
-        // A third key evicts `newer`; its floor (2) covers `older` too.
-        cache.install_local(b"third", b"value", at(3), None, || false);
-        assert_eq!(cache.len(), 1, "only `third` is alive");
-        assert_eq!(cache.read(b"older"), CacheRead::Miss);
+        // A third key evicts `newer`. `older`, below its revision, survives.
+        cache.install_local(b"third", b"value", at(3, 1), None, || false);
+        assert_eq!(cache.len(), 2);
+        assert!(holds(&cache, b"older", b"value"));
+        assert!(holds(&cache, b"third", b"value"));
         assert_eq!(cache.read(b"newer"), CacheRead::Miss);
-        assert!(matches!(cache.read(b"third"), CacheRead::Hit(_)));
 
-        // The read removed `older`, and the store takes a new key without
-        // evicting `third`.
-        cache.install_local(b"fourth", b"value", at(4), None, || false);
-        assert!(matches!(cache.read(b"third"), CacheRead::Hit(_)));
-        assert!(matches!(cache.read(b"fourth"), CacheRead::Hit(_)));
-        // A delayed older write under the floor is refused.
-        cache.install_local(b"older", b"stale", at(1), None, || false);
-        assert_eq!(cache.read(b"older"), CacheRead::Miss);
+        // The evicted key refuses a delayed write and a stale fill at or
+        // below the revision it had; a fill that saw it is kept.
+        cache.install_local(b"newer", b"stale", at(2, 0), None, || false);
+        assert_eq!(cache.read(b"newer"), CacheRead::Miss);
+        assert!(!cache.install_fill(
+            b"newer",
+            b"stale",
+            at(1, 0),
+            None,
+            || { false }
+        ));
+        assert!(cache.install_fill(
+            b"newer",
+            b"backing",
+            at(3, 0),
+            None,
+            || { false }
+        ));
+        assert!(holds(&cache, b"newer", b"backing"));
+    }
+
+    #[test]
+    fn a_resident_is_fenced_by_its_own_revision_not_by_another_keys() {
+        // A resident at 100 while another key's eviction fenced 50: a
+        // delayed Put at 40 must leave the resident alone, and a delayed Put
+        // at 70 must not replace it either.
+        let cache = view(1, 64);
+        cache.install_local(b"evicted", b"value", at(50, 1), None, || false);
+        cache
+            .install_local(b"resident", b"current", at(100, 1), None, || false);
+        assert_eq!(cache.read(b"evicted"), CacheRead::Miss);
+        cache.install_local(b"resident", b"old", at(40, 1), None, || false);
+        cache.install_local(b"resident", b"older", at(70, 1), None, || false);
+        assert!(holds(&cache, b"resident", b"current"));
+    }
+
+    #[test]
+    fn deletes_of_absent_keys_take_no_capacity_and_still_fence() {
+        let cache = view(2, 64);
+        cache.install_local(b"a", b"value", at(1, 1), None, || false);
+        cache.install_local(b"b", b"value", at(2, 1), None, || false);
+        for sequence in 3..20 {
+            cache.install_missing(
+                format!("gone-{sequence}").as_bytes(),
+                at(sequence, 1),
+            );
+        }
+        assert!(holds(&cache, b"a", b"value"));
+        assert!(holds(&cache, b"b", b"value"));
+        // A delayed Put older than the Delete of an absent key is refused.
+        cache.install_local(b"gone-9", b"stale", at(8, 1), None, || false);
+        assert_eq!(cache.read(b"gone-9"), CacheRead::Miss);
+    }
+
+    #[test]
+    fn a_delayed_reset_removes_what_it_covers_and_keeps_what_is_newer() {
+        let cache = view(2, 64);
+        cache.install_local(b"low", b"value", at(5, 1), None, || false);
+        cache.install_local(b"high", b"value", at(9, 1), None, || false);
+        // Fence a key above the Reset, as an eviction or Delete would.
+        cache.install_missing(b"other", at(10, 1));
+        cache.reset_local(at(7, 1));
+        assert_eq!(cache.read(b"low"), CacheRead::Miss);
+        assert!(holds(&cache, b"high", b"value"));
+        cache.install_local(b"low", b"stale", at(6, 1), None, || false);
+        assert_eq!(cache.read(b"low"), CacheRead::Miss);
     }
 }

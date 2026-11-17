@@ -339,7 +339,8 @@ impl<L: CacheLayout> Cache<L> {
     }
 
     // Callers hold the connection cursor, so at most one update may lock
-    // more than one local store to reclaim the shared byte budget.
+    // more than one local store to reclaim the shared byte budget, and budget
+    // reservations do not race. Every insert path (drain, put, fill) holds it.
     fn reclaim_value(
         &self,
         except: &[u8],
@@ -457,7 +458,8 @@ impl<L: CacheLayout> Store<L> {
     /// [`Store::fill_revision`], in this worker's view unless a mutation it
     /// has applied since makes it stale. A value this store could not hold,
     /// or one already expired, is not kept. Publishes nothing; returns whether
-    /// the value is kept.
+    /// the value is kept. Like a put, it waits for a drain in progress on the
+    /// connection.
     pub fn fill(
         &self,
         key: &[u8],
@@ -471,6 +473,11 @@ impl<L: CacheLayout> Store<L> {
         {
             return false;
         }
+        // A fill charges the connection's byte budget and may reclaim from
+        // other stores, so it serializes with every other insert, as a put
+        // and a drain do.
+        let _cursor =
+            self.cache.cursor.lock().unwrap_or_else(|error| error.into_inner());
         self.local.install_fill(key, value, revision, expires_at_ms, || {
             self.cache.reclaim_value(&self.name)
         })
