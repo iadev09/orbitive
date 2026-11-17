@@ -1327,6 +1327,12 @@ impl Entry {
             .map(|(offset, len, tag)| (self.inner.bytes(offset, len), tag))
     }
 
+    /// The encoded body's tag, when one was stored. Reads only what the pin
+    /// already loaded, unlike [`Entry::encoded`].
+    pub fn encoding(&self) -> Option<u8> {
+        self.encoded.map(|(_, _, tag)| tag)
+    }
+
     pub fn stamp(&self) -> u64 {
         self.stamp
     }

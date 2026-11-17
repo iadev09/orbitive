@@ -2,8 +2,9 @@ use std::marker::PhantomData;
 
 use orbit_core::{OrbitTyped, RingSpec, RingTopology};
 
-/// Arena-addressed mutation protocol; kind 200 is the retired ring-payload ABI.
-pub const CACHE_MUTATION_RING_KIND: u8 = 194;
+/// Arena-addressed mutation protocol v4, with tags. Retired: 194 (v3, no
+/// tags) and 200 (the ring-payload ABI).
+pub const CACHE_MUTATION_RING_KIND: u8 = 173;
 pub const CACHE_MUTATION_RING_CAPACITY: usize =
     orbit_core::compile::usize_from_env(
         option_env!("ORBIT_CACHE_MUTATION_RING_CAPACITY"),

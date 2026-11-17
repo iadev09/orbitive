@@ -176,7 +176,7 @@ your application uses; each linked guide describes its API and limits.
 | Keyed shared counters | `counter` | [Counters](counter/README.md) |
 | Bounded GCRA quota admission | `quota` | [Quota](quota/README.md) |
 | Atomics shared between processes, with wait and notify | `atomic` | [Atomics](atomic/README.md) |
-| Per-process caches with shared invalidation | `cache` | [Cache](cache/README.md) |
+| Fleet caches with shared invalidation by key, store or tag | `cache` | [Cache](cache/README.md) |
 | Shared byte storage with pinned reads | `arena` | [Arena](arena/README.md) |
 | Keyed leases with fencing tokens | `lock` | [Locks](lock/README.md) |
 | Worker metrics snapshots | `metrics` | [Metrics](metrics/README.md) |

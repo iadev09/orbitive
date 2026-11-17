@@ -126,3 +126,73 @@ fn recovery_serializes_with_a_reserved_publication_and_another_drain() {
         matches!(store.read(b"old"), CacheRead::Hit(entry) if entry.value == b"new"[..])
     );
 }
+
+#[test]
+fn a_tag_invalidation_refuses_older_tagged_puts_and_fills_it_covers() {
+    let cache = Cache::<DefaultCacheLayout>::new(Arc::new(
+        Fleet::join("example", 1).unwrap(),
+    ))
+    .unwrap();
+    let store = cache.open_default_store().unwrap();
+    let transport = cache.transport();
+    let tags = |names: &[&str]| store.tag_key.hash_all(names).unwrap();
+    let apply = |mutation| store.local().apply(transport, mutation, || false);
+    let holds = |key: &[u8], value: &[u8]| matches!(store.read(key), CacheRead::Hit(entry) if entry.value == value);
+
+    // `key` holds an untagged value and `other` one tagged `posts`; a newer
+    // Put of `key` carrying `users` is delayed past an invalidation of it.
+    let old = transport.publish_put(b"default", b"key", b"old", None).unwrap();
+    let covered = transport
+        .publish_put_tagged(
+            b"default",
+            b"key",
+            b"stale",
+            None,
+            &tags(&["users"]),
+        )
+        .unwrap();
+    let other = transport
+        .publish_put_tagged(
+            b"default",
+            b"other",
+            b"kept",
+            None,
+            &tags(&["posts"]),
+        )
+        .unwrap();
+    let fill_token = store.fill_revision();
+    let invalidation = transport
+        .publish_invalidate_tags(b"default", &tags(&["users"]))
+        .unwrap();
+    let after = store.fill_revision();
+    apply(old.clone());
+    apply(other);
+    assert!(holds(b"key", b"old"));
+    apply(invalidation);
+
+    // The delayed Put is newer than the resident, so the resident cannot
+    // stay; it is covered, so it is not kept either. Neither can the
+    // resident's own older Put come back.
+    apply(covered);
+    assert_eq!(store.read(b"key"), CacheRead::Miss);
+    apply(old);
+    assert_eq!(store.read(b"key"), CacheRead::Miss);
+    assert!(holds(b"other", b"kept"));
+
+    // A fill whose backing read may predate the invalidation is refused; one
+    // that read after it is kept until a later invalidation reaches it. A
+    // fill without tags is not reached by any.
+    assert!(!store.fill_tagged(
+        b"filled",
+        b"stale",
+        fill_token,
+        None,
+        &["users"]
+    ));
+    assert!(store.fill_tagged(b"filled", b"fresh", after, None, &["users"]));
+    assert!(store.fill(b"untagged", b"value", after, None));
+    store.invalidate_tags(&["users"]).unwrap();
+    assert_eq!(store.read(b"filled"), CacheRead::Miss);
+    assert!(holds(b"untagged", b"value"));
+    assert!(holds(b"other", b"kept"));
+}

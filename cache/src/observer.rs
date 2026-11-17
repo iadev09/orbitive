@@ -21,6 +21,8 @@ pub struct RetainedEntry {
     pub revision: CacheRevision,
     pub expires_at_ms: Option<u64>,
     pub payload: PayloadRef,
+    /// Tag hashes the Put carried.
+    pub tags: Box<[u64]>,
 }
 
 #[derive(Debug, Default)]
@@ -104,10 +106,17 @@ fn apply(
                 revision,
                 expires_at_ms,
                 payload,
+                tags,
             } => {
                 snapshot.stores.entry(store).or_default().insert(
                     key.clone(),
-                    RetainedEntry { key, revision, expires_at_ms, payload },
+                    RetainedEntry {
+                        key,
+                        revision,
+                        expires_at_ms,
+                        payload,
+                        tags,
+                    },
                 );
             }
             CacheMutation::Delete { store, key, .. } => {
@@ -115,6 +124,16 @@ fn apply(
             }
             CacheMutation::Reset { store, .. } => {
                 snapshot.stores.entry(store).or_default().clear();
+            }
+            // Mutations are applied in revision order, so every retained Put
+            // here is older than the invalidation.
+            CacheMutation::InvalidateTags { store, tags, .. } => {
+                snapshot.stores.entry(store).or_default().retain(|_, entry| {
+                    !entry
+                        .tags
+                        .iter()
+                        .any(|tag| tags.binary_search(tag).is_ok())
+                });
             }
         }
     }

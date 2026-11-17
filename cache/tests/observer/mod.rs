@@ -30,6 +30,7 @@ fn put(
             address: Address { slot: 0, generation: sequence },
             value_len: 12,
         },
+        tags: Box::default(),
     }
 }
 

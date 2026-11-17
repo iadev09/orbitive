@@ -7,12 +7,14 @@
 //! Hits clone the local value handle. Neither ring nor arena is a durable source.
 
 mod error;
+mod floors;
 mod layout;
 mod local;
 #[cfg(unix)]
 pub mod observer;
 mod protocol;
 mod shared;
+mod tags;
 mod transport;
 
 #[cfg(test)]
@@ -41,7 +43,12 @@ pub use local::{CacheEntry, CacheRead, LocalCache};
 pub use orbit_core::RingEventFd;
 use orbit_core::{Fleet, RingLoss};
 pub use protocol::{CacheMutation, CacheRevision, PayloadRef};
-pub use shared::{SHARED_CACHE_KIND, SharedCache, SharedStore};
+pub use shared::{
+    SHARED_CACHE_KIND, SHARED_TAG_KIND, SHARED_TAG_SETS, SharedCache,
+    SharedStore,
+};
+pub use tags::MAX_TAGS;
+use tags::TagKey;
 pub use transport::{CacheMutationCursor, CacheMutationPoll, CacheTransport};
 
 pub const DEFAULT_L1_CAPACITY: usize = 10_000;
@@ -96,6 +103,7 @@ pub struct Store<L: CacheLayout = DefaultCacheLayout> {
     max_key_len: usize,
     /// Largest value both the arena and this connection's budget admit.
     max_value_len: usize,
+    tag_key: TagKey,
 }
 
 impl<L: CacheLayout> Clone for Cache<L> {
@@ -118,6 +126,7 @@ impl<L: CacheLayout> Clone for Store<L> {
             local: self.local.clone(),
             max_key_len: self.max_key_len,
             max_value_len: self.max_value_len,
+            tag_key: self.tag_key.clone(),
         }
     }
 }
@@ -208,6 +217,7 @@ impl<L: CacheLayout> Cache<L> {
                 .budget
                 .limit
                 .min(self.transport.max_value_len()),
+            tag_key: TagKey::for_store(name),
         })
     }
 
@@ -403,6 +413,33 @@ impl<L: CacheLayout> Store<L> {
         Ok(())
     }
 
+    /// Validate a tagged put: the key and value as [`Store::validate_put`],
+    /// at most [`MAX_TAGS`] tags, and room for them in the mutation frame.
+    pub fn validate_put_tagged<T: AsRef<[u8]>>(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        tags: &[T],
+    ) -> Result<()> {
+        self.put_tags(key, value, tags).map(|_| ())
+    }
+
+    fn put_tags<T: AsRef<[u8]>>(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        tags: &[T],
+    ) -> Result<Box<[u64]>> {
+        self.validate_put(key, value)?;
+        let tags = self.tag_key.hash_all(tags)?;
+        self.cache.transport.validate_tags(
+            &self.name,
+            key.len(),
+            tags.len(),
+        )?;
+        Ok(tags)
+    }
+
     pub fn put(
         &self,
         key: &[u8],
@@ -410,6 +447,29 @@ impl<L: CacheLayout> Store<L> {
         ttl: Option<Duration>,
     ) -> Result<CacheRevision> {
         self.validate_put(key, value)?;
+        self.publish_put(key, value, ttl, Box::default())
+    }
+
+    /// Put a value that [`Store::invalidate_tags`] of any of `tags` makes a
+    /// miss in every view. An empty set is an untagged put.
+    pub fn put_tagged<T: AsRef<[u8]>>(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+        tags: &[T],
+    ) -> Result<CacheRevision> {
+        let tags = self.put_tags(key, value, tags)?;
+        self.publish_put(key, value, ttl, tags)
+    }
+
+    fn publish_put(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+        tags: Box<[u64]>,
+    ) -> Result<CacheRevision> {
         // The local listener must not apply our own descriptor before the
         // writer can install the original bytes.
         let _cursor =
@@ -417,10 +477,15 @@ impl<L: CacheLayout> Store<L> {
         let (revision, expires_at_ms, _) = self
             .cache
             .transport
-            .publish_validated_put(&self.name, key, value, ttl)?;
-        self.local.install_local(key, value, revision, expires_at_ms, || {
-            self.cache.reclaim_value(&self.name)
-        });
+            .publish_validated_put(&self.name, key, value, ttl, &tags)?;
+        self.local.install_local(
+            key,
+            value,
+            revision,
+            expires_at_ms,
+            tags,
+            || self.cache.reclaim_value(&self.name),
+        );
         Ok(revision)
     }
 
@@ -443,6 +508,25 @@ impl<L: CacheLayout> Store<L> {
         Ok(revision)
     }
 
+    /// Make every entry carrying any of `tags`, put or filled before this
+    /// call, a miss in every view of this store, as one mutation. Applies to
+    /// this view at once; other views apply it with the mutations before it.
+    /// Apply the invalidation to a backing store first, as a write updates
+    /// its backing value before [`Store::put`].
+    pub fn invalidate_tags<T: AsRef<[u8]>>(
+        &self,
+        tags: &[T],
+    ) -> Result<CacheRevision> {
+        let tags = self.tag_key.hash_all(tags)?;
+        self.cache.transport.validate_invalidation(&self.name, tags.len())?;
+        let revision = self
+            .cache
+            .transport
+            .publish_validated_invalidate_tags(&self.name, &tags)?;
+        self.local.invalidate_local(&tags, revision);
+        Ok(revision)
+    }
+
     /// The revision a backing read started now is current as of. Take it
     /// before the read and pass it to [`Store::fill`]: every mutation
     /// published up to it wrote its backing value first, and any later one is
@@ -460,6 +544,9 @@ impl<L: CacheLayout> Store<L> {
     /// or one already expired, is not kept. Publishes nothing; returns whether
     /// the value is kept. Like a put, it waits for a drain in progress on the
     /// connection.
+    ///
+    /// The value is kept untagged, so no tag invalidation reaches it. Fill a
+    /// value the backing store holds with tags through [`Store::fill_tagged`].
     pub fn fill(
         &self,
         key: &[u8],
@@ -467,9 +554,44 @@ impl<L: CacheLayout> Store<L> {
         revision: CacheRevision,
         expires_at_ms: Option<u64>,
     ) -> bool {
-        if self.validate_put(key, value).is_err()
-            || expires_at_ms
-                .is_some_and(|deadline| deadline <= transport::now_ms())
+        self.validate_put(key, value).is_ok()
+            && self.install_fill(
+                key,
+                value,
+                revision,
+                expires_at_ms,
+                Box::default(),
+            )
+    }
+
+    /// [`Store::fill`] for a value the backing store holds with `tags`. It is
+    /// refused when an invalidation of one of them, newer than `revision`,
+    /// has reached this view, and removed by one that reaches it later. A
+    /// tag set [`Store::put_tagged`] would refuse for its size is not kept.
+    pub fn fill_tagged<T: AsRef<[u8]>>(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        revision: CacheRevision,
+        expires_at_ms: Option<u64>,
+        tags: &[T],
+    ) -> bool {
+        if self.validate_put(key, value).is_err() {
+            return false;
+        }
+        let Ok(tags) = self.tag_key.hash_all(tags) else { return false };
+        self.install_fill(key, value, revision, expires_at_ms, tags)
+    }
+
+    fn install_fill(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        revision: CacheRevision,
+        expires_at_ms: Option<u64>,
+        tags: Box<[u64]>,
+    ) -> bool {
+        if expires_at_ms.is_some_and(|deadline| deadline <= transport::now_ms())
         {
             return false;
         }
@@ -478,9 +600,14 @@ impl<L: CacheLayout> Store<L> {
         // and a drain do.
         let _cursor =
             self.cache.cursor.lock().unwrap_or_else(|error| error.into_inner());
-        self.local.install_fill(key, value, revision, expires_at_ms, || {
-            self.cache.reclaim_value(&self.name)
-        })
+        self.local.install_fill(
+            key,
+            value,
+            revision,
+            expires_at_ms,
+            tags,
+            || self.cache.reclaim_value(&self.name),
+        )
     }
 
     pub fn local(&self) -> &LocalCache {

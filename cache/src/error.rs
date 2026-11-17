@@ -5,10 +5,27 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug)]
 pub enum Error {
     StoreEmpty,
-    StoreTooLarge { store_len: usize, max: usize },
+    StoreTooLarge {
+        store_len: usize,
+        max: usize,
+    },
     KeyEmpty,
-    KeyTooLarge { key_len: usize, max: usize },
-    ValueTooLarge { value_len: usize, max: usize },
+    KeyTooLarge {
+        key_len: usize,
+        max: usize,
+    },
+    ValueTooLarge {
+        value_len: usize,
+        max: usize,
+    },
+    /// More tags than an entry or an invalidation carries, or than the
+    /// mutation frame has room for beside this store name and key.
+    TooManyTags {
+        count: usize,
+        max: usize,
+    },
+    /// An invalidation must name at least one tag.
+    TagsEmpty,
     InvalidLayout(&'static str),
     Arena(orbit_arena::Error),
     Io(std::io::Error),
@@ -30,6 +47,12 @@ impl fmt::Display for Error {
             }
             Self::ValueTooLarge { value_len, max } => {
                 write!(f, "cache value is too large: {value_len} > {max}")
+            }
+            Self::TooManyTags { count, max } => {
+                write!(f, "too many cache tags: {count} > {max}")
+            }
+            Self::TagsEmpty => {
+                f.write_str("a cache tag invalidation must name a tag")
             }
             Self::InvalidLayout(message) => {
                 write!(f, "invalid cache layout: {message}")

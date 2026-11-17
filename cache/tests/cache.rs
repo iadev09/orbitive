@@ -319,3 +319,81 @@ fn logical_stores_keep_the_same_key_in_independent_l1s() {
     assert_eq!(peer_models.read(b"42"), CacheRead::Miss);
     assert!(matches!(peer_responses.read(b"42"), CacheRead::Hit(_)));
 }
+
+#[test]
+fn tag_invalidation_reaches_every_view_and_spares_other_entries() {
+    let fleet = Arc::new(Fleet::join("cache_tags", 1).expect("fleet"));
+    let writer_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("writer");
+    let writer = open(&writer_cache);
+    let peer_cache = Cache::<TinyLayout>::new(fleet).expect("peer");
+    let peer = open(&peer_cache);
+
+    writer.put_tagged(b"user", b"u", None, &["users"]).unwrap();
+    writer.put_tagged(b"both", b"b", None, &["posts", "users"]).unwrap();
+    writer.put_tagged(b"post", b"p", None, &["posts"]).unwrap();
+    writer.put(b"plain", b"x", None).unwrap();
+    assert_eq!(peer_cache.poll().applied, 4);
+
+    writer.invalidate_tags(&["users"]).unwrap();
+    // The writer's own view applies at once; a peer with its next drain.
+    for (view, cache) in [(&writer, None), (&peer, Some(&peer_cache))] {
+        if let Some(cache) = cache {
+            assert!(matches!(view.read(b"user"), CacheRead::Hit(_)));
+            assert_eq!(cache.poll().applied, 1);
+        }
+        assert_eq!(view.read(b"user"), CacheRead::Miss);
+        assert_eq!(view.read(b"both"), CacheRead::Miss);
+        assert!(matches!(view.read(b"post"), CacheRead::Hit(_)));
+        assert!(matches!(view.read(b"plain"), CacheRead::Hit(_)));
+    }
+    // The writer's own frame, drained later, changes nothing; a put after
+    // the invalidation carries the tag again.
+    assert_eq!(writer_cache.poll().observed, 5);
+    writer.put_tagged(b"user", b"again", None, &["users"]).unwrap();
+    peer_cache.poll();
+    assert!(
+        matches!(peer.read(b"user"), CacheRead::Hit(entry) if entry.value == b"again"[..])
+    );
+}
+
+#[test]
+fn tag_sets_are_bounded_and_an_invalidation_names_one() {
+    let fleet = Arc::new(Fleet::join("cache_tag_bounds", 1).expect("fleet"));
+    let cache = Cache::<TinyLayout>::new(fleet.clone()).expect("cache");
+    let store = open(&cache);
+    let shared = orbit_cache::SharedCache::new(fleet)
+        .unwrap()
+        .open_store(STORE)
+        .unwrap();
+    let too_many: Vec<String> =
+        (0..=orbit_cache::MAX_TAGS).map(|tag| format!("tag-{tag}")).collect();
+    let none: [&str; 0] = [];
+
+    for error in [
+        store.put_tagged(b"key", b"v", None, &too_many).unwrap_err(),
+        store.invalidate_tags(&too_many).unwrap_err(),
+        shared.put_tagged(b"key", b"v", None, &too_many).unwrap_err(),
+        shared.invalidate_tags(&too_many).unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, Error::TooManyTags { count, max } if count == too_many.len() && max == orbit_cache::MAX_TAGS)
+        );
+    }
+    assert!(matches!(store.invalidate_tags(&none), Err(Error::TagsEmpty)));
+    assert!(matches!(shared.invalidate_tags(&none), Err(Error::TagsEmpty)));
+    // A 128-byte frame leaves 87 bytes beside this store name: a key of 80
+    // has room for no tag. Nothing is published.
+    let key = [b'k'; 80];
+    assert!(matches!(
+        store.put_tagged(&key, b"v", None, &["one"]),
+        Err(Error::TooManyTags { count: 1, max: 0 })
+    ));
+    assert!(cache.poll().is_empty());
+    assert_eq!(store.read(&key), CacheRead::Miss);
+    // Duplicates are one tag, and an empty set is an untagged put.
+    store.put_tagged(b"dup", b"v", None, &["a", "a", "a"]).unwrap();
+    store.put_tagged(b"untagged", b"v", None, &none).unwrap();
+    store.invalidate_tags(&["a"]).unwrap();
+    assert_eq!(store.read(b"dup"), CacheRead::Miss);
+    assert!(matches!(store.read(b"untagged"), CacheRead::Hit(_)));
+}

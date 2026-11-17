@@ -41,6 +41,15 @@ fn child_cache_writer() {
         store.put(b"same-key", b"child", None).unwrap();
         return;
     }
+    if mode == "invalidate" {
+        let cache = SharedCache::new(fleet).unwrap();
+        cache
+            .open_store(b"models")
+            .unwrap()
+            .invalidate_tags(&["users"])
+            .unwrap();
+        return;
+    }
     let cache = Cache::<DefaultCacheLayout>::new(fleet).unwrap();
     let store = cache.open_default_store().unwrap();
     if mode == "large" {
@@ -184,5 +193,35 @@ fn shared_cache_reads_across_processes_and_reopen_without_polling() {
     assert_eq!(views.read_at(b"ttl", expiry), CacheRead::Miss);
     views.delete(b"same-key").unwrap();
     assert_eq!(views.read(b"same-key"), CacheRead::Miss);
+    cache.unlink().unwrap();
+}
+
+#[test]
+fn shared_tag_invalidation_in_another_process_hides_only_what_it_covers() {
+    let name = fresh_name();
+    let fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).unwrap());
+    let cache = SharedCache::new(fleet).unwrap();
+    let models = cache.open_store(b"models").unwrap();
+    let views = cache.open_store(b"views").unwrap();
+    models.put_tagged(b"user", b"u", None, &["users"]).unwrap();
+    models.put_tagged(b"both", b"b", None, &["users", "posts"]).unwrap();
+    models.put_tagged(b"post", b"p", None, &["posts"]).unwrap();
+    models.put(b"plain", b"x", None).unwrap();
+    // The same tag name in another store is another tag.
+    views.put_tagged(b"user", b"v", None, &["users"]).unwrap();
+    let CacheRead::Hit(held) = models.read(b"user") else { panic!("hit") };
+
+    assert!(writer(name, "invalidate").wait().unwrap().success());
+
+    assert_eq!(models.read(b"user"), CacheRead::Miss);
+    assert_eq!(models.read(b"both"), CacheRead::Miss);
+    assert!(matches!(models.read(b"post"), CacheRead::Hit(_)));
+    assert!(matches!(models.read(b"plain"), CacheRead::Hit(_)));
+    assert!(matches!(views.read(b"user"), CacheRead::Hit(_)));
+    assert_eq!(held.value, b"u"[..]);
+    models.put_tagged(b"user", b"again", None, &["users"]).unwrap();
+    assert!(
+        matches!(models.read(b"user"), CacheRead::Hit(entry) if entry.value == b"again"[..])
+    );
     cache.unlink().unwrap();
 }

@@ -14,8 +14,8 @@ use orbit_core::{Fleet, NetId64, RingLoss};
 
 use crate::layout::{CacheLayout, MutationRecord};
 use crate::protocol::{
-    self, CacheMutation, CacheRevision, FRAME_KIND_DELETE, FRAME_KIND_PUT,
-    FRAME_KIND_RESET, PayloadRef,
+    self, CacheMutation, CacheRevision, FRAME_KIND_DELETE,
+    FRAME_KIND_INVALIDATE_TAGS, FRAME_KIND_PUT, FRAME_KIND_RESET, PayloadRef,
 };
 use crate::{Error, Result};
 use orbit_arena::{ARENA_RECORD_MAX, Arena, Record};
@@ -99,26 +99,43 @@ impl<L: CacheLayout> CacheTransport<L> {
         value: &[u8],
         ttl: Option<Duration>,
     ) -> Result<CacheMutation> {
+        self.publish_put_tagged(store, key, value, ttl, &[])
+    }
+
+    /// [`Self::publish_put`] carrying tag hashes, in any order.
+    pub fn publish_put_tagged(
+        &self,
+        store: &[u8],
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+        tags: &[u64],
+    ) -> Result<CacheMutation> {
         self.validate_put(store, key, value)?;
+        let tags = normalized(tags);
+        self.validate_tags(store, key.len(), tags.len())?;
         let (revision, expires_at_ms, payload) =
-            self.publish_validated_put(store, key, value, ttl)?;
+            self.publish_validated_put(store, key, value, ttl, &tags)?;
         Ok(CacheMutation::Put {
             store: Bytes::copy_from_slice(store),
             key: Bytes::copy_from_slice(key),
             revision,
             expires_at_ms,
             payload,
+            tags,
         })
     }
 
-    /// Publish a Put whose store, key and value the caller has validated
-    /// against this layout, returning only what the caller lacks.
+    /// Publish a Put whose store, key, value and sorted, distinct tags the
+    /// caller has validated against this layout, returning only what the
+    /// caller lacks.
     pub(crate) fn publish_validated_put(
         &self,
         store: &[u8],
         key: &[u8],
         value: &[u8],
         ttl: Option<Duration>,
+        tags: &[u64],
     ) -> Result<(CacheRevision, Option<u64>, PayloadRef)> {
         let expires_at_ms =
             ttl.map(|ttl| now_ms().saturating_add(duration_ms(ttl)));
@@ -127,7 +144,7 @@ impl<L: CacheLayout> CacheTransport<L> {
             .store(Record::body(value).stamp(expires_at_ms.unwrap_or(0)))?;
         let payload = PayloadRef { address, value_len: value.len() as u64 };
         let encoded =
-            protocol::encode_put::<L>(store, key, expires_at_ms, payload);
+            protocol::encode_put::<L>(store, key, expires_at_ms, payload, tags);
         match self.publish_mutation(FRAME_KIND_PUT, encoded) {
             Ok(revision) => Ok((revision, expires_at_ms, payload)),
             Err(error) => {
@@ -135,6 +152,36 @@ impl<L: CacheLayout> CacheTransport<L> {
                 Err(error)
             }
         }
+    }
+
+    /// Publish one invalidation of tag hashes, in any order.
+    pub fn publish_invalidate_tags(
+        &self,
+        store: &[u8],
+        tags: &[u64],
+    ) -> Result<CacheMutation> {
+        self.validate_store(store)?;
+        let tags = normalized(tags);
+        self.validate_invalidation(store, tags.len())?;
+        let revision = self.publish_validated_invalidate_tags(store, &tags)?;
+        Ok(CacheMutation::InvalidateTags {
+            store: Bytes::copy_from_slice(store),
+            tags,
+            revision,
+        })
+    }
+
+    /// Publish an invalidation whose store and nonempty, sorted, distinct
+    /// tags the caller has validated.
+    pub(crate) fn publish_validated_invalidate_tags(
+        &self,
+        store: &[u8],
+        tags: &[u64],
+    ) -> Result<CacheRevision> {
+        self.publish_mutation(
+            FRAME_KIND_INVALIDATE_TAGS,
+            protocol::encode_invalidate_tags::<L>(store, tags),
+        )
     }
 
     pub fn publish_delete(
@@ -274,6 +321,41 @@ impl<L: CacheLayout> CacheTransport<L> {
         Ok(())
     }
 
+    /// The most tags a put of a `key_len`-byte key in `store` can carry.
+    pub fn max_tags(
+        &self,
+        store: &[u8],
+        key_len: usize,
+    ) -> usize {
+        protocol::max_tags::<L>(store.len(), key_len)
+    }
+
+    /// Whether `count` distinct tags fit a put's frame beside its key.
+    pub(crate) fn validate_tags(
+        &self,
+        store: &[u8],
+        key_len: usize,
+        count: usize,
+    ) -> Result<()> {
+        let max = self.max_tags(store, key_len);
+        if count > max {
+            return Err(Error::TooManyTags { count, max });
+        }
+        Ok(())
+    }
+
+    /// Whether `count` distinct tags form an invalidation for `store`.
+    pub(crate) fn validate_invalidation(
+        &self,
+        store: &[u8],
+        count: usize,
+    ) -> Result<()> {
+        if count == 0 {
+            return Err(Error::TagsEmpty);
+        }
+        self.validate_tags(store, 0, count)
+    }
+
     pub fn current_revision_sequence(&self) -> u64 {
         self.fleet.current_ring_version::<MutationRecord<L>>()
     }
@@ -351,6 +433,14 @@ impl<L: CacheLayout> CacheTransport<L> {
             Ok(self.fleet.publish::<MutationRecord<L>>(kind, version, payload))
         }
     }
+}
+
+/// Tag hashes as a frame carries them: sorted and distinct.
+fn normalized(tags: &[u64]) -> Box<[u64]> {
+    let mut tags = tags.to_vec();
+    tags.sort_unstable();
+    tags.dedup();
+    tags.into_boxed_slice()
 }
 
 pub(crate) fn now_ms() -> u64 {
