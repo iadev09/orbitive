@@ -183,7 +183,7 @@ application.
 | Module | Shape | What it keeps |
 | --- | --- | --- |
 | [atomic](atomic/ARCHITECTURE.md) | Table and name directory | 64-bit values used as atomics between processes, reached by id or by declared name, with wait and notify |
-| [counter](counter/ARCHITECTURE.md) | Table | Signed counters under keys chosen at run time |
+| [counter](counter/ARCHITECTURE.md) | None of its own | Signed counters under keys chosen at run time, with checked arithmetic; each is a kept atomic declared under its key |
 | [events](events/ARCHITECTURE.md) | Ring | Topic and payload frames; every frame matters until it is overwritten |
 | [cache](cache/ARCHITECTURE.md) | Ring and arena, or table and arena | A per-process cache kept coherent by a mutation ring, and a shared cache every process reads directly; invalidation by key, store or tag |
 | arena | Arena | The keyed byte store the cache and other modules build on |

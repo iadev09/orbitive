@@ -66,8 +66,15 @@ assert_eq!(again.id(), ready.id());
 - Declaring a name again allocates nothing. A worker that restarts and
   declares its values again consumes no slots.
 - Declaring a name with another type is `Error::KindMismatch`. A name is at
-  most `ATOMIC_NAME_MAX` bytes (default 48); an empty or longer name is
+  most `ATOMIC_NAME_MAX` bytes (default 112); an empty or longer name is
   `Error::NameEmpty` or `Error::NameTooLong`.
+
+`Orbitals::find(name)` looks a name up without declaring it: `Ok(None)` when
+no process has declared it in the table's epoch, and nothing is installed.
+It takes no lock and refuses another type or lifetime as `declare` does;
+`find_kept` finds a kept name. It is for names chosen at run time, where a
+read must not use up a slot, as [`orbit-counter`](https://docs.rs/orbit-counter)
+does with its keys.
 
 The `orbital!` macro gives a declared value a type of its own: a newtype with
 the doc comment and visibility written, `Clone`, `Deref<Target = Orbital<T>>`,
@@ -220,9 +227,9 @@ the same in every binary of a fleet.
 The table uses Orbit SHM kind `174` (`ATOMIC_KIND`), one 64-byte header and
 one 64-byte slot per value, so two hot values never share a cache line. Names
 live in a directory of their own, Orbit SHM kind `170` (`ATOMIC_NAMES_KIND`),
-created by the first declaration: one entry per slot the table can hold, 64
-bytes each at the default name length. A fleet that never declares a name
-never creates it. `Orbitals::unlink` removes both, and so must anything else
+created by the first declaration or lookup: one entry per slot the table
+can hold, 128 bytes each at the default name length. A fleet that never
+declares or looks up a name never creates it. `Orbitals::unlink` removes both, and so must anything else
 that clears the table's shared memory. An in-memory fleet gets the same
 table and directory on the heap, shared by everything that holds the same
 `Fleet`.

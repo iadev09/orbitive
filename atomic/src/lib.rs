@@ -10,7 +10,8 @@
 //! A value with a fixed identity is declared by name instead:
 //! [`Orbitals::declare`] returns the same value to every process that
 //! declares the name, and [`orbital!`] gives such a value a type of its own
-//! that implements [`Declared`].
+//! that implements [`Declared`]. [`Orbitals::find`] looks a name up without
+//! declaring it.
 //!
 //! A value lives as long as its table's shared memory. Nothing releases a
 //! single value; the table's owner clears all of them with
@@ -41,6 +42,7 @@ pub use names::{ATOMIC_NAME_MAX, ATOMIC_NAMES_KIND, Lifetime};
 pub use orbital::Orbital;
 pub use table::{ATOMIC_CAPACITY, ATOMIC_KIND};
 
+use names::Resolved;
 use table::Table;
 
 /// Whether this build can park on a shared word. A table refuses to open
@@ -185,6 +187,47 @@ impl Orbitals {
     ) -> Result<Orbital<T>> {
         let resolved =
             self.table.declare(name, T::KIND, initial.into_word(), lifetime)?;
+        self.resolved(resolved, lifetime)
+    }
+
+    /// The value called `name` if some process has declared it in the
+    /// table's epoch, without declaring it: a missing name is `Ok(None)`
+    /// and stays missing. Takes no lock. A name declared with another type
+    /// is [`Error::KindMismatch`], one declared kept
+    /// [`Error::LifetimeMismatch`]; [`Self::find_kept`] finds those.
+    pub fn find<T: Primitive>(
+        &self,
+        name: &str,
+    ) -> Result<Option<Orbital<T>>> {
+        self.find_with(name, Lifetime::Reset)
+    }
+
+    /// [`Self::find`], for a name declared with [`Self::declare_kept`].
+    pub fn find_kept<T: Primitive>(
+        &self,
+        name: &str,
+    ) -> Result<Option<Orbital<T>>> {
+        self.find_with(name, Lifetime::Kept)
+    }
+
+    fn find_with<T: Primitive>(
+        &self,
+        name: &str,
+        lifetime: Lifetime,
+    ) -> Result<Option<Orbital<T>>> {
+        match self.table.find(name)? {
+            Some(resolved) => self.resolved(resolved, lifetime).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// A handle to what a name resolved to, refused when the name was
+    /// declared with another type or lifetime than the caller's.
+    fn resolved<T: Primitive>(
+        &self,
+        resolved: Resolved,
+        lifetime: Lifetime,
+    ) -> Result<Orbital<T>> {
         let id = OrbitalId::from_bytes(resolved.id.to_be_bytes())?;
         if id.kind() != T::KIND {
             return Err(Error::KindMismatch { id, expected: T::KIND });

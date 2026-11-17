@@ -26,7 +26,7 @@ pub const ATOMIC_NAMES_KIND: u8 = 170;
 /// with a different value are refused when they open the directory.
 pub const ATOMIC_NAME_MAX: usize = orbit_core::compile::usize_from_env(
     option_env!("ORBIT_ATOMIC_NAME_MAX"),
-    48,
+    112,
 );
 
 const _: () =
@@ -297,8 +297,9 @@ impl Names {
     }
 
     /// Without a lock: an occupied entry never changes within its epoch,
-    /// and probing chains only grow. A miss is not an answer; the caller
-    /// asks again under the lock.
+    /// and probing chains only grow. A miss means the name was not
+    /// installed when the probe passed; a caller about to install asks
+    /// again under the lock.
     pub(crate) fn find(
         &self,
         table_epoch: u32,

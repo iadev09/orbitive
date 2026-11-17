@@ -256,6 +256,22 @@ impl Table {
         })
     }
 
+    /// Find `name` in the current epoch without installing it. No lock:
+    /// an installed entry never changes within its epoch, so a miss is an
+    /// answer here, ordered before any declaration still in flight. The
+    /// first lookup in a process attaches the directory, creating it when
+    /// no process has, as the first declaration would.
+    pub(crate) fn find(
+        &self,
+        name: &str,
+    ) -> Result<Option<Resolved>> {
+        names::check_name(name)?;
+        let name = name.as_bytes();
+        let hash = names::name_hash(name);
+        let names = self.names()?;
+        Ok(names.find(self.epoch().load(Ordering::Acquire), hash, name))
+    }
+
     /// Start a new epoch. Every slot is emptied except those of kept
     /// names, whose values move to the front of the table in their slot
     /// order and whose names are recorded again with ids of the new epoch.

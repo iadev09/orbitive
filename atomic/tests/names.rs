@@ -53,6 +53,34 @@ fn a_name_keeps_its_type_and_lifetime() {
     ));
 }
 
+/// A lookup that installed what it did not find would fill the table with
+/// every name a caller ever asked about.
+#[test]
+fn finding_a_name_declares_nothing() {
+    let orbitals = orbitals();
+    assert!(orbitals.find::<i64>("hits").unwrap().is_none());
+    assert!(orbitals.find::<i64>("hits").unwrap().is_none());
+
+    let hits = orbitals.declare_kept("hits", 5_i64).unwrap();
+    let found = orbitals.find_kept::<i64>("hits").unwrap().unwrap();
+    assert_eq!(found.id(), hits.id());
+    assert!(matches!(
+        orbitals.find::<i64>("hits"),
+        Err(Error::LifetimeMismatch { expected: Lifetime::Reset, .. })
+    ));
+    assert!(matches!(
+        orbitals.find_kept::<u64>("hits"),
+        Err(Error::KindMismatch { expected: Kind::U64, .. })
+    ));
+    assert!(matches!(orbitals.find::<i64>(""), Err(Error::NameEmpty)));
+
+    // Nothing was allocated by the misses: the rest of the table is there.
+    let rest: Vec<_> = (1..ATOMIC_CAPACITY)
+        .map(|_| orbitals.allocate(0_u64).unwrap())
+        .collect();
+    assert_eq!(rest.len(), ATOMIC_CAPACITY - 1);
+}
+
 #[test]
 fn a_reset_forgets_plain_names_and_keeps_kept_ones() {
     let orbitals = orbitals();

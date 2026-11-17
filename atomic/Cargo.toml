@@ -1,6 +1,6 @@
 [package]
 name = "orbit-atomic"
-version = "0.1.1"
+version = "0.6.0"
 publish.workspace = true
 edition.workspace = true
 authors.workspace = true
