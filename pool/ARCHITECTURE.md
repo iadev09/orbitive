@@ -88,7 +88,7 @@ then the least loaded remote one, then creation within budget, then wait.
 
 ## Waking
 
-Blocking waiters park on the key's `changes` word (the cell idiom), with
+Blocking waiters park on the key's `changes` word (the `orbit-atomic` wait idiom), with
 a bounded form — `wait_capacity_timeout` — that answers `None` for the
 timeout and nothing else, after one last look. That is the admission
 window a consumer has when it must answer busy rather than queue. There
@@ -127,7 +127,7 @@ them when the streams that carried them end.
 ## What remote reuse costs (measured)
 
 Load test, 8 tasks on one resource of capacity 4, both nodes in one
-process (`BENCHMARKS.local.md`):
+process:
 
 | | macOS host | Linux guest |
 |---|---|---|

@@ -44,7 +44,7 @@ holds it (B may never have claimed). Old handles then answer `Stale`.
 Writer: copy into `[head, head+n)` (wrapping), then `head.store(Release)`.
 Reader: `head.load(Acquire)`, copy `[tail, min(head, tail+n))`, then
 `tail.store(Release)`. That pair is the whole memory contract; it is the
-same one the arena and the cells rely on across processes. FIN and RESET
+same one the arena and Orbitals rely on across processes. FIN and RESET
 are flags, so a full ring never blocks shutdown; a dropped `WriteHalf`
 without `finish` is a RESET, a dropped `ReadHalf` sets READER_GONE.
 
@@ -61,8 +61,8 @@ it; handing the socket over is a *migration*, and it is not.
 
 A socket's payload is transient. A ring is **residue**: what crossed stays
 in the segment until other traffic overwrites that slot, and the segment
-outlives every process that used it (which is why the workspace has a rule
-and a tool for clearing kinds). Any process that can map the segment can
+outlives every process that used it (which is why the `orbit` CLI can clear
+kinds). Any process that can map the segment can
 read the last bytes that crossed it, whether or not it was ever a party to
 them.
 
@@ -173,7 +173,7 @@ socket.
 
 - **Blocking waiters** park on the direction's `changes` word with
   `orbit_core::sync::wait_word`, announcing themselves in `waiters` first
-  (the cell idiom, SeqCst on both sides). Every commit, consume and flag
+  (the `orbit-atomic` wait idiom, SeqCst on both sides). Every commit, consume and flag
   change bumps `changes` and wakes only when `waiters > 0`.
 
   Bounded forms take the same path with a deadline —
@@ -313,10 +313,10 @@ Geometry is validated when the table is opened, where a compile-time
 assert used to stand. Each kind still owes the deployment an index row of
 its own.
 
-## Geometry for a deployment (Linux is production)
+## Geometry for a deployment
 
-Measured 2026-09-17 on the same M3 Max, macOS host and a Debian aarch64
-guest; logs in `BENCHMARKS.local.md`:
+Measured 2026-09-17 on one Apple M3 Max: macOS on Apple silicon, and a Linux
+guest (Debian, aarch64) under a hypervisor on the same machine:
 
 | | macOS host | Linux guest |
 |---|---|---|
@@ -356,9 +356,9 @@ and no user-space wake hop, not a faster copy. Consequences:
   ```
 
   For 64 KiB–1 MiB bodies at 8–64 in flight on that guest, 256 KiB was
-  the best single choice. The deployment default in
-  `claviron-full/.cargo/config.toml` is **256 KiB per direction on
-  Linux**. The crate default stays 64 KiB: it is the host-agnostic floor
+  the best single choice. A deployment declares the ring size through
+  `ORBIT_STREAM_BUFFER_BYTES`; one Linux deployment uses **256 KiB per
+  direction**. The crate default stays 64 KiB: it is the host-agnostic floor
   and what the tests and the macOS numbers were taken with.
 - Address space is `fleet × lanes × 2 × ring`, backed only as touched:
   17 × 512 × 2 × 256 KiB is 4.25 GiB of sparse mapping and costs what

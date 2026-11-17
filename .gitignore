@@ -100,7 +100,7 @@ core.*
 /.claude
 *.md
 !README.md
-ARCHITECTURE.md
+!ARCHITECTURE.md
 
 # Published benchmark results for the link transport.
 !link/BENCHMARKS.md
