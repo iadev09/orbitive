@@ -124,7 +124,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-orbitive = { version = "0.6.17", features = ["atomic"] }
+orbitive = { version = "0.6.18", features = ["atomic"] }
 ```
 
 Replace `src/main.rs` with:
