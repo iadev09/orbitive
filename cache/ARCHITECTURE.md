@@ -67,11 +67,16 @@ the key again, but only on the mutation path and on expiry.
 ### Backing fills
 
 A caller with a backing store fills a cold key from it without publishing.
-`Store::fill_revision` reads the last allocated mutation sequence before the
-backing read; `Store::fill` keeps the value at that revision, with the
+`Store::fill_token` reads the last allocated mutation sequence before the
+backing read; `Store::fill` keeps the value at that sequence, with the
 mutation id at zero. A writer updates its backing store before it allocates,
 so every mutation up to that sequence is already in what the read returns,
-and any mutation allocated later is newer than the fill and replaces it.
+and any mutation allocated later is newer than the fill and replaces it. The
+outcome says which rule decided (`Fill::Kept`, `Invalidated` for a tag fence,
+`Superseded` for the key's slot, fence or the floor, `Skipped` for an expired
+value, no room or an incoherent view); the tag fence is reported first when
+both refuse, and no refusal changes the view. *Fenced fills* below states the
+token and its boundary for both modes.
 
 A fill is refused when this view already holds the key at a revision at or
 above it, or when the floor or the key's fence is above its sequence. A floor
@@ -83,8 +88,8 @@ nothing. A fill charges the connection's byte budget and may reclaim from
 other stores, so it holds the connection cursor like a put and a drain:
 before 2026-11-17 it did not, and two concurrent fills could push the budget
 past its limit (a debug build panicked in the reservation) or lock two stores
-in opposite orders while reclaiming. Shared stores have no local view and are
-not filled.
+in opposite orders while reclaiming. Shared stores have no local view and no
+untagged fill; they are filled only through the tag fence (*Fenced fills*).
 
 ### Tags
 
@@ -166,7 +171,8 @@ under the store's lock; no view walks its key space. The index holds at most
   value. The contract mirrors puts: a writer applies an invalidation to its
   backing store before it calls `invalidate_tags`, so a fill whose token is
   at or above the invalidation's sequence read a backing store the
-  invalidation had already reached. A token below a tag's fence is refused;
+  invalidation had already reached. A token below a tag's fence is refused
+  (`Fill::Invalidated`);
   an invalidation applied after a fill removes it when the token is below the
   invalidation (the same `precedes` rule as a mutation at the token's own
   sequence). A value filled without tags is not reached by a later
@@ -212,8 +218,8 @@ already tells the read which kind it holds from a field the pin loaded.
 **Clock and floors.** A separate table of tag floors (kind 171) holds a
 monotonic clock in its header and, per tag, the clock value of its last
 invalidation. `invalidate_tags` takes the table's writer lock (a process
-mutex, then the segment's `flock`), advances the clock once to `v`, and raises
-each tag's floor to `v`. A tagged put reads the clock before it writes and
+mutex, then the segment's `flock`), advances the clock once to `v`, raises
+each tag's floor to `v`, and returns `v` as a fill token. A tagged put reads the clock before it writes and
 stores it in the span with the tags: `[instance][clock][tag]...`. A tagged
 record is live while its clock is at or above each of its tags' floors. The
 clock read is the put's place in the order: a put that read the clock before
@@ -253,10 +259,84 @@ against (fixed for the handle's life, kept in the handle) and, per tag, one
 set's tag words, one floor and the overflow floor, all lock-free. An
 invalidation costs one lock and one set update per tag; dead records stay in
 the arena, read as misses, until the cursor or an overwrite reaches them, as
-expired ones do.
+expired ones do. Tag hashes are computed into a fixed array on the stack for
+every shared operation; nothing is allocated for them.
+
+**Fills.** `SharedStore::fill_token` is the instance and one load of the
+clock. `fill_tagged` writes the same record a tagged put writes, stamped with
+the token's clock instead of the clock at the call. That is the whole fence:
+a put's own clock read is its place in the order, and a fill's place is the
+token, read before its backing read. Before writing, it checks the tags'
+floors against the token and refuses (`Fill::Invalidated`, nothing written)
+when one is already above it; the check only spares the arena a record that
+would be dead on arrival, since a floor raised after the check hides the
+record at read time all the same. A token whose source is not this table's
+instance (a replicated token, or one read from a table recreated since) is
+refused the same way: no floor of this table vouches for it. The fence
+orders a fill against tag invalidations only. The arena has no conditional
+write, so a fill replaces the key's record as a put does, and a concurrent
+put or delete of the key is not ordered against it; the contract asks
+writers to invalidate a tag. There is no untagged shared fill for the same
+reason: it would be a put that nothing orders.
 
 Both strategies check TTL at read time. At `now >= expires_at_ms` the result is
 a miss. An already returned buffer remains valid until its last owner drops.
+
+## Fenced fills
+
+Both modes order a fill against tag invalidations with one shape:
+`fill_token() -> FillToken`, `fill_tagged(token, key, value, expires_at_ms,
+tags) -> Result<Fill>`, and `invalidate_tags` returning the token at the
+position it took. The replicated store keeps the untagged `fill` beside it.
+
+**One token type.** Both clocks are a `u64` that an invalidation advances and
+a token loads: the replicated mutation sequence (fleet-wide, shared with puts
+and deletes) and the shared table's clock (advanced by invalidations only).
+The rule that judges a fill is the same on both, so the token is one type,
+`FillToken { source, clock }`, and a layer above can carry it without knowing
+the mode. Two types would have prevented mixing at compile time, but the
+layer holding either store would then wrap them in its own enum and check the
+pairing at run time anyway. `source` makes that check here: zero for every
+replicated store (the ring has no identity, and stores on one connection
+share its sequence) and the table's nonzero instance for shared stores. A
+token from another source is refused as `Invalidated`, never admitted. What
+the source cannot catch is a replicated token carried across
+`reset_transport`, which restarts sequences; that runs under caller-owned
+quiescence, as every replicated fill already assumes.
+
+**The boundary.** Let a fill carry token `t` and an invalidation of one of
+its tags take clock value `v`.
+
+- `v <= t`: the token read observed the invalidation's advance (the
+  replicated sequence allocation; the shared `fetch_add`, which the token's
+  Acquire load pairs with). Its writer changed the backing source before
+  that advance, and the backing read starts after the token, so the read
+  saw the change. The fill is admitted against it. `v == t` is this case:
+  `t` is the last value handed out, so the invalidation that took it had
+  already advanced the clock. A fill with the token `invalidate_tags`
+  returned sits exactly on this boundary.
+- `v > t`: the advance came after the token read, and the backing read may
+  have finished before the writer's change. The fill is refused when its
+  store has the invalidation (`Fill::Invalidated`) and removed or hidden when
+  it gets it later.
+
+So the comparison is strict: refused iff some tag's floor is above the token.
+A replicated view checks its tag bucket fences with the fill admission rule
+(`token >= fence` is admitted), and a later invalidation removes a fill slot
+whose token is below it (`precedes`). A shared record stamped `t` is live
+while `t >= floor` for each tag. The two checks are the same inequality.
+
+**What a kept fill means.** Shared: a record every process reads at once,
+judged against the floors on every tagged read. Replicated: a slot in the
+filling process only; the fill publishes nothing, so each process misses and
+fills on its own. An invalidation reaches every process as a mutation; a view
+that has not applied it yet may return the fill until it does, the listener
+lag every mutation has. A replicated fill is additionally judged by its key
+(slot, fence, floor), which the shared fill is not.
+
+**Costs.** A token is one atomic load and a fixed field. A refused fill
+touches no arena and no budget. Reads, `put` and `put_tagged` are unchanged in
+both modes; shared tag hashing moved onto the stack for every caller.
 
 ## Revisions and loss
 

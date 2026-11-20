@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use lru::{DefaultHasher, LruCache};
 
+use crate::Fill;
 use crate::layout::CacheLayout;
 use crate::protocol::{CacheMutation, CacheRevision};
 use crate::transport::CacheTransport;
@@ -483,7 +484,8 @@ impl LocalCache {
     /// that very sequence leaves it current, while a slot this view already
     /// holds for the key at or above it makes the fill stale. A tag fence
     /// above it means an invalidation the backing read may predate. Publishes
-    /// nothing; returns whether the value is kept.
+    /// nothing. Every refusal leaves the view as it was; the tag fence is
+    /// reported before the key's, since both refuse.
     pub(crate) fn install_fill(
         &self,
         key: &[u8],
@@ -492,20 +494,27 @@ impl LocalCache {
         expires_at_ms: Option<u64>,
         tags: Box<[u64]>,
         reclaim: impl FnMut() -> bool,
-    ) -> bool {
+    ) -> Fill {
         let mut state =
             self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        self.is_coherent()
-            && state.admits(key, revision, Admission::Fill)
-            && !state.covered(&tags, revision, Admission::Fill)
-            && state.put_value(
-                &self.budget,
-                key,
-                value,
-                Version { revision, expires_at_ms, tags },
-                Admission::Fill,
-                reclaim,
-            )
+        if !self.is_coherent() {
+            Fill::Skipped
+        } else if state.covered(&tags, revision, Admission::Fill) {
+            Fill::Invalidated
+        } else if !state.admits(key, revision, Admission::Fill) {
+            Fill::Superseded
+        } else if state.put_value(
+            &self.budget,
+            key,
+            value,
+            Version { revision, expires_at_ms, tags },
+            Admission::Fill,
+            reclaim,
+        ) {
+            Fill::Kept
+        } else {
+            Fill::Skipped
+        }
     }
 
     pub(crate) fn evict_value(&self) -> bool {
@@ -887,56 +896,71 @@ mod tests {
         let cache = view(4, 64);
         let token = |sequence| at(sequence, 0);
 
-        assert!(cache.install_fill(
-            b"cold",
-            b"backing",
-            token(3),
-            None,
-            no_tags(),
-            || false
-        ));
+        assert_eq!(
+            cache.install_fill(
+                b"cold",
+                b"backing",
+                token(3),
+                None,
+                no_tags(),
+                || false
+            ),
+            Fill::Kept
+        );
         assert!(matches!(cache.read(b"cold"), CacheRead::Hit(_)));
 
         // A delete this view applied after the token is newer than the fill;
         // one at the token's own sequence is in what the fill read.
         cache.install_missing(b"deleted", at(6, 1));
-        assert!(!cache.install_fill(
-            b"deleted",
-            b"old",
-            token(5),
-            None,
-            no_tags(),
-            || false
-        ));
+        assert_eq!(
+            cache.install_fill(
+                b"deleted",
+                b"old",
+                token(5),
+                None,
+                no_tags(),
+                || false
+            ),
+            Fill::Superseded
+        );
         assert_eq!(cache.read(b"deleted"), CacheRead::Miss);
-        assert!(cache.install_fill(
-            b"deleted",
-            b"new",
-            token(6),
-            None,
-            no_tags(),
-            || false
-        ));
+        assert_eq!(
+            cache.install_fill(
+                b"deleted",
+                b"new",
+                token(6),
+                None,
+                no_tags(),
+                || false
+            ),
+            Fill::Kept
+        );
 
         // A floor at the token's sequence leaves the fill current; one past
         // it does not.
         cache.reset_local(at(7, 1));
-        assert!(cache.install_fill(
-            b"after",
-            b"backing",
-            token(7),
-            None,
-            no_tags(),
-            || false
-        ));
-        assert!(!cache.install_fill(
-            b"before",
-            b"backing",
-            token(6),
-            None,
-            no_tags(),
-            || false
-        ));
+        assert_eq!(
+            cache.install_fill(
+                b"after",
+                b"backing",
+                token(7),
+                None,
+                no_tags(),
+                || false
+            ),
+            Fill::Kept
+        );
+        assert_eq!(
+            cache.install_fill(
+                b"before",
+                b"backing",
+                token(6),
+                None,
+                no_tags(),
+                || false
+            ),
+            Fill::Superseded
+        );
 
         // A mutation at the token's sequence is in what the fill read; one
         // published after the token replaces the fill.
@@ -1007,22 +1031,28 @@ mod tests {
             || false,
         );
         assert_eq!(cache.read(b"newer"), CacheRead::Miss);
-        assert!(!cache.install_fill(
-            b"newer",
-            b"stale",
-            at(1, 0),
-            None,
-            no_tags(),
-            || false
-        ));
-        assert!(cache.install_fill(
-            b"newer",
-            b"backing",
-            at(3, 0),
-            None,
-            no_tags(),
-            || false
-        ));
+        assert_eq!(
+            cache.install_fill(
+                b"newer",
+                b"stale",
+                at(1, 0),
+                None,
+                no_tags(),
+                || false
+            ),
+            Fill::Superseded
+        );
+        assert_eq!(
+            cache.install_fill(
+                b"newer",
+                b"backing",
+                at(3, 0),
+                None,
+                no_tags(),
+                || false
+            ),
+            Fill::Kept
+        );
         assert!(holds(&cache, b"newer", b"backing"));
     }
 

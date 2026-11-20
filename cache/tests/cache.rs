@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use orbit_cache::{
     Cache, CacheAddress, CacheLayout, CacheMutation, CacheRead, CacheTransport,
-    Error, Store,
+    Error, Fill, SharedCache, Store,
 };
 use orbit_core::{Fleet, RingSpec};
 
@@ -396,4 +396,69 @@ fn tag_sets_are_bounded_and_an_invalidation_names_one() {
     store.invalidate_tags(&["a"]).unwrap();
     assert_eq!(store.read(b"dup"), CacheRead::Miss);
     assert!(matches!(store.read(b"untagged"), CacheRead::Hit(_)));
+}
+
+/// A fill fenced by a token taken before its backing read, in both modes.
+/// The token is the last position its clock handed out, so an invalidation
+/// that took that position or an earlier one ran before the read began; one
+/// after it may not be in what the read returned.
+#[test]
+fn a_fenced_fill_is_refused_by_an_invalidation_after_its_token() {
+    let fleet = Arc::new(Fleet::join("cache_fence", 1).expect("fleet"));
+    let cache = Cache::<TinyLayout>::new(fleet.clone()).expect("cache");
+    let replicated = open(&cache);
+    let peer_cache = Cache::<TinyLayout>::new(fleet.clone()).expect("peer");
+    let peer = open(&peer_cache);
+    let shared = SharedCache::new(fleet).unwrap().open_store(STORE).unwrap();
+    let hit = |read: CacheRead| matches!(read, CacheRead::Hit(_));
+
+    // Token, invalidation, fill: refused, and nothing is stored.
+    let token = replicated.fill_token();
+    replicated.invalidate_tags(&["users"]).unwrap();
+    let fill = replicated.fill_tagged(token, b"a", b"stale", None, &["users"]);
+    assert_eq!(fill.unwrap(), Fill::Invalidated);
+    assert_eq!(replicated.read(b"a"), CacheRead::Miss);
+    let token = shared.fill_token();
+    shared.invalidate_tags(&["users"]).unwrap();
+    let fill = shared.fill_tagged(token, b"a", b"stale", None, &["users"]);
+    assert_eq!(fill.unwrap(), Fill::Invalidated);
+    assert_eq!(shared.read(b"a"), CacheRead::Miss);
+
+    // Invalidation, token, fill: kept. With nothing published between them
+    // the token is the invalidation's own position, the boundary.
+    let at = replicated.invalidate_tags(&["users"]).unwrap();
+    let token = replicated.fill_token();
+    assert_eq!(token, at);
+    let fill = replicated.fill_tagged(token, b"a", b"fresh", None, &["users"]);
+    assert_eq!(fill.unwrap(), Fill::Kept);
+    assert!(hit(replicated.read(b"a")));
+    let at = shared.invalidate_tags(&["users"]).unwrap();
+    let token = shared.fill_token();
+    assert_eq!(token, at);
+    let fill = shared.fill_tagged(token, b"a", b"fresh", None, &["users"]);
+    assert_eq!(fill.unwrap(), Fill::Kept);
+    assert!(hit(shared.read(b"a")));
+
+    // An invalidation after the token that a replicated view has not applied
+    // yet: the fill stays in that view until the invalidation reaches it.
+    let token = peer.fill_token();
+    replicated.invalidate_tags(&["users"]).unwrap();
+    let fill = peer.fill_tagged(token, b"b", b"stale", None, &["users"]);
+    assert_eq!(fill.unwrap(), Fill::Kept);
+    assert!(hit(peer.read(b"b")));
+    peer_cache.poll();
+    assert_eq!(peer.read(b"b"), CacheRead::Miss);
+    // In the shared table it is stamped with its token, so an invalidation
+    // above the token hides it from every reader.
+    let token = shared.fill_token();
+    let fill = shared.fill_tagged(token, b"b", b"stale", None, &["users"]);
+    assert_eq!(fill.unwrap(), Fill::Kept);
+    shared.invalidate_tags(&["users"]).unwrap();
+    assert_eq!(shared.read(b"b"), CacheRead::Miss);
+
+    // A token from the other mode's clock vouches for nothing.
+    let fill = shared.fill_tagged(peer.fill_token(), b"c", b"v", None, &["x"]);
+    assert_eq!(fill.unwrap(), Fill::Invalidated);
+    let fill = peer.fill_tagged(shared.fill_token(), b"c", b"v", None, &["x"]);
+    assert_eq!(fill.unwrap(), Fill::Invalidated);
 }

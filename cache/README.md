@@ -16,9 +16,10 @@ Delete and Reset. A Put references an arena payload, which the receiving
 worker copies into L1. Hits read local bytes and check TTL. Each process
 starts empty at the current ring heads, and a driver applies later mutations.
 
-A normal miss may fall through to a backing store. Take `Store::fill_revision`
-before reading it and give the value to `Store::fill`: the store keeps it with
-its expiry unless a mutation it applied since is newer, and publishes nothing.
+A normal miss may fall through to a backing store. Take `Store::fill_token`
+before reading it and give the value to `Store::fill` with the token: the store
+keeps it with its expiry unless a mutation it applied since is newer, and
+publishes nothing (see [Fenced fills](#fenced-fills)).
 Detected mutation loss places the connection in `ResyncRequired` until explicit
 recovery.
 
@@ -117,17 +118,93 @@ assert_eq!(shared.read(b"session:1"), CacheRead::Miss);
   old tagged entries but never a stale hit. Invalidated entries stay in the
   shared arena, reading as misses, until they are overwritten or evicted.
 
-### Fills and tags
+## Fenced fills
 
-`Store::fill` keeps a backing value untagged, and no tag invalidation reaches
-it. A value the backing store holds with tags is filled with
-`Store::fill_tagged` and the same tags. A fill is refused when an
-invalidation of one of its tags newer than its `fill_revision` has already
-reached the worker, and removed by one that reaches it later. This relies on
-the same order as writes: apply an invalidation to the backing store before
-calling `invalidate_tags`, as a write updates the backing value before `put`.
-If the backing store cannot report a value's tags, do not fill keys that are
-written with tags; let those misses go to the backing store each time.
+A caller that reads an authoritative source, such as a database, on a miss
+and caches the result under tags needs a fence: if a tag invalidation ran
+between the start of its read and its store, the result may be stale, and
+nothing would remove it. Both modes offer the same fence with the same names:
+`fill_token` before the read, `fill_tagged` with the token after it, and a
+typed outcome.
+
+```rust
+use std::sync::Arc;
+
+use orbitive::cache::{Cache, Fill, SharedCache};
+use orbitive::Fleet;
+
+let fleet = Arc::new(Fleet::join("example", 1)?);
+let cache: Cache = Cache::new(fleet.clone())?;
+let replicated = cache.open_default_store()?;
+let shared = SharedCache::new(fleet)?.open_store(b"queries")?;
+
+// Reader, on a miss: the token first, then the authoritative read.
+let token = shared.fill_token();
+let rows = b"rows read from the source".to_vec();
+match shared.fill_tagged(token, b"query:7", &rows, None, &["users"])? {
+    Fill::Kept => {}
+    // Not an error: serve `rows` to this caller and cache nothing.
+    Fill::Invalidated | Fill::Superseded | Fill::Skipped => {}
+}
+
+// Writer: change the source first, then invalidate its tags.
+shared.invalidate_tags(&["users"])?;
+
+// The replicated store takes the same calls.
+let token = replicated.fill_token();
+assert_eq!(
+    replicated.fill_tagged(token, b"query:7", &rows, None, &["users"])?,
+    Fill::Kept
+);
+
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+- **The boundary.** A `FillToken` is a position on the store's invalidation
+  clock: the mutation sequence for a replicated store, the tag table's clock
+  for a shared one. It is the last position the clock had handed out when
+  the token was read. An invalidation at or below the token advanced the
+  clock before that read, so its writer had already changed the source and a
+  read that starts after the token sees the change: the fill is kept. An
+  invalidation of one of the fill's tags above the token refuses it. An
+  invalidation concurrent with the token read falls on one side or the other
+  by whether that read observed its advance of the clock; neither side admits
+  a value the read could have missed.
+- **What the caller must order.** The writer changes the source before it
+  calls `invalidate_tags`. The reader takes the token before its read starts,
+  including before any snapshot its read uses: a read inside a transaction
+  that began before the token can miss a change the token says it saw.
+- **The outcome.** A refusal is `Ok`, not an error: `Fill::Invalidated` (the
+  fence), `Fill::Superseded` (a replicated view holds or fenced a newer write
+  of the key) or `Fill::Skipped` (already expired, no room, or a view that
+  needs resync). `Err` is kept for arguments the store refuses, as
+  `put_tagged` refuses them. `invalidate_tags` returns the token at the
+  position it took.
+- **Shared stores.** A kept fill is a record every process reads at once.
+  It is stamped with the token, so an invalidation above the token hides it
+  whether it lands before or after the fill. The fence orders fills against
+  tag invalidations only: like a put, a fill replaces whatever its key holds,
+  and a concurrent `put` or `delete` of that key is not ordered against it.
+  Writers that change the source invalidate a tag; they do not merely put.
+- **Replicated stores.** A fill is local: it stays in the filling process and
+  publishes nothing. Every process misses once and fills its own view from
+  its own read. Invalidation still reaches all of them. A fill is refused
+  when its view has already applied an invalidation above its token, and
+  removed when the view applies one later; until then that process may
+  return it, as it may return any value a mutation not yet drained replaces.
+  A replicated fill is also ordered against writes of its key.
+- **Tokens name their clock.** A token from the other mode, or from a shared
+  tag table recreated since, is refused as `Fill::Invalidated`. One token is
+  valid for every store on the same clock.
+- **Untagged fills.** `Store::fill` keeps a backing value untagged, and no tag
+  invalidation reaches it. A value the backing store holds with tags is
+  filled with `fill_tagged` and the same tags; if the backing store cannot
+  report a value's tags, do not fill keys that are written with tags. Shared
+  stores have no untagged fill: with no tag there is nothing to fence, and it
+  would be a put that no write is ordered against.
+- **Cost.** Reading a token is one atomic load. A shared fill costs a tagged
+  put plus one floor lookup per tag; a replicated fill is a local insert.
+  Reads, `put` and `put_tagged` do not change.
 
 ## Mutation diagnostics
 

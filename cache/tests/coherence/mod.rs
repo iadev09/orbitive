@@ -6,7 +6,9 @@ use std::time::Duration;
 use orbit_core::Fleet;
 
 use crate::layout::MutationRecord;
-use crate::{Cache, CacheMutation, CacheRead, DefaultCacheLayout, protocol};
+use crate::{
+    Cache, CacheMutation, CacheRead, DefaultCacheLayout, Fill, protocol,
+};
 
 #[test]
 fn ttl_boundary_and_delayed_put_do_not_resurrect_an_expired_value() {
@@ -160,11 +162,11 @@ fn a_tag_invalidation_refuses_older_tagged_puts_and_fills_it_covers() {
             &tags(&["posts"]),
         )
         .unwrap();
-    let fill_token = store.fill_revision();
+    let fill_token = store.fill_token();
     let invalidation = transport
         .publish_invalidate_tags(b"default", &tags(&["users"]))
         .unwrap();
-    let after = store.fill_revision();
+    let after = store.fill_token();
     apply(old.clone());
     apply(other);
     assert!(holds(b"key", b"old"));
@@ -182,15 +184,22 @@ fn a_tag_invalidation_refuses_older_tagged_puts_and_fills_it_covers() {
     // A fill whose backing read may predate the invalidation is refused; one
     // that read after it is kept until a later invalidation reaches it. A
     // fill without tags is not reached by any.
-    assert!(!store.fill_tagged(
-        b"filled",
-        b"stale",
-        fill_token,
-        None,
-        &["users"]
-    ));
-    assert!(store.fill_tagged(b"filled", b"fresh", after, None, &["users"]));
-    assert!(store.fill(b"untagged", b"value", after, None));
+    assert_eq!(
+        store
+            .fill_tagged(fill_token, b"filled", b"stale", None, &["users"])
+            .unwrap(),
+        Fill::Invalidated
+    );
+    assert_eq!(
+        store
+            .fill_tagged(after, b"filled", b"fresh", None, &["users"])
+            .unwrap(),
+        Fill::Kept
+    );
+    assert_eq!(
+        store.fill(after, b"untagged", b"value", None).unwrap(),
+        Fill::Kept
+    );
     store.invalidate_tags(&["users"]).unwrap();
     assert_eq!(store.read(b"filled"), CacheRead::Miss);
     assert!(holds(b"untagged", b"value"));

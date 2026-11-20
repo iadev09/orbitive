@@ -7,6 +7,7 @@
 //! Hits clone the local value handle. Neither ring nor arena is a durable source.
 
 mod error;
+mod fill;
 mod floors;
 mod layout;
 mod local;
@@ -29,6 +30,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 pub use error::{Error, Result};
+pub use fill::{Fill, FillToken};
 pub use layout::{
     CACHE_MUTATION_RING_CAPACITY, CACHE_MUTATION_RING_KIND,
     CACHE_MUTATION_RING_PAYLOAD_CAPACITY, CACHE_MUTATION_RING_SPEC,
@@ -513,87 +515,85 @@ impl<L: CacheLayout> Store<L> {
     /// this view at once; other views apply it with the mutations before it.
     /// Apply the invalidation to a backing store first, as a write updates
     /// its backing value before [`Store::put`].
+    ///
+    /// Returns the token at the sequence this invalidation took: a fill with
+    /// it is ordered after this invalidation and before any later one.
     pub fn invalidate_tags<T: AsRef<[u8]>>(
         &self,
         tags: &[T],
-    ) -> Result<CacheRevision> {
-        let tags = self.tag_key.hash_all(tags)?;
+    ) -> Result<FillToken> {
+        let tags = self.tag_key.hash_set(tags)?;
         self.cache.transport.validate_invalidation(&self.name, tags.len())?;
         let revision = self
             .cache
             .transport
             .publish_validated_invalidate_tags(&self.name, &tags)?;
         self.local.invalidate_local(&tags, revision);
-        Ok(revision)
+        Ok(FillToken::from_parts(FillToken::REPLICATED, revision.sequence))
     }
 
-    /// The revision a backing read started now is current as of. Take it
-    /// before the read and pass it to [`Store::fill`]: every mutation
-    /// published up to it wrote its backing value first, and any later one is
-    /// newer than the fill.
-    pub fn fill_revision(&self) -> CacheRevision {
-        CacheRevision {
-            sequence: self.cache.transport.current_revision_sequence(),
-            mutation_id: orbit_core::NetId64::ZERO,
-        }
+    /// This store's position on the mutation sequence, for [`Store::fill`]
+    /// and [`Store::fill_tagged`]. Take it before reading the backing store:
+    /// every mutation published up to it wrote its backing value first, and
+    /// any later one is newer than the fill. One atomic load; it publishes
+    /// nothing.
+    pub fn fill_token(&self) -> FillToken {
+        FillToken::from_parts(
+            FillToken::REPLICATED,
+            self.cache.transport.current_revision_sequence(),
+        )
     }
 
-    /// Keep `value`, read from a backing store after
-    /// [`Store::fill_revision`], in this worker's view unless a mutation it
-    /// has applied since makes it stale. A value this store could not hold,
-    /// or one already expired, is not kept. Publishes nothing; returns whether
-    /// the value is kept. Like a put, it waits for a drain in progress on the
-    /// connection.
+    /// Keep `value`, read from a backing store after `token` was taken, in
+    /// this worker's view unless a mutation it has applied since makes it
+    /// stale ([`Fill::Superseded`]). `expires_at_ms` is a Unix-millisecond
+    /// deadline. Publishes nothing: other workers miss and fill on their own.
+    /// Like a put, it waits for a drain in progress on the connection.
     ///
     /// The value is kept untagged, so no tag invalidation reaches it. Fill a
     /// value the backing store holds with tags through [`Store::fill_tagged`].
     pub fn fill(
         &self,
+        token: FillToken,
         key: &[u8],
         value: &[u8],
-        revision: CacheRevision,
         expires_at_ms: Option<u64>,
-    ) -> bool {
-        self.validate_put(key, value).is_ok()
-            && self.install_fill(
-                key,
-                value,
-                revision,
-                expires_at_ms,
-                Box::default(),
-            )
+    ) -> Result<Fill> {
+        self.validate_put(key, value)?;
+        Ok(self.install_fill(token, key, value, expires_at_ms, Box::default()))
     }
 
     /// [`Store::fill`] for a value the backing store holds with `tags`. It is
-    /// refused when an invalidation of one of them, newer than `revision`,
-    /// has reached this view, and removed by one that reaches it later. A
-    /// tag set [`Store::put_tagged`] would refuse for its size is not kept.
+    /// refused ([`Fill::Invalidated`]) when an invalidation of one of them
+    /// with a sequence above the token has reached this view, and removed by
+    /// one that reaches it later. One at or below the token does neither. A
+    /// tag set [`Store::put_tagged`] would refuse for its size is an error.
     pub fn fill_tagged<T: AsRef<[u8]>>(
         &self,
+        token: FillToken,
         key: &[u8],
         value: &[u8],
-        revision: CacheRevision,
         expires_at_ms: Option<u64>,
         tags: &[T],
-    ) -> bool {
-        if self.validate_put(key, value).is_err() {
-            return false;
-        }
-        let Ok(tags) = self.tag_key.hash_all(tags) else { return false };
-        self.install_fill(key, value, revision, expires_at_ms, tags)
+    ) -> Result<Fill> {
+        let tags = self.put_tags(key, value, tags)?;
+        Ok(self.install_fill(token, key, value, expires_at_ms, tags))
     }
 
     fn install_fill(
         &self,
+        token: FillToken,
         key: &[u8],
         value: &[u8],
-        revision: CacheRevision,
         expires_at_ms: Option<u64>,
         tags: Box<[u64]>,
-    ) -> bool {
+    ) -> Fill {
+        if token.source() != FillToken::REPLICATED {
+            return Fill::Invalidated;
+        }
         if expires_at_ms.is_some_and(|deadline| deadline <= transport::now_ms())
         {
-            return false;
+            return Fill::Skipped;
         }
         // A fill charges the connection's byte budget and may reclaim from
         // other stores, so it serializes with every other insert, as a put
@@ -603,7 +603,10 @@ impl<L: CacheLayout> Store<L> {
         self.local.install_fill(
             key,
             value,
-            revision,
+            CacheRevision {
+                sequence: token.clock(),
+                mutation_id: orbit_core::NetId64::ZERO,
+            },
             expires_at_ms,
             tags,
             || self.cache.reclaim_value(&self.name),

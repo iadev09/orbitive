@@ -7,9 +7,11 @@ use orbit_core::{Fleet, NetId64};
 
 use crate::floors::TagFloors;
 pub use crate::floors::{SHARED_TAG_KIND, SHARED_TAG_SETS};
-use crate::tags::TagKey;
+use crate::tags::{TagHashes, TagKey};
 use crate::transport::{duration_ms, now_ms};
-use crate::{CacheEntry, CacheRead, CacheRevision, Error, Result};
+use crate::{
+    CacheEntry, CacheRead, CacheRevision, Error, Fill, FillToken, Result,
+};
 
 /// Dedicated keyed arena. Replicated payloads and file records use kind 193.
 /// Kind 180 held the same table before records carried tags.
@@ -156,9 +158,9 @@ impl SharedStore {
         key: &[u8],
         value: &[u8],
         tags: &[T],
-    ) -> Result<Box<[u64]>> {
+    ) -> Result<TagHashes> {
         self.validate_key(key)?;
-        let tags = self.tag_key.hash_all(tags)?;
+        let tags = self.tag_key.hash_set(tags)?;
         let span = if tags.is_empty() {
             0
         } else {
@@ -178,7 +180,7 @@ impl SharedStore {
         ttl: Option<Duration>,
     ) -> Result<()> {
         self.validate_put(key, value)?;
-        self.arena.put(self.key(key), self.record(value, ttl))?;
+        self.arena.put(self.key(key), self.record(value, expires(ttl)))?;
         Ok(())
     }
 
@@ -197,9 +199,83 @@ impl SharedStore {
         }
         // Read before the record is written: an invalidation that advances
         // the clock after this covers the record.
-        let clock = self.floors.clock();
+        self.write_tagged(key, value, expires(ttl), &tags, self.floors.clock())
+    }
+
+    /// This store's position on the tag clock, for [`SharedStore::fill_tagged`].
+    /// Take it before reading the authoritative source. One atomic load;
+    /// it publishes nothing.
+    pub fn fill_token(&self) -> FillToken {
+        FillToken::from_parts(self.floors.instance(), self.floors.clock())
+    }
+
+    /// Keep `value`, read from an authoritative source after `token` was
+    /// taken, under `tags`, for every reader, unless an invalidation of one
+    /// of them is newer than the token.
+    ///
+    /// The record is stamped with the token, not with the clock at this
+    /// call, so an invalidation between the token and this call refuses it
+    /// even when it lands first: it is refused here when its floor is
+    /// already visible ([`Fill::Invalidated`], nothing written), and reads as
+    /// a miss when the floor is raised after the record is written. One at
+    /// or below the token does neither. `expires_at_ms` is a Unix-millisecond
+    /// deadline; a value already past it is [`Fill::Skipped`].
+    ///
+    /// The fence orders the fill against tag invalidations only. Like a put,
+    /// a fill replaces whatever the key holds: a concurrent `put` or `delete`
+    /// of the same key is not ordered against it. A writer that changes the
+    /// source invalidates a tag the fill carries. An empty set is an untagged
+    /// fill, with nothing to fence.
+    pub fn fill_tagged<T: AsRef<[u8]>>(
+        &self,
+        token: FillToken,
+        key: &[u8],
+        value: &[u8],
+        expires_at_ms: Option<u64>,
+        tags: &[T],
+    ) -> Result<Fill> {
+        let tags = self.put_tags(key, value, tags)?;
+        let instance = self.floors.instance();
+        if token.source() != instance {
+            return Ok(Fill::Invalidated);
+        }
+        if expires_at_ms.is_some_and(|deadline| deadline <= now_ms()) {
+            return Ok(Fill::Skipped);
+        }
+        if tags.is_empty() {
+            let record = self.record(value, expires_at_ms.unwrap_or(0));
+            self.arena.put(self.key(key), record)?;
+            return Ok(Fill::Kept);
+        }
+        // Not needed for correctness, since the stamp decides at read time,
+        // but a record already dead would only displace live ones.
+        if !self.floors.admits(token.clock(), tags.iter().copied()) {
+            return Ok(Fill::Invalidated);
+        }
+        self.write_tagged(
+            key,
+            value,
+            expires_at_ms.unwrap_or(0),
+            &tags,
+            token.clock(),
+        )?;
+        Ok(Fill::Kept)
+    }
+
+    /// Write a record carrying `tags`, live while `clock` is at or above
+    /// each of their floors.
+    fn write_tagged(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        expires: u64,
+        tags: &[u64],
+        clock: u64,
+    ) -> Result<()> {
         let mut span = [0; TAG_SPAN_HEAD + crate::MAX_TAGS * size_of::<u64>()];
-        let words = [self.floors.instance(), clock].into_iter().chain(tags);
+        let words = [self.floors.instance(), clock]
+            .into_iter()
+            .chain(tags.iter().copied());
         let mut len = 0;
         for word in words {
             span[len..len + size_of::<u64>()]
@@ -209,32 +285,33 @@ impl SharedStore {
         let span = &span[..len];
         self.arena.put(
             self.key(key),
-            self.record(value, ttl).encoded(span, TAG_SPAN),
+            self.record(value, expires).encoded(span, TAG_SPAN),
         )?;
         Ok(())
     }
 
     /// Make every record carrying any of `tags`, written before this call,
     /// a miss for every reader of this store. One update of the shared tag
-    /// floors; no record is visited.
+    /// floors; no record is visited. Returns the token at the clock value
+    /// this invalidation took: a fill with it is ordered after this
+    /// invalidation and before any later one.
     pub fn invalidate_tags<T: AsRef<[u8]>>(
         &self,
         tags: &[T],
-    ) -> Result<()> {
-        let tags = self.tag_key.hash_all(tags)?;
+    ) -> Result<FillToken> {
+        let tags = self.tag_key.hash_set(tags)?;
         if tags.is_empty() {
             return Err(Error::TagsEmpty);
         }
-        self.floors.invalidate(&tags)
+        let clock = self.floors.invalidate(&tags)?;
+        Ok(FillToken::from_parts(self.floors.instance(), clock))
     }
 
     fn record<'a>(
         &self,
         value: &'a [u8],
-        ttl: Option<Duration>,
+        expires: u64,
     ) -> Record<'a> {
-        let expires =
-            ttl.map_or(0, |ttl| now_ms().saturating_add(duration_ms(ttl)));
         Record::body(value).stamp(expires).extra(self.namespace)
     }
 
@@ -280,6 +357,11 @@ impl SharedStore {
         let hash = blake3::keyed_hash(&self.key_hash, key);
         Key::from_bytes(hash.as_bytes()[..16].try_into().unwrap())
     }
+}
+
+/// A record's expiry stamp: zero for none.
+fn expires(ttl: Option<Duration>) -> u64 {
+    ttl.map_or(0, |ttl| now_ms().saturating_add(duration_ms(ttl)))
 }
 
 #[cfg(all(test, unix))]

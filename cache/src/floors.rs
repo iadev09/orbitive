@@ -271,9 +271,12 @@ impl TagFloors {
         self.instance
     }
 
-    /// What a tagged put stamps its record with. Read before the record is
-    /// written: an invalidation that advances the clock after this read
-    /// covers the record, wherever it lands.
+    /// What a tagged put stamps its record with, and what a fill token holds.
+    /// Read before the record is written, or before the backing read: an
+    /// invalidation that advances the clock after this read covers the
+    /// record, wherever it lands. One that advanced it before has a floor at
+    /// or below the value read, and the Acquire pairs with its advance, so
+    /// whatever its writer did first is visible after this read.
     pub(crate) fn clock(&self) -> u64 {
         self.header().clock.load(Ordering::Acquire)
     }
@@ -288,11 +291,12 @@ impl TagFloors {
         tags.all(|tag| clock >= self.set(tag).floor(tag))
     }
 
-    /// Advance the clock once and hold each tag to it.
+    /// Advance the clock once and hold each tag to it. Returns the clock
+    /// value this invalidation took, which is each tag's floor now.
     pub(crate) fn invalidate(
         &self,
         tags: &[u64],
-    ) -> Result<()> {
+    ) -> Result<u64> {
         if !self.owner.is_current() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -310,7 +314,7 @@ impl TagFloors {
         for &tag in tags {
             self.set(tag).raise(tag, floor);
         }
-        Ok(())
+        Ok(floor)
     }
 
     #[cfg(unix)]
